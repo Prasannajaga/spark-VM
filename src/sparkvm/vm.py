@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -12,10 +14,12 @@ from .api import FirecrackerAPIClient
 from .config import DEFAULT_MEMORY, DEFAULT_RUNTIME, DEFAULT_TIMEOUT_SEC, DEFAULT_VCPU, SparkVMConfig, build_config
 from .disk import ExecutionDisk
 from .errors import (
+    CleanupError,
     FirecrackerAPIError,
     FirecrackerBootError,
     FirecrackerProcessError,
     JobTimeoutError,
+    SparkVMError,
     RolloutError,
     RolloutNotFoundError,
 )
@@ -46,7 +50,6 @@ class SparkVM:
         timeout: float = DEFAULT_TIMEOUT_SEC,
         runtime: str = DEFAULT_RUNTIME,
         home_dir: str | Path | None = None,
-        keep_firecracker_log_on_success: bool = False,
     ) -> None:
         self.config: SparkVMConfig = build_config(
             vcpu=vcpu,
@@ -55,7 +58,6 @@ class SparkVM:
             runtime=runtime,
             home_dir=home_dir,
         )
-        self.keep_firecracker_log_on_success = bool(keep_firecracker_log_on_success)
         self._setup = ManagedSetup(self.config)
         self._images = ManagedImageResolver(self.config)
         self._rollouts = Rollout(home_dir=self.config.home_dir)
@@ -65,18 +67,15 @@ class SparkVM:
         self._validate_rollout_runtime(rollout_obj)
 
         self._setup.ensure_layout()
-        firecracker_bin = self._setup.firecracker_binary_path()
-        self._setup.assert_kvm_available()
-        runtime_image = self._images.resolve(self.config.runtime)
 
         vm_id = f"vm-{uuid4().hex[:12]}"
-        workdir = self.config.work_dir / vm_id
-        workdir.mkdir(parents=True, exist_ok=False)
+        worker_dir = self.config.workers_dir / vm_id
+        worker_dir.mkdir(parents=True, exist_ok=False)
 
-        socket_path = workdir / "firecracker.sock"
-        firecracker_log_path = workdir / "firecracker.log"
-        execution_disk_path = workdir / "rollout.ext4"
-        mount_base = workdir / "mnt"
+        socket_path = worker_dir / "firecracker.sock"
+        firecracker_log_path = worker_dir / "firecracker.log"
+        execution_disk_path = worker_dir / "rollout.ext4"
+        mount_base = worker_dir / "mnt"
 
         execution_disk = ExecutionDisk(
             rollout=rollout_obj,
@@ -84,27 +83,29 @@ class SparkVM:
             size_mb=_estimate_execution_disk_size_mb(rollout_obj.path),
             mount_base=mount_base,
         )
-        execution_disk.copy_rollout()
+        started_at = time.monotonic()
+        firecracker: FirecrackerProcess | None = None
 
-        firecracker = FirecrackerProcess(
-            firecracker_bin=firecracker_bin,
-            socket_path=socket_path,
-            log_path=firecracker_log_path,
-        )
-
-        run_succeeded = False
         try:
+            firecracker_bin = self._setup.firecracker_binary_path()
+            self._setup.assert_kvm_available()
+            runtime_image = self._images.resolve(self.config.runtime)
+
+            execution_disk.copy_rollout()
+            firecracker = FirecrackerProcess(
+                firecracker_bin=firecracker_bin,
+                socket_path=socket_path,
+                log_path=firecracker_log_path,
+            )
             firecracker.start(startup_timeout_sec=min(5.0, self.config.timeout_sec))
+
             api = FirecrackerAPIClient(socket_path)
             self._wait_for_firecracker_socket(api, firecracker, timeout_sec=self.config.timeout_sec)
-
             self._configure_microvm(
                 api=api,
                 runtime_image=runtime_image,
                 execution_disk_path=execution_disk_path,
             )
-
-            started_at = time.monotonic()
             api.put("/actions", {"action_type": "InstanceStart"})
 
             try:
@@ -120,36 +121,66 @@ class SparkVM:
                 duration_ms=duration_ms,
                 firecracker_log_path=firecracker_log_path,
             )
-            run_succeeded = True
+
+            self._cleanup_worker_on_completion(
+                worker_dir=worker_dir,
+                socket_path=socket_path,
+                firecracker=firecracker,
+                execution_disk=execution_disk,
+            )
             return result
         except (FirecrackerAPIError, FirecrackerProcessError) as exc:
-            detail = self._format_boot_failure(
-                vm_id=vm_id,
-                workdir=workdir,
-                socket_path=socket_path,
-                firecracker_log_path=firecracker_log_path,
-                reason=str(exc),
+            wrapped = FirecrackerBootError(
+                self._format_boot_failure(
+                    vm_id=vm_id,
+                    worker_dir=worker_dir,
+                    socket_path=socket_path,
+                    firecracker_log_path=firecracker_log_path,
+                    reason=str(exc),
+                )
             )
-            raise FirecrackerBootError(detail) from exc
-        finally:
-            try:
+            self._write_failure_record(
+                worker_dir=worker_dir,
+                vm_id=vm_id,
+                rollout=rollout_obj,
+                runtime=self.config.runtime,
+                error=wrapped,
+                duration_ms=int((time.monotonic() - started_at) * 1000),
+                firecracker_log_path=firecracker_log_path,
+                execution_disk_path=execution_disk_path,
+            )
+            if firecracker is not None:
                 firecracker.stop()
-            finally:
-                if run_succeeded and socket_path.exists():
-                    try:
-                        socket_path.unlink()
-                    except OSError:
-                        pass
-
-            if run_succeeded:
-                try:
-                    execution_disk.cleanup(remove_disk=True)
-                except Exception:
-                    # Cleanup failures should not hide the original run outcome.
-                    pass
-
-                if not self.keep_firecracker_log_on_success:
-                    shutil.rmtree(workdir, ignore_errors=True)
+            raise wrapped from exc
+        except SparkVMError as exc:
+            self._write_failure_record(
+                worker_dir=worker_dir,
+                vm_id=vm_id,
+                rollout=rollout_obj,
+                runtime=self.config.runtime,
+                error=exc,
+                duration_ms=int((time.monotonic() - started_at) * 1000),
+                firecracker_log_path=firecracker_log_path,
+                execution_disk_path=execution_disk_path,
+            )
+            if firecracker is not None:
+                firecracker.stop()
+            raise
+        except Exception as exc:
+            wrapped = FirecrackerBootError(str(exc))
+            self._write_failure_record(
+                worker_dir=worker_dir,
+                vm_id=vm_id,
+                rollout=rollout_obj,
+                runtime=self.config.runtime,
+                error=wrapped,
+                duration_ms=int((time.monotonic() - started_at) * 1000),
+                firecracker_log_path=firecracker_log_path,
+                execution_disk_path=execution_disk_path,
+            )
+            if firecracker is not None:
+                firecracker.stop()
+            raise wrapped from exc
 
     def _resolve_rollout(self, rollout: str | RolloutItem) -> RolloutItem:
         if isinstance(rollout, RolloutItem):
@@ -219,14 +250,14 @@ class SparkVM:
         self,
         *,
         vm_id: str,
-        workdir: Path,
+        worker_dir: Path,
         socket_path: Path,
         firecracker_log_path: Path,
         reason: str,
     ) -> str:
         parts = [
             f"Firecracker boot failed for vm_id={vm_id}.",
-            f"Workdir: {workdir}",
+            f"Worker dir: {worker_dir}",
             f"Socket path: {socket_path}",
             f"Check Firecracker log: {firecracker_log_path}",
             f"Reason: {reason}",
@@ -236,6 +267,74 @@ class SparkVM:
             parts.append("Firecracker log tail:")
             parts.append(tail)
         return "\n".join(parts)
+
+    def _cleanup_worker_on_completion(
+        self,
+        *,
+        worker_dir: Path,
+        socket_path: Path,
+        firecracker: FirecrackerProcess | None,
+        execution_disk: ExecutionDisk,
+    ) -> None:
+        errors: list[Exception] = []
+
+        if firecracker is not None:
+            try:
+                firecracker.stop()
+            except Exception as exc:  # pragma: no cover - defensive
+                errors.append(exc)
+
+        if socket_path.exists():
+            try:
+                socket_path.unlink()
+            except OSError as exc:
+                errors.append(exc)
+
+        try:
+            execution_disk.cleanup(remove_disk=True)
+        except Exception as exc:
+            errors.append(exc)
+
+        try:
+            shutil.rmtree(worker_dir, ignore_errors=False)
+        except OSError as exc:
+            errors.append(exc)
+
+        if errors:
+            raise CleanupError(f"Worker cleanup failed for {worker_dir}: {errors[0]}")
+
+    def _write_failure_record(
+        self,
+        *,
+        worker_dir: Path,
+        vm_id: str,
+        rollout: RolloutItem,
+        runtime: str,
+        error: Exception,
+        duration_ms: int,
+        firecracker_log_path: Path,
+        execution_disk_path: Path,
+    ) -> None:
+        payload = {
+            "vm_id": vm_id,
+            "rollout_id": rollout.id,
+            "rollout_name": rollout.name,
+            "runtime": runtime,
+            "status": "failed",
+            "error_type": type(error).__name__,
+            "error_message": str(error),
+            "duration_ms": duration_ms,
+            "firecracker_log_path": str(firecracker_log_path),
+            "execution_disk_path": str(execution_disk_path),
+            "created_at": datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        }
+
+        failure_path = worker_dir / "failure.json"
+        try:
+            failure_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        except OSError:
+            # Failure metadata write should not mask original errors.
+            pass
 
     def _read_log_tail(self, log_path: Path, *, max_lines: int = 40) -> str:
         if not log_path.exists():

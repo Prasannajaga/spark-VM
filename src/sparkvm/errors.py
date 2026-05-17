@@ -81,6 +81,18 @@ class RolloutMetadataError(RolloutError):
     """Rollout metadata file is missing/corrupt/invalid."""
 
 
+class WorkerError(SparkVMError):
+    """Worker persistence/listing/deletion failure."""
+
+
+class WorkerNotFoundError(WorkerError):
+    """Requested worker does not exist."""
+
+
+class WorkerMetadataError(WorkerError):
+    """Worker metadata file is missing/corrupt/invalid."""
+
+
 class ExecutionDiskError(JobDiskError):
     """Execution disk build/mount/read failure."""
 
@@ -106,5 +118,8 @@ __all__ = [
     "RolloutError",
     "RolloutNotFoundError",
     "RolloutMetadataError",
+    "WorkerError",
+    "WorkerNotFoundError",
+    "WorkerMetadataError",
     "ExecutionDiskError",
 ]

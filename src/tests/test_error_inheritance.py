@@ -24,6 +24,9 @@ from sparkvm.errors import (
     RolloutMetadataError,
     RolloutNotFoundError,
     SparkVMConfigError,
+    WorkerError,
+    WorkerMetadataError,
+    WorkerNotFoundError,
 )
 
 
@@ -51,6 +54,11 @@ class ErrorInheritanceTest(unittest.TestCase):
         self.assertTrue(issubclass(RolloutError, SparkVMError))
         self.assertTrue(issubclass(RolloutNotFoundError, RolloutError))
         self.assertTrue(issubclass(RolloutMetadataError, RolloutError))
+
+    def test_worker_hierarchy(self) -> None:
+        self.assertTrue(issubclass(WorkerError, SparkVMError))
+        self.assertTrue(issubclass(WorkerNotFoundError, WorkerError))
+        self.assertTrue(issubclass(WorkerMetadataError, WorkerError))
 
 
 if __name__ == "__main__":

@@ -62,7 +62,7 @@ Implemented components:
 1. User creates a rollout with files + command.
 2. SparkVM persists rollout files and metadata under `~/.sparkvm/rollouts`.
 3. User calls `SparkVM.run(rollout_id)` (or passes a `Rollout` object).
-4. SparkVM creates a temporary execution disk under `~/.sparkvm/work/<vm-id>/rollout.ext4`.
+4. SparkVM creates a temporary execution disk under `~/.sparkvm/workers/<vm-id>/rollout.ext4`.
 5. Rollout contents are copied into the execution disk.
 6. Firecracker runs with:
    - managed rootfs as `/dev/vda`
@@ -103,3 +103,19 @@ Implemented components:
 - Practical impact:
   - prevents false timeouts during `/boot-source`, `/machine-config`, `/drives/*`, and `/actions`.
   - improves startup/run diagnostics by preserving socket/log context in boot failures.
+
+## 6. Workers
+
+- Rollouts are persistent code bundles stored under `~/.sparkvm/rollouts/`.
+- Workers are preserved failed execution attempts stored under `~/.sparkvm/workers/vm-*`.
+- Successful runs clean up their worker directory automatically.
+- Normal user-code failures (non-zero `exit_code`) still return `VMResult` and also clean up worker directories by default.
+- Infrastructure/runtime failures preserve worker artifacts for debugging.
+- Each preserved failed worker includes:
+  - `firecracker.log`
+  - `failure.json`
+  - `rollout.ext4` (when present)
+- Worker inspection and lifecycle is available through CLI:
+  - `sparkvm workers list`
+  - `sparkvm workers view <vm-id> [--tail N|--failure|--path]`
+  - `sparkvm workers delete <vm-id> [--force]`

@@ -175,7 +175,7 @@ class ExecutionDisk:
 
             stdout = ""
             stderr = ""
-            exit_code = 1
+            exit_code: int | None = None
 
             if _debugfs_dump_file(self.path, "/output.log", output_log_path):
                 stdout = output_log_path.read_text(encoding="utf-8")
@@ -186,7 +186,13 @@ class ExecutionDisk:
                 try:
                     exit_code = int(raw_exit)
                 except ValueError:
-                    exit_code = 1
+                    raise ExecutionDiskError(
+                        f"Guest produced invalid exit_code value: {raw_exit!r}. Execution considered failed."
+                    )
+            else:
+                raise ExecutionDiskError(
+                    "Guest did not produce /exit_code on execution disk. Execution considered failed."
+                )
 
             return VMResult(
                 rollout_id=self.rollout.id,

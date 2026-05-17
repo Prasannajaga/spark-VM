@@ -39,7 +39,7 @@ class SparkVMPaths:
     home_dir: Path
     bin_dir: Path
     image_dir: Path
-    work_dir: Path
+    workers_dir: Path
     cache_dir: Path
     firecracker_bin: Path
     kernel_image: Path
@@ -67,14 +67,14 @@ def get_sparkvm_paths(home_dir: str | Path | None = None) -> SparkVMPaths:
     resolved_home = resolve_home_dir(home_dir)
     bin_dir = resolved_home / "bin"
     image_dir = resolved_home / "images"
-    work_dir = resolved_home / "work"
+    workers_dir = resolved_home / "workers"
     cache_dir = resolved_home / "cache"
 
     return SparkVMPaths(
         home_dir=resolved_home,
         bin_dir=bin_dir,
         image_dir=image_dir,
-        work_dir=work_dir,
+        workers_dir=workers_dir,
         cache_dir=cache_dir,
         firecracker_bin=bin_dir / "firecracker",
         kernel_image=image_dir / KERNEL_FILENAME,
@@ -87,7 +87,7 @@ def paths_from_config(config: SparkVMConfig) -> SparkVMPaths:
         home_dir=config.home_dir,
         bin_dir=config.bin_dir,
         image_dir=config.image_dir,
-        work_dir=config.work_dir,
+        workers_dir=config.workers_dir,
         cache_dir=config.cache_dir,
         firecracker_bin=config.bin_dir / "firecracker",
         kernel_image=config.image_dir / KERNEL_FILENAME,
@@ -100,7 +100,7 @@ def ensure_directories(paths: SparkVMPaths) -> None:
         paths.home_dir,
         paths.bin_dir,
         paths.image_dir,
-        paths.work_dir,
+        paths.workers_dir,
         paths.cache_dir,
     ):
         directory.mkdir(parents=True, exist_ok=True)

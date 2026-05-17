@@ -1,0 +1,83 @@
+from __future__ import annotations
+
+import io
+import json
+import sys
+import tempfile
+import unittest
+from contextlib import redirect_stdout
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from sparkvm.cli import main as cli_main
+
+
+class CLIWorkersTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory(prefix="sparkvm-cli-workers-test-")
+        self.home = Path(self.tmp.name)
+        self.worker_dir = self.home / "workers" / "vm-abc123"
+        self.worker_dir.mkdir(parents=True, exist_ok=True)
+        (self.worker_dir / "firecracker.log").write_text("line1\nline2\nline3\n", encoding="utf-8")
+        payload = {
+            "vm_id": "vm-abc123",
+            "rollout_id": "rollout-xyz",
+            "rollout_name": "demo",
+            "runtime": "python-3.12",
+            "status": "failed",
+            "error_type": "FirecrackerBootError",
+            "error_message": "boom",
+            "duration_ms": 10,
+            "firecracker_log_path": str(self.worker_dir / "firecracker.log"),
+            "execution_disk_path": str(self.worker_dir / "rollout.ext4"),
+            "created_at": "2026-05-17T12:00:00Z",
+        }
+        (self.worker_dir / "failure.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _run_cli(self, argv: list[str]) -> tuple[int, str]:
+        stream = io.StringIO()
+        with redirect_stdout(stream):
+            code = cli_main(argv)
+        return code, stream.getvalue()
+
+    def test_workers_list(self) -> None:
+        code, out = self._run_cli(["--home-dir", str(self.home), "workers", "list"])
+        self.assertEqual(0, code)
+        self.assertIn("vm-abc123", out)
+        self.assertIn("FirecrackerBootError", out)
+
+    def test_workers_view_default_log(self) -> None:
+        code, out = self._run_cli(["--home-dir", str(self.home), "workers", "view", "vm-abc123"])
+        self.assertEqual(0, code)
+        self.assertIn("line1", out)
+        self.assertIn("line3", out)
+
+    def test_workers_view_tail(self) -> None:
+        code, out = self._run_cli(["--home-dir", str(self.home), "workers", "view", "vm-abc123", "--tail", "2"])
+        self.assertEqual(0, code)
+        self.assertNotIn("line1", out)
+        self.assertIn("line2", out)
+        self.assertIn("line3", out)
+
+    def test_workers_view_failure(self) -> None:
+        code, out = self._run_cli(["--home-dir", str(self.home), "workers", "view", "vm-abc123", "--failure"])
+        self.assertEqual(0, code)
+        self.assertIn('"vm_id": "vm-abc123"', out)
+
+    def test_workers_view_path(self) -> None:
+        code, out = self._run_cli(["--home-dir", str(self.home), "workers", "view", "vm-abc123", "--path"])
+        self.assertEqual(0, code)
+        self.assertIn(str(self.worker_dir), out)
+
+    def test_workers_delete_force(self) -> None:
+        code, _ = self._run_cli(["--home-dir", str(self.home), "workers", "delete", "vm-abc123", "--force"])
+        self.assertEqual(0, code)
+        self.assertFalse(self.worker_dir.exists())
+
+
+if __name__ == "__main__":
+    unittest.main()

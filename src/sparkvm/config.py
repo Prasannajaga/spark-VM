@@ -25,7 +25,7 @@ class SparkVMConfig:
     timeout_sec: float
     runtime: str
     home_dir: Path
-    work_dir: Path
+    workers_dir: Path
     bin_dir: Path
     image_dir: Path
     cache_dir: Path
@@ -105,7 +105,7 @@ def build_config(
         timeout_sec=float(timeout),
         runtime=runtime.strip(),
         home_dir=resolved_home,
-        work_dir=resolved_home / "work",
+        workers_dir=resolved_home / "workers",
         bin_dir=resolved_home / "bin",
         image_dir=resolved_home / "images",
         cache_dir=resolved_home / "cache",

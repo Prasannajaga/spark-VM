@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sparkvm.cleanup import cleanup_all, cleanup_rollouts, cleanup_work
+from sparkvm.cleanup import cleanup_all, cleanup_rollouts, cleanup_workers
 from sparkvm.cli import main as cli_main
 from sparkvm.config import DEFAULT_MEMORY, DEFAULT_RUNTIME, DEFAULT_TIMEOUT_SEC, DEFAULT_VCPU, build_config
 
@@ -58,9 +58,9 @@ class CleanupTest(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def _write_work_state(self) -> None:
-        work_dir = self.home / "work"
-        vm_dir = work_dir / "vm-abc123"
+    def _write_workers_state(self) -> None:
+        workers_dir = self.home / "workers"
+        vm_dir = workers_dir / "vm-abc123"
         vm_dir.mkdir(parents=True, exist_ok=True)
         (vm_dir / "rollout.ext4").write_bytes(b"fake-ext4")
         (vm_dir / "firecracker.log").write_text("log\n", encoding="utf-8")
@@ -75,14 +75,14 @@ class CleanupTest(unittest.TestCase):
         metadata = json.loads((rollouts_dir / "metadata.json").read_text(encoding="utf-8"))
         self.assertEqual({"version": 1, "rollouts": []}, metadata)
 
-    def test_cleanup_work_removes_vm_directories(self) -> None:
-        self._write_work_state()
-        cleanup_work(self.config, force=True, dry_run=False)
-        self.assertFalse((self.home / "work" / "vm-abc123").exists())
+    def test_cleanup_workers_removes_vm_directories(self) -> None:
+        self._write_workers_state()
+        cleanup_workers(self.config, force=True, dry_run=False)
+        self.assertFalse((self.home / "workers" / "vm-abc123").exists())
 
     def test_cleanup_all_removes_rollouts_and_work_but_preserves_assets(self) -> None:
         self._write_rollout_state()
-        self._write_work_state()
+        self._write_workers_state()
 
         bin_dir = self.home / "bin"
         image_dir = self.home / "images"
@@ -102,7 +102,7 @@ class CleanupTest(unittest.TestCase):
         self.assertTrue((bin_dir / "firecracker").exists())
         self.assertTrue((image_dir / "vmlinux").exists())
         self.assertTrue((image_dir / "python-3.12-rootfs.ext4").exists())
-        self.assertFalse((self.home / "work" / "vm-abc123").exists())
+        self.assertFalse((self.home / "workers" / "vm-abc123").exists())
         self.assertFalse((self.home / "rollouts" / "rollout-example-1").exists())
 
     def test_cleanup_without_force_declined_prompt_deletes_nothing(self) -> None:
@@ -126,6 +126,14 @@ class CleanupTest(unittest.TestCase):
         self.assertFalse(rollout_dir.exists())
         metadata = json.loads((self.home / "rollouts" / "metadata.json").read_text(encoding="utf-8"))
         self.assertEqual({"version": 1, "rollouts": []}, metadata)
+
+    def test_cleanup_workers_force(self) -> None:
+        self._write_workers_state()
+        worker_dir = self.home / "workers" / "vm-abc123"
+
+        code = cli_main(["--home-dir", str(self.home), "cleanup", "workers", "--force"])
+        self.assertEqual(0, code)
+        self.assertFalse(worker_dir.exists())
 
 
 if __name__ == "__main__":

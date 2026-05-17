@@ -1,4 +1,4 @@
-"""Cleanup helpers for rollouts and temporary VM work directories."""
+"""Cleanup helpers for rollouts and preserved worker directories."""
 
 from __future__ import annotations
 
@@ -30,8 +30,8 @@ def _rollouts_dir(config: SparkVMConfig) -> Path:
     return config.home_dir / "rollouts"
 
 
-def _work_dir(config: SparkVMConfig) -> Path:
-    return config.work_dir
+def _workers_dir(config: SparkVMConfig) -> Path:
+    return config.workers_dir
 
 
 def _metadata_payload() -> dict[str, object]:
@@ -119,14 +119,14 @@ def cleanup_rollouts(config: SparkVMConfig, *, force: bool = False, dry_run: boo
         _write_rollout_metadata_reset(rollouts_dir)
 
 
-def cleanup_work(config: SparkVMConfig, *, force: bool = False, dry_run: bool = False) -> None:
+def cleanup_workers(config: SparkVMConfig, *, force: bool = False, dry_run: bool = False) -> None:
     del force  # CLI handles user confirmation before calling this function.
 
-    work_dir = _work_dir(config)
-    if not work_dir.exists():
+    workers_dir = _workers_dir(config)
+    if not workers_dir.exists():
         return
 
-    vm_dirs = [path for path in work_dir.iterdir() if path.is_dir() and path.name.startswith("vm-")]
+    vm_dirs = [path for path in workers_dir.iterdir() if path.is_dir() and path.name.startswith("vm-")]
     for vm_dir in vm_dirs:
         if dry_run:
             continue
@@ -137,7 +137,7 @@ def cleanup_work(config: SparkVMConfig, *, force: bool = False, dry_run: bool = 
         return
 
     # Remove stale socket/image files left behind outside vm-* directories.
-    for candidate in work_dir.rglob("*"):
+    for candidate in workers_dir.rglob("*"):
         if candidate.name not in {"firecracker.sock", "rollout.ext4"}:
             continue
         try:
@@ -149,11 +149,11 @@ def cleanup_work(config: SparkVMConfig, *, force: bool = False, dry_run: bool = 
 
 def cleanup_all(config: SparkVMConfig, *, force: bool = False, dry_run: bool = False) -> None:
     cleanup_rollouts(config, force=force, dry_run=dry_run)
-    cleanup_work(config, force=force, dry_run=dry_run)
+    cleanup_workers(config, force=force, dry_run=dry_run)
 
 
 __all__ = [
     "cleanup_rollouts",
-    "cleanup_work",
+    "cleanup_workers",
     "cleanup_all",
 ]
