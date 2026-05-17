@@ -88,3 +88,18 @@ Implemented components:
     - rollout execution by id
     - expected stdout + exit code + `result.passed`
     - rollout cleanup by id.
+
+## 5. Firecracker API socket stability fix
+
+- Previous behavior:
+  - the Unix-socket HTTP client read until socket EOF.
+  - Firecracker configuration endpoints commonly return `204 No Content` and may keep the socket open briefly.
+  - this could trigger false request timeouts during otherwise successful API calls.
+- Updated behavior:
+  - the client now reads headers first, parses status line + headers, and handles response completion using `Content-Length`.
+  - `204 No Content` returns immediately without waiting for EOF.
+  - non-`204` responses read exactly `Content-Length` bytes for the response body.
+  - timeout and socket errors are reported with explicit API method/path context.
+- Practical impact:
+  - prevents false timeouts during `/boot-source`, `/machine-config`, `/drives/*`, and `/actions`.
+  - improves startup/run diagnostics by preserving socket/log context in boot failures.

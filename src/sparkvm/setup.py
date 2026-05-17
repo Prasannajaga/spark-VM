@@ -19,7 +19,7 @@ FIRECRACKER_VERSION = "v1.15.1"
 PYTHON_DOCKER_IMAGE = "python:3.12-slim"
 PYTHON_ROOTFS_FILENAME = "python-3.12-rootfs.ext4"
 KERNEL_FILENAME = "vmlinux"
-REQUIRED_HOST_TOOLS = ("curl", "tar", "dd", "mkfs.ext4", "mount", "umount")
+REQUIRED_HOST_TOOLS = ("curl", "tar", "dd", "mkfs.ext4", "debugfs")
 OPTIONAL_HOST_TOOLS = ("docker",)
 SUPPORTED_ARCHES = {"x86_64", "aarch64"}
 
@@ -349,7 +349,7 @@ def _estimate_rootfs_size_mib(rootfs_dir: Path) -> int:
     return max(1024, int(total_mib) + 256)
 
 
-def _create_ext4_image(image_path: Path, size_mib: int) -> None:
+def _create_ext4_image(image_path: Path, size_mib: int, *, source_dir: Path | None = None) -> None:
     _run_checked([
         "dd",
         "if=/dev/zero",
@@ -358,11 +358,11 @@ def _create_ext4_image(image_path: Path, size_mib: int) -> None:
         f"count={size_mib}",
         "status=none",
     ])
-    _run_checked(["mkfs.ext4", "-F", str(image_path)])
-
-
-def _copy_tree_into_mount(src: Path, dst: Path) -> None:
-    _run_checked(["cp", "-a", f"{src}/.", str(dst)])
+    mkfs_cmd = ["mkfs.ext4", "-F"]
+    if source_dir is not None:
+        mkfs_cmd.extend(["-d", str(source_dir)])
+    mkfs_cmd.append(str(image_path))
+    _run_checked(mkfs_cmd)
 
 
 def _build_python_rootfs_image(
@@ -386,9 +386,6 @@ def _build_python_rootfs_image(
             export_tar = tmp_dir / "rootfs.tar"
             export_root = tmp_dir / "exported-rootfs"
             export_root.mkdir(parents=True, exist_ok=True)
-            mount_dir = tmp_dir / "mnt"
-            mount_dir.mkdir(parents=True, exist_ok=True)
-
             _emit_progress(progress, f"Pulling Docker image: {PYTHON_DOCKER_IMAGE}")
             _run_checked(["docker", "pull", PYTHON_DOCKER_IMAGE])
             container_id = _docker_create(PYTHON_DOCKER_IMAGE)
@@ -403,28 +400,17 @@ def _build_python_rootfs_image(
 
             size_mib = _estimate_rootfs_size_mib(export_root)
             image_tmp = tmp_dir / "python-rootfs.ext4"
-            _emit_progress(progress, f"Creating ext4 image ({size_mib} MiB)")
-            _create_ext4_image(image_tmp, size_mib)
-
-            mounted = False
+            _emit_progress(progress, f"Creating ext4 image ({size_mib} MiB) and populating root filesystem")
             try:
-                _emit_progress(progress, "Mounting rootfs image")
-                _run_checked(["mount", "-o", "loop", str(image_tmp), str(mount_dir)])
-                mounted = True
-                _emit_progress(progress, "Copying root filesystem into image")
-                _copy_tree_into_mount(export_root, mount_dir)
-                _run_checked(["sync"])
+                _create_ext4_image(image_tmp, size_mib, source_dir=export_root)
             except SparkVMSetupError as exc:
-                detail = str(exc)
-                if "Operation not permitted" in detail or "permission denied" in detail.lower():
+                detail = str(exc).lower()
+                if "invalid option" in detail and "-d" in detail:
                     raise SparkVMSetupError(
-                        "Could not mount loopback rootfs image. Missing mount permissions on host."
+                        "mkfs.ext4 on this host does not support '-d' for populating a filesystem image. "
+                        "Install e2fsprogs with mkfs.ext4 '-d' support."
                     ) from exc
                 raise
-            finally:
-                if mounted:
-                    _emit_progress(progress, "Unmounting rootfs image")
-                    _run_checked(["umount", str(mount_dir)])
 
             shutil.move(str(image_tmp), paths.python_rootfs)
             _emit_progress(progress, f"Python rootfs ready: {paths.python_rootfs}")

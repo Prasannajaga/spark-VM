@@ -1,0 +1,110 @@
+"""SparkVM exception hierarchy."""
+
+
+class SparkVMError(Exception):
+    """Base SparkVM SDK exception."""
+
+
+class SparkVMConfigError(SparkVMError):
+    """Invalid SparkVM configuration."""
+
+
+class InvalidMemoryError(SparkVMConfigError):
+    """Memory format or value is invalid."""
+
+
+class InvalidResourceError(SparkVMConfigError):
+    """A resource value (vcpu, timeout, etc.) is invalid."""
+
+
+class SparkVMSetupError(SparkVMError):
+    """SparkVM setup failed."""
+
+
+class FirecrackerBinaryNotInstalled(SparkVMSetupError):
+    """Firecracker binary is not installed in the managed location."""
+
+
+class RuntimeImageNotFound(SparkVMSetupError):
+    """Managed runtime image could not be found."""
+
+
+class KVMUnavailableError(SparkVMSetupError):
+    """KVM is unavailable on the host."""
+
+
+class FirecrackerProcessError(SparkVMError):
+    """Firecracker process lifecycle failure."""
+
+
+class FirecrackerAPIError(SparkVMError):
+    """Firecracker API request/response failure."""
+
+
+class FirecrackerBootError(SparkVMError):
+    """Firecracker VM boot failure."""
+
+
+class JobDiskError(SparkVMError):
+    """Job disk build or IO failure."""
+
+
+class JobTimeoutError(SparkVMError):
+    """Guest job timed out."""
+
+
+class GuestExecutionError(SparkVMError):
+    """Guest job execution failed."""
+
+
+class GuestOOMError(GuestExecutionError):
+    """Guest process was OOM-killed."""
+
+
+class HostDiskPressureError(SparkVMError):
+    """Host disk pressure prevented execution."""
+
+
+class CleanupError(SparkVMError):
+    """Cleanup failed after execution."""
+
+
+class RolloutError(SparkVMError):
+    """Rollout creation/loading/deletion failure."""
+
+
+class RolloutNotFoundError(RolloutError):
+    """Requested rollout does not exist."""
+
+
+class RolloutMetadataError(RolloutError):
+    """Rollout metadata file is missing/corrupt/invalid."""
+
+
+class ExecutionDiskError(JobDiskError):
+    """Execution disk build/mount/read failure."""
+
+
+__all__ = [
+    "SparkVMError",
+    "SparkVMConfigError",
+    "InvalidMemoryError",
+    "InvalidResourceError",
+    "SparkVMSetupError",
+    "FirecrackerBinaryNotInstalled",
+    "RuntimeImageNotFound",
+    "KVMUnavailableError",
+    "FirecrackerProcessError",
+    "FirecrackerAPIError",
+    "FirecrackerBootError",
+    "JobDiskError",
+    "JobTimeoutError",
+    "GuestExecutionError",
+    "GuestOOMError",
+    "HostDiskPressureError",
+    "CleanupError",
+    "RolloutError",
+    "RolloutNotFoundError",
+    "RolloutMetadataError",
+    "ExecutionDiskError",
+]
