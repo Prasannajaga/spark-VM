@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import sys
 
+from .cleanup import cleanup_all, cleanup_rollouts, cleanup_work
+from .config import DEFAULT_MEMORY, DEFAULT_RUNTIME, DEFAULT_TIMEOUT_SEC, DEFAULT_VCPU, build_config
 from .errors import SparkVMError
 from .setup import (
     doctor_status,
@@ -33,6 +35,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="Reinstall managed assets even when they already exist",
+    )
+
+    cleanup_parser = subparsers.add_parser("cleanup", help="Cleanup rollouts and/or temporary VM work directories")
+    cleanup_parser.add_argument("target", choices=["rollouts", "work", "all"], help="Cleanup target")
+    cleanup_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Skip confirmation prompt before deleting files",
     )
 
     return parser
@@ -64,6 +74,40 @@ def _run_setup(home_dir: str | None, runtime: str | None, force: bool) -> int:
     return 0
 
 
+def _confirm_cleanup(target: str, *, force: bool) -> bool:
+    if force:
+        return True
+
+    response = input(f"This will delete {target}. Continue? [y/N] ").strip().lower()
+    return response in {"y", "yes"}
+
+
+def _run_cleanup(home_dir: str | None, target: str, force: bool) -> int:
+    if not _confirm_cleanup(target, force=force):
+        print("Aborted.")
+        return 0
+
+    config = build_config(
+        vcpu=DEFAULT_VCPU,
+        memory=DEFAULT_MEMORY,
+        timeout=DEFAULT_TIMEOUT_SEC,
+        runtime=DEFAULT_RUNTIME,
+        home_dir=home_dir,
+    )
+
+    if target == "rollouts":
+        cleanup_rollouts(config, force=force, dry_run=False)
+    elif target == "work":
+        cleanup_work(config, force=force, dry_run=False)
+    elif target == "all":
+        cleanup_all(config, force=force, dry_run=False)
+    else:
+        raise SparkVMError(f"Unsupported cleanup target: {target}")
+
+    print(f"SparkVM cleanup complete: {target}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -74,6 +118,9 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "setup":
             return _run_setup(args.home_dir, args.runtime, args.force)
+
+        if args.command == "cleanup":
+            return _run_cleanup(args.home_dir, args.target, args.force)
 
         parser.error(f"Unknown command: {args.command}")
         return 2

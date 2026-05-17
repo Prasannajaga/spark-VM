@@ -46,6 +46,7 @@ class SparkVM:
         timeout: float = DEFAULT_TIMEOUT_SEC,
         runtime: str = DEFAULT_RUNTIME,
         home_dir: str | Path | None = None,
+        keep_firecracker_log_on_success: bool = False,
     ) -> None:
         self.config: SparkVMConfig = build_config(
             vcpu=vcpu,
@@ -54,6 +55,7 @@ class SparkVM:
             runtime=runtime,
             home_dir=home_dir,
         )
+        self.keep_firecracker_log_on_success = bool(keep_firecracker_log_on_success)
         self._setup = ManagedSetup(self.config)
         self._images = ManagedImageResolver(self.config)
         self._rollouts = Rollout(home_dir=self.config.home_dir)
@@ -133,20 +135,21 @@ class SparkVM:
             try:
                 firecracker.stop()
             finally:
-                if socket_path.exists():
+                if run_succeeded and socket_path.exists():
                     try:
                         socket_path.unlink()
                     except OSError:
                         pass
 
-            try:
-                execution_disk.cleanup(remove_disk=run_succeeded)
-            except Exception:
-                # Cleanup failures should not hide the original run outcome.
-                pass
-
             if run_succeeded:
-                shutil.rmtree(workdir, ignore_errors=True)
+                try:
+                    execution_disk.cleanup(remove_disk=True)
+                except Exception:
+                    # Cleanup failures should not hide the original run outcome.
+                    pass
+
+                if not self.keep_firecracker_log_on_success:
+                    shutil.rmtree(workdir, ignore_errors=True)
 
     def _resolve_rollout(self, rollout: str | RolloutItem) -> RolloutItem:
         if isinstance(rollout, RolloutItem):
