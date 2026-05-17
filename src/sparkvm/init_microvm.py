@@ -6,7 +6,7 @@ import signal
 import sys
 from typing import NoReturn
 
-from sparkVM.firecracker_vm import FirecrackerVM
+from sparkvm.firecracker_vm import FirecrackerVM
 
 
 def parse_args() -> argparse.Namespace:

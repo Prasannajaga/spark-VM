@@ -1,0 +1,25 @@
+[project]
+name = "sparkvm"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+sparkvm = "sparkvm.cli:main"
+
+[build-system]
+requires = ["hatchling>=1.24.2"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sparkvm"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "src/sparkvm",
+  "tests",
+  "pyproject.toml",
+]
+
+[tool.uv]
+package = true
