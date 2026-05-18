@@ -61,7 +61,8 @@ class _FakeExecutionDisk:
         self.path = path
         _FakeExecutionDisk.last_size_mb = size_mb
 
-    def copy_rollout(self) -> None:
+    def copy_rollout(self, runtime_files: dict[str, str] | None = None) -> None:
+        del runtime_files
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_bytes(b"fake-ext4")
 

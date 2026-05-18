@@ -107,7 +107,8 @@ class VMWorkersPolicyTest(unittest.TestCase):
     def test_successful_run_cleans_up_worker_directory(self) -> None:
         vm = self._new_vm()
 
-        def _fake_copy_rollout(self_obj) -> None:  # noqa: ANN001
+        def _fake_copy_rollout(self_obj, runtime_files=None) -> None:  # noqa: ANN001
+            del runtime_files
             self_obj.path.parent.mkdir(parents=True, exist_ok=True)
             self_obj.path.write_bytes(b"fake-ext4")
 
@@ -136,10 +137,11 @@ class VMWorkersPolicyTest(unittest.TestCase):
         worker_entries = list((self.home / "workers").glob("vm-*"))
         self.assertEqual([], worker_entries)
 
-    def test_non_zero_exit_code_cleans_up_worker_directory(self) -> None:
+    def test_non_zero_exit_code_preserves_worker_directory(self) -> None:
         vm = self._new_vm()
 
-        def _fake_copy_rollout(self_obj) -> None:  # noqa: ANN001
+        def _fake_copy_rollout(self_obj, runtime_files=None) -> None:  # noqa: ANN001
+            del runtime_files
             self_obj.path.parent.mkdir(parents=True, exist_ok=True)
             self_obj.path.write_bytes(b"fake-ext4")
 
@@ -167,7 +169,11 @@ class VMWorkersPolicyTest(unittest.TestCase):
         self.assertEqual(2, result.exit_code)
         self.assertFalse(result.passed)
         worker_entries = list((self.home / "workers").glob("vm-*"))
-        self.assertEqual([], worker_entries)
+        self.assertEqual(1, len(worker_entries))
+        failure_path = worker_entries[0] / "failure.json"
+        self.assertTrue(failure_path.exists())
+        payload = json.loads(failure_path.read_text(encoding="utf-8"))
+        self.assertEqual("run_failed", payload["result_status"])
 
     def test_infrastructure_failure_preserves_worker_and_writes_failure_json(self) -> None:
         vm = SparkVM(home_dir=self.home)
@@ -185,7 +191,7 @@ class VMWorkersPolicyTest(unittest.TestCase):
         failure_path = worker_dirs[0] / "failure.json"
         self.assertTrue(failure_path.exists())
         payload = json.loads(failure_path.read_text(encoding="utf-8"))
-        self.assertEqual("infrastructure_failed", payload["status"])
+        self.assertEqual("failed", payload["status"])
         self.assertEqual("FirecrackerBinaryNotInstalled", payload["error_type"])
         self.assertEqual(self.rollout.id, payload["rollout_id"])
 

@@ -81,6 +81,10 @@ class CleanupError(SparkVMError):
     """Cleanup failed after execution."""
 
 
+class NetworkSetupError(SparkVMError):
+    """Host-side VM network setup/teardown failure."""
+
+
 class RolloutError(SparkVMError):
     """Rollout creation/loading/deletion failure."""
 
@@ -138,6 +142,7 @@ __all__ = [
     "GuestOOMError",
     "HostDiskPressureError",
     "CleanupError",
+    "NetworkSetupError",
     "RolloutError",
     "RolloutNotFoundError",
     "RolloutMetadataError",

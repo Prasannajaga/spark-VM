@@ -27,6 +27,7 @@ class SparkVMConfig:
     memory_mib: int
     timeout_sec: float
     runtime: str
+    network_enabled: bool
     home_dir: Path
     workers_dir: Path
     bin_dir: Path
@@ -117,13 +118,16 @@ def build_config(
     timeout: float,
     runtime: str | None = None,
     base_image: str | None = None,
-    home_dir: str | Path | None,
+    network: bool = False,
+    home_dir: str | Path | None = None,
 ) -> SparkVMConfig:
     if type(vcpu) is not int or vcpu <= 0:
         raise InvalidResourceError("vcpu must be a positive integer.")
 
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
         raise InvalidResourceError("timeout must be a positive number of seconds.")
+    if not isinstance(network, bool):
+        raise InvalidResourceError("network must be a boolean.")
 
     selected_runtime = runtime if runtime is not None else base_image
     if selected_runtime is None:
@@ -136,6 +140,7 @@ def build_config(
         memory_mib=parse_memory_to_mib(memory),
         timeout_sec=float(timeout),
         runtime=_validate_runtime(selected_runtime),
+        network_enabled=network,
         home_dir=resolved_home,
         workers_dir=resolved_home / "workers",
         bin_dir=resolved_home / "bin",

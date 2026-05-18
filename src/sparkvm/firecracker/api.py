@@ -28,6 +28,22 @@ class FirecrackerAPIClient:
     def get(self, path: str) -> FirecrackerAPIResponse:
         return self._request("GET", path, None)
 
+    def attach_network(
+        self,
+        *,
+        iface_id: str = "eth0",
+        host_dev_name: str,
+        guest_mac: str,
+    ) -> FirecrackerAPIResponse:
+        return self.put(
+            f"/network-interfaces/{iface_id}",
+            {
+                "iface_id": iface_id,
+                "host_dev_name": host_dev_name,
+                "guest_mac": guest_mac,
+            },
+        )
+
     def _request(
         self,
         method: str,

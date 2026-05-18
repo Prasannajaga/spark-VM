@@ -188,6 +188,34 @@ class RolloutsModesTest(unittest.TestCase):
                 run_cmd="python3 /job/a.py",
             )
 
+    def test_create_same_name_replaces_existing_rollout(self) -> None:
+        first = self.rollouts.create(
+            name="same-name",
+            mode="script",
+            files={"main.py": "print('first')\n"},
+            run_cmd="python3 /job/main.py",
+        )
+        first_path = self.home / "rollouts" / first.id
+        self.assertTrue(first_path.exists())
+
+        second = self.rollouts.create(
+            name="same-name",
+            mode="script",
+            files={"main.py": "print('second')\n"},
+            run_cmd="python3 /job/main.py",
+        )
+        second_path = self.home / "rollouts" / second.id
+
+        self.assertNotEqual(first.id, second.id)
+        self.assertFalse(first_path.exists())
+        self.assertTrue(second_path.exists())
+
+        metadata = self._read_json(self.home / "rollouts" / "metadata.json")
+        entries = metadata["rollouts"]
+        self.assertEqual(1, len(entries))
+        self.assertEqual(second.id, entries[0]["id"])
+        self.assertEqual("same-name", entries[0]["name"])
+
 
 if __name__ == "__main__":
     unittest.main()

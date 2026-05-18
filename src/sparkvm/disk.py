@@ -148,7 +148,7 @@ class ExecutionDisk:
         mount_ext4(self.path, self.mount_dir)
         self._mounted = True
 
-    def copy_rollout(self) -> None:
+    def copy_rollout(self, runtime_files: dict[str, str] | None = None) -> None:
         if not self.rollout.path.exists():
             raise ExecutionDiskError(f"Rollout path does not exist: {self.rollout.path}")
 
@@ -156,6 +156,8 @@ class ExecutionDisk:
             tmp_dir = Path(tmp_dir_str)
             staged_root = tmp_dir / "job"
             shutil.copytree(self.rollout.path, staged_root, symlinks=True)
+            if runtime_files:
+                copy_files_into_mount(runtime_files, staged_root)
             create_ext4_image(self.path, self.size_mb, source_dir=staged_root)
 
     def unmount(self) -> None:
@@ -291,10 +293,39 @@ class ExecutionDisk:
             raise CleanupError(f"Execution disk cleanup failed: {errors[0]}")
 
 
+def scrub_files_from_ext4_image(
+    *,
+    image_path: Path,
+    mount_base: Path,
+    rel_paths: list[str],
+) -> None:
+    mount_dir = mount_base / f"{image_path.stem}-scrub-mount"
+    mounted = False
+    try:
+        ensure_dir(mount_base, exist_ok=True)
+        mount_ext4(image_path, mount_dir)
+        mounted = True
+        for rel_path in rel_paths:
+            safe_path = _validate_relative_path(rel_path)
+            remove_file(mount_dir / Path(safe_path.as_posix()), missing_ok=True)
+    finally:
+        if mounted:
+            try:
+                unmount_ext4(mount_dir)
+            except Exception as exc:
+                raise ExecutionDiskError(f"Failed to unmount scrub mount {mount_dir}: {exc}") from exc
+        if mount_dir.exists():
+            try:
+                mount_dir.rmdir()
+            except OSError:
+                remove_tree(mount_dir, ignore_errors=True)
+
+
 __all__ = [
     "create_ext4_image",
     "mount_ext4",
     "copy_files_into_mount",
     "unmount_ext4",
+    "scrub_files_from_ext4_image",
     "ExecutionDisk",
 ]
