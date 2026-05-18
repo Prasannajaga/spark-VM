@@ -170,13 +170,11 @@ class ExecutionDiskAndVMRunTest(unittest.TestCase):
             ),
             vm._images,
         )
-        vm._wait_for_firecracker_socket = MethodType(
-            lambda _self, _api, _proc, timeout_sec: None,  # type: ignore[return-value]
-            vm,
+        vm.wait_for_firecracker_socket = MethodType(
+            lambda self, api, process, timeout_sec: None, vm
         )
-        vm._configure_microvm = MethodType(
-            lambda _self, api, runtime_image, execution_disk_path: None,  # type: ignore[return-value]
-            vm,
+        vm.configure_microvm = MethodType(
+            lambda self, api, runtime_image, execution_disk_path: None, vm
         )
 
         _FakeExecutionDisk.last_size_mb = None

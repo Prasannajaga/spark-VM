@@ -25,7 +25,7 @@ def normalize_runtime_name(image_name: str) -> str:
     return value
 
 
-def _suggest_docker_image(raw_runtime: str, normalized_runtime: str) -> str:
+def suggest_docker_image(raw_runtime: str, normalized_runtime: str) -> str:
     candidate = raw_runtime.strip()
     if any(char in candidate for char in "/:@"):
         return candidate
@@ -62,7 +62,7 @@ def resolve_runtime_image(runtime: str, config: SparkVMConfig) -> RuntimeImage:
         raise KernelImageNotFound("Kernel image not found. Run `sparkvm setup`.")
 
     if not rootfs.exists():
-        suggestion = _suggest_docker_image(raw_runtime, normalized_runtime)
+        suggestion = suggest_docker_image(raw_runtime, normalized_runtime)
         raise RuntimeImageNotFound(
             f"Runtime image '{normalized_runtime}' not found. Run `sparkvm dockify {suggestion}`."
         )

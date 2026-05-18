@@ -48,7 +48,7 @@ def render_env_file(env: Mapping[str, str]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _validate_env_mapping(env: Mapping[str, str] | None) -> dict[str, str]:
+def validate_env_mapping(env: Mapping[str, str] | None) -> dict[str, str]:
     if env is None:
         return {}
     if not isinstance(env, Mapping):
@@ -105,14 +105,14 @@ class SparkVM:
             network=network,
             home_dir=home_dir,
         )
-        self._env = _validate_env_mapping(env)
+        self._env = validate_env_mapping(env)
         self._setup = ManagedSetup(self.config)
         self._images = ManagedImageResolver(self.config)
         self._rollouts = Rollouts(home_dir=self.config.home_dir)
         self._network = NetworkManager(home_dir=self.config.home_dir)
 
     def run(self, rollout: str | Rollout) -> VMResult:
-        rollout_obj = self._resolve_rollout(rollout)
+        rollout_obj = self.resolve_rollout(rollout)
         selected_runtime = self.config.runtime if self._runtime_override else rollout_obj.runtime
 
         self._setup.ensure_layout()
@@ -144,13 +144,13 @@ class SparkVM:
             firecracker_bin = self._setup.firecracker_binary_path()
             self._setup.assert_kvm_available()
             runtime_image = self._images.resolve(selected_runtime)
-            self._assert_runtime_image_permissions(runtime_image)
-            self._ensure_rootfs_readonly_mountable(runtime_image)
+            self.assert_runtime_image_permissions(runtime_image)
+            self.ensure_rootfs_readonly_mountable(runtime_image)
 
             if self.config.network_enabled:
                 network_config = self._network.setup(vm_id)
 
-            runtime_files = self._runtime_execution_files(network_config)
+            runtime_files = self.runtime_execution_files(network_config)
             execution_disk.copy_rollout(runtime_files=runtime_files if runtime_files else None)
 
             firecracker = FirecrackerProcess(
@@ -161,8 +161,8 @@ class SparkVM:
             firecracker.start(startup_timeout_sec=min(5.0, self.config.timeout_sec))
 
             api = FirecrackerAPIClient(socket_path)
-            self._wait_for_firecracker_socket(api, firecracker, timeout_sec=self.config.timeout_sec)
-            self._configure_microvm(
+            self.wait_for_firecracker_socket(api, firecracker, timeout_sec=self.config.timeout_sec)
+            self.configure_microvm(
                 api=api,
                 runtime_image=runtime_image,
                 execution_disk_path=execution_disk_path,
@@ -188,7 +188,7 @@ class SparkVM:
                     firecracker_log_path=firecracker_log_path,
                     execution_disk_path=execution_disk_path,
                 )
-                self._preserve_worker_for_failed_result(
+                self.preserve_worker_for_failed_result(
                     worker_dir=worker_dir,
                     socket_path=socket_path,
                     firecracker=firecracker,
@@ -205,16 +205,16 @@ class SparkVM:
                     duration_ms=duration_ms,
                     firecracker_log_path=firecracker_log_path,
                 )
-                result = self._annotate_oom(result=result, firecracker_log_path=firecracker_log_path)
+                result = self.annotate_oom(result=result, firecracker_log_path=firecracker_log_path)
                 if result.passed:
-                    self._cleanup_worker_on_completion(
+                    self.cleanup_worker_on_completion(
                         worker_dir=worker_dir,
                         socket_path=socket_path,
                         firecracker=firecracker,
                         execution_disk=execution_disk,
                     )
                 else:
-                    self._preserve_worker_for_failed_result(
+                    self.preserve_worker_for_failed_result(
                         worker_dir=worker_dir,
                         socket_path=socket_path,
                         firecracker=firecracker,
@@ -226,7 +226,7 @@ class SparkVM:
                 final_result = result
         except (FirecrackerAPIError, FirecrackerProcessError) as exc:
             failure = FirecrackerBootError(
-                self._format_boot_failure(
+                self.format_boot_failure(
                     vm_id=vm_id,
                     worker_dir=worker_dir,
                     socket_path=socket_path,
@@ -252,13 +252,13 @@ class SparkVM:
                 firecracker.stop()
 
             duration_ms = int((time.monotonic() - started_at) * 1000)
-            scrub = self._scrub_or_remove_execution_disk(worker_dir=worker_dir, env_present=bool(self._env))
+            scrub = self.scrub_or_remove_execution_disk(worker_dir=worker_dir, env_present=bool(self._env))
             note_parts: list[str] = []
             if scrub.note is not None:
                 note_parts.append(scrub.note)
             if cleanup_failure_message is not None:
                 note_parts.append(f"network_cleanup_error={cleanup_failure_message}")
-            self._write_failure_record(
+            self.write_failure_record(
                 worker_dir=worker_dir,
                 vm_id=vm_id,
                 rollout=rollout_obj,
@@ -276,7 +276,7 @@ class SparkVM:
         assert final_result is not None
         return final_result
 
-    def _runtime_execution_files(self, network_config: NetworkConfig | None) -> dict[str, str]:
+    def runtime_execution_files(self, network_config: NetworkConfig | None) -> dict[str, str]:
         files: dict[str, str] = {}
         if self._env:
             files[".sparkvm/env.sh"] = render_env_file(self._env)
@@ -284,7 +284,7 @@ class SparkVM:
             files[".sparkvm/network.env"] = render_network_env_file(network_config)
         return files
 
-    def _resolve_rollout(self, rollout: str | Rollout) -> Rollout:
+    def resolve_rollout(self, rollout: str | Rollout) -> Rollout:
         if isinstance(rollout, Rollout):
             if not rollout.path.exists():
                 raise RolloutNotFoundError(f"Rollout path does not exist: {rollout.path}")
@@ -297,7 +297,7 @@ class SparkVM:
 
         raise TypeError("SparkVM.run expects a rollout id (str) or an object returned by Rollouts.create().")
 
-    def _wait_for_firecracker_socket(
+    def wait_for_firecracker_socket(
         self,
         api: FirecrackerAPIClient,
         process: FirecrackerProcess,
@@ -308,7 +308,7 @@ class SparkVM:
         while time.monotonic() < deadline:
             exit_code = process.poll()
             if exit_code is not None:
-                detail = self._format_firecracker_process_diagnostic(
+                detail = self.format_firecracker_process_diagnostic(
                     process=process,
                     reason=f"Firecracker exited before API socket became ready (exit code {exit_code}).",
                 )
@@ -320,23 +320,23 @@ class SparkVM:
                 except FirecrackerAPIError:
                     pass
             time.sleep(0.05)
-        detail = self._format_firecracker_process_diagnostic(
+        detail = self.format_firecracker_process_diagnostic(
             process=process,
             reason=f"Timed out waiting for Firecracker API socket after {timeout_sec:.2f}s.",
         )
         raise FirecrackerProcessError(detail)
 
-    def _format_firecracker_process_diagnostic(self, *, process: FirecrackerProcess, reason: str) -> str:
+    def format_firecracker_process_diagnostic(self, *, process: FirecrackerProcess, reason: str) -> str:
         parts = [reason, f"Socket path: {process.socket_path}"]
         if process.log_path is not None:
             parts.append(f"Check Firecracker log: {process.log_path}")
-            tail = self._read_log_tail(process.log_path)
+            tail = self.read_log_tail(process.log_path)
             if tail:
                 parts.append("Firecracker log tail:")
                 parts.append(tail)
         return "\n".join(parts)
 
-    def _format_boot_failure(
+    def format_boot_failure(
         self,
         *,
         vm_id: str,
@@ -352,13 +352,13 @@ class SparkVM:
             f"Check Firecracker log: {firecracker_log_path}",
             f"Reason: {reason}",
         ]
-        tail = self._read_log_tail(firecracker_log_path)
+        tail = self.read_log_tail(firecracker_log_path)
         if tail:
             parts.append("Firecracker log tail:")
             parts.append(tail)
         return "\n".join(parts)
 
-    def _cleanup_worker_on_completion(
+    def cleanup_worker_on_completion(
         self,
         *,
         worker_dir: Path,
@@ -393,7 +393,7 @@ class SparkVM:
         if errors:
             raise CleanupError(f"Worker cleanup failed for {worker_dir}: {errors[0]}")
 
-    def _write_failure_record(
+    def write_failure_record(
         self,
         *,
         worker_dir: Path,
@@ -439,7 +439,7 @@ class SparkVM:
         except OSError:
             pass
 
-    def _read_log_tail(self, log_path: Path, *, max_lines: int = 40) -> str:
+    def read_log_tail(self, log_path: Path, *, max_lines: int = 40) -> str:
         if not log_path.exists():
             return ""
         try:
@@ -448,7 +448,7 @@ class SparkVM:
             return ""
         return "\n".join(lines[-max_lines:])
 
-    def _annotate_oom(self, *, result: VMResult, firecracker_log_path: Path) -> VMResult:
+    def annotate_oom(self, *, result: VMResult, firecracker_log_path: Path) -> VMResult:
         if result.oom_killed:
             return result
         if result.timed_out:
@@ -456,7 +456,7 @@ class SparkVM:
         if result.exit_code == 0:
             return result
 
-        log_tail = self._read_log_tail(firecracker_log_path, max_lines=200).lower()
+        log_tail = self.read_log_tail(firecracker_log_path, max_lines=200).lower()
         indicators = ("out of memory", "oom-kill", "oom killed", "killed process")
         if any(marker in log_tail for marker in indicators):
             return replace(result, status="oom", oom_killed=True)
@@ -464,7 +464,7 @@ class SparkVM:
             return replace(result, status="oom", oom_killed=True)
         return result
 
-    def _configure_microvm(
+    def configure_microvm(
         self,
         *,
         api: FirecrackerAPIClient,
@@ -506,7 +506,7 @@ class SparkVM:
             },
         )
 
-    def _assert_runtime_image_permissions(self, runtime_image: RuntimeImage) -> None:
+    def assert_runtime_image_permissions(self, runtime_image: RuntimeImage) -> None:
         rootfs = runtime_image.rootfs_image
         if not rootfs.exists():
             return
@@ -519,7 +519,7 @@ class SparkVM:
                 f"  sparkvm dockify {runtime_image.name.replace('-', ':', 1)} --name {runtime_image.name} --force"
             )
 
-    def _ensure_rootfs_readonly_mountable(self, runtime_image: RuntimeImage) -> None:
+    def ensure_rootfs_readonly_mountable(self, runtime_image: RuntimeImage) -> None:
         rootfs = runtime_image.rootfs_image
         if not rootfs.exists():
             return
@@ -548,29 +548,29 @@ class SparkVM:
             "Try rebuilding the runtime with `sparkvm dockify ... --force`."
         )
 
-    def _scrub_or_remove_execution_disk(self, *, worker_dir: Path, env_present: bool) -> _SecretScrubResult:
+    def scrub_or_remove_execution_disk(self, *, worker_dir: Path, env_present: bool) -> SecretScrubResult:
         execution_disk_path = worker_dir / "rollout.ext4"
         if not execution_disk_path.exists():
-            return _SecretScrubResult(execution_disk_preserved=False, secret_scrubbed=not env_present, note=None)
+            return SecretScrubResult(execution_disk_preserved=False, secret_scrubbed=not env_present, note=None)
 
         if not env_present:
-            return _SecretScrubResult(execution_disk_preserved=True, secret_scrubbed=True, note=None)
+            return SecretScrubResult(execution_disk_preserved=True, secret_scrubbed=True, note=None)
 
         try:
             scrub_sensitive_execution_files(worker_dir)
-            return _SecretScrubResult(execution_disk_preserved=True, secret_scrubbed=True, note=None)
+            return SecretScrubResult(execution_disk_preserved=True, secret_scrubbed=True, note=None)
         except Exception:
             try:
                 remove_file(execution_disk_path, missing_ok=True)
             except OSError:
                 pass
-            return _SecretScrubResult(
+            return SecretScrubResult(
                 execution_disk_preserved=False,
                 secret_scrubbed=False,
                 note="Execution disk removed to avoid preserving runtime secrets.",
             )
 
-    def _preserve_worker_for_failed_result(
+    def preserve_worker_for_failed_result(
         self,
         *,
         worker_dir: Path,
@@ -595,7 +595,7 @@ class SparkVM:
         error = SparkVMError(
             f"Guest execution failed with status={result.status}, exit_code={result.exit_code}"
         )
-        self._write_failure_record(
+        self.write_failure_record(
             worker_dir=worker_dir,
             vm_id=vm_id,
             rollout=rollout,
@@ -611,7 +611,7 @@ class SparkVM:
         )
 
 
-class _SecretScrubResult:
+class SecretScrubResult:
     def __init__(self, *, execution_disk_preserved: bool, secret_scrubbed: bool, note: str | None) -> None:
         self.execution_disk_preserved = execution_disk_preserved
         self.secret_scrubbed = secret_scrubbed

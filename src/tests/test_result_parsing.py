@@ -48,7 +48,7 @@ class ResultParsingTest(unittest.TestCase):
             output_path.write_text(mapping[fs_path], encoding="utf-8")
             return True
 
-        with patch("sparkvm.disk._debugfs_dump_file", side_effect=_fake_dump):
+        with patch("sparkvm.disk.debugfs_dump_file", side_effect=_fake_dump):
             return self.execution_disk.read_result(vm_id="vm-123", duration_ms=10, firecracker_log_path=None)
 
     def test_setup_failure_status(self) -> None:

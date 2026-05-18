@@ -26,7 +26,7 @@ class RolloutNegativeTest(unittest.TestCase):
         self.rollout.rollouts_dir.mkdir(parents=True, exist_ok=True)
         self.rollout.metadata_path.write_text(payload, encoding="utf-8")
 
-    def _write_metadata(self, obj: object) -> None:
+    def write_metadata(self, obj: object) -> None:
         self._write_metadata_raw(json.dumps(obj))
 
     def test_create_rejects_empty_files(self) -> None:
@@ -105,7 +105,7 @@ class RolloutNegativeTest(unittest.TestCase):
                     self.rollout.get_by_id(rollout_id)
 
     def test_get_by_id_raises_when_rollout_directory_missing(self) -> None:
-        self._write_metadata(
+        self.write_metadata(
             {
                 "version": 1,
                 "rollouts": [
@@ -131,7 +131,7 @@ class RolloutNegativeTest(unittest.TestCase):
         rollout_dir = self.home_dir / "rollouts" / "rollout-has-dir-no-json"
         rollout_dir.mkdir(parents=True, exist_ok=True)
 
-        self._write_metadata(
+        self.write_metadata(
             {
                 "version": 1,
                 "rollouts": [
@@ -164,22 +164,22 @@ class RolloutNegativeTest(unittest.TestCase):
             self.rollout.list()
 
     def test_metadata_must_be_object(self) -> None:
-        self._write_metadata(["not", "an", "object"])
+        self.write_metadata(["not", "an", "object"])
 
         with self.assertRaises(RolloutMetadataError):
             self.rollout.list()
 
     def test_metadata_version_and_rollouts_types(self) -> None:
-        self._write_metadata({"version": "1", "rollouts": []})
+        self.write_metadata({"version": "1", "rollouts": []})
         with self.assertRaises(RolloutMetadataError):
             self.rollout.list()
 
-        self._write_metadata({"version": 1, "rollouts": "not-a-list"})
+        self.write_metadata({"version": 1, "rollouts": "not-a-list"})
         with self.assertRaises(RolloutMetadataError):
             self.rollout.list()
 
     def test_list_raises_on_invalid_rollout_entry_shape(self) -> None:
-        self._write_metadata({"version": 1, "rollouts": [{"id": "rollout-bad"}]})
+        self.write_metadata({"version": 1, "rollouts": [{"id": "rollout-bad"}]})
 
         with self.assertRaises(RolloutMetadataError):
             self.rollout.list()
@@ -187,7 +187,7 @@ class RolloutNegativeTest(unittest.TestCase):
     def test_write_metadata_os_error_is_wrapped(self) -> None:
         with patch("sparkvm.rollouts.os.replace", side_effect=OSError("replace failed")):
             with self.assertRaises(RolloutMetadataError):
-                self.rollout._write_metadata({"version": 1, "rollouts": []})
+                self.rollout.write_metadata({"version": 1, "rollouts": []})
 
 
 if __name__ == "__main__":

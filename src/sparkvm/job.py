@@ -22,7 +22,7 @@ class VMJob:
             raise TypeError("files must be a dict[str, str | bytes].")
 
         for path, content in self.files.items():
-            _validate_job_file_path(path)
+            validate_job_file_path(path)
             if not isinstance(content, (str, bytes)):
                 raise TypeError("Job file content must be str or bytes.")
 
@@ -56,7 +56,7 @@ class VMJob:
         if not isinstance(code, str):
             raise TypeError("code must be a string.")
 
-        _validate_job_file_path(filename)
+        validate_job_file_path(filename)
         return cls(
             files={filename: code},
             command=f"python3 /job/{filename}",
@@ -64,7 +64,7 @@ class VMJob:
         )
 
 
-def _validate_job_file_path(path: str) -> None:
+def validate_job_file_path(path: str) -> None:
     if not isinstance(path, str):
         raise TypeError("Job file path must be a string.")
 

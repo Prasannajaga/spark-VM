@@ -20,7 +20,7 @@ class DockifyCommandTest(unittest.TestCase):
             home = Path(tmp)
             calls: list[list[str]] = []
 
-            def _fake_run_checked(cmd: list[str], *, cwd: Path | None = None):
+            def fake_run_checked(cmd: list[str], *, cwd: Path | None = None):
                 del cwd
                 calls.append(list(cmd))
                 if cmd[:2] == ["docker", "create"]:
@@ -41,9 +41,9 @@ class DockifyCommandTest(unittest.TestCase):
                 (rootfs_dir / "usr/bin" / "mount").write_text("", encoding="utf-8")
 
             with patch("cli.runtimes.shutil.which", return_value="/usr/bin/docker"), patch(
-                "cli.runtimes._run_checked", side_effect=_fake_run_checked
+                "cli.runtimes.run_checked", side_effect=fake_run_checked
             ), patch(
-                "cli.runtimes._run_docker_export", side_effect=_fake_export
+                "cli.runtimes.run_docker_export", side_effect=_fake_export
             ):
                 run_dockify_command(
                     str(home),
@@ -77,7 +77,7 @@ class DockifyCommandTest(unittest.TestCase):
             home = Path(tmp)
             calls: list[list[str]] = []
 
-            def _fake_run_checked(cmd: list[str], *, cwd: Path | None = None):
+            def fake_run_checked(cmd: list[str], *, cwd: Path | None = None):
                 del cwd
                 calls.append(list(cmd))
                 if cmd[:2] == ["docker", "create"]:
@@ -97,9 +97,9 @@ class DockifyCommandTest(unittest.TestCase):
                 (rootfs_dir / "usr/bin" / "mount").write_text("", encoding="utf-8")
 
             with patch("cli.runtimes.shutil.which", return_value="/usr/bin/docker"), patch(
-                "cli.runtimes._run_checked", side_effect=_fake_run_checked
+                "cli.runtimes.run_checked", side_effect=fake_run_checked
             ), patch(
-                "cli.runtimes._run_docker_export", side_effect=_fake_export
+                "cli.runtimes.run_docker_export", side_effect=_fake_export
             ):
                 with self.assertRaises(RuntimeError):
                     run_dockify_command(

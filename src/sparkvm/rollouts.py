@@ -24,13 +24,13 @@ from .errors import (
 from .fsops import ensure_dir, read_json, remove_tree, write_bytes, write_text
 from .image import normalize_runtime_name
 
-_ROLLOUT_ID_RE = re.compile(r"^rollout-[A-Za-z0-9_-]+$")
-_METADATA_VERSION = 1
-_SUPPORTED_MODES = {"script", "repo"}
-_SCRIPT_DEFAULT_DISK_MB = 1024
-_REPO_DEFAULT_DISK_MB = 4096
-_GIT_URL_PREFIXES = ("http://", "https://", "git@", "ssh://")
-_COPYTREE_IGNORE = shutil.ignore_patterns(".git", "__pycache__", ".venv", "node_modules", "target", "dist", "build")
+ROLLOUT_ID_RE = re.compile(r"^rollout-[A-Za-z0-9_-]+$")
+METADATA_VERSION = 1
+SUPPORTED_MODES = {"script", "repo"}
+SCRIPT_DEFAULT_DISK_MB = 1024
+REPO_DEFAULT_DISK_MB = 4096
+GIT_URL_PREFIXES = ("http://", "https://", "git@", "ssh://")
+COPYTREE_IGNORE = shutil.ignore_patterns(".git", "__pycache__", ".venv", "node_modules", "target", "dist", "build")
 
 
 @dataclass(frozen=True)
@@ -71,7 +71,7 @@ class Rollout:
             raise RolloutMetadataError("rollout.json must contain a JSON object.")
 
         mode = str(data.get("mode") or "script")
-        if mode not in _SUPPORTED_MODES:
+        if mode not in SUPPORTED_MODES:
             raise RolloutMetadataError(f"rollout.json has unsupported mode: {mode!r}")
 
         command_raw = data.get("command")
@@ -88,7 +88,7 @@ class Rollout:
         if isinstance(disk_mb_raw, int):
             disk_mb = disk_mb_raw
         else:
-            disk_mb = _REPO_DEFAULT_DISK_MB if mode == "repo" else _SCRIPT_DEFAULT_DISK_MB
+            disk_mb = REPO_DEFAULT_DISK_MB if mode == "repo" else SCRIPT_DEFAULT_DISK_MB
 
         files_raw = data.get("files")
         if isinstance(files_raw, list):
@@ -132,7 +132,7 @@ class Rollout:
             if isinstance(disk_mb_raw, int):
                 disk_mb = disk_mb_raw
             else:
-                disk_mb = _REPO_DEFAULT_DISK_MB if mode == "repo" else _SCRIPT_DEFAULT_DISK_MB
+                disk_mb = REPO_DEFAULT_DISK_MB if mode == "repo" else SCRIPT_DEFAULT_DISK_MB
 
             runtime_raw = data.get("runtime")
             if not isinstance(runtime_raw, str) or not runtime_raw.strip():
@@ -172,46 +172,46 @@ class Rollout:
         }
 
 
-def _now_utc_iso() -> str:
+def now_utc_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def _validate_rollout_id(rollout_id: str) -> str:
+def validate_rollout_id(rollout_id: str) -> str:
     if not isinstance(rollout_id, str) or not rollout_id.strip():
         raise RolloutError("rollout_id must be a non-empty string.")
     candidate = rollout_id.strip()
-    if not _ROLLOUT_ID_RE.fullmatch(candidate):
+    if not ROLLOUT_ID_RE.fullmatch(candidate):
         raise RolloutError("Invalid rollout_id format. Expected values like 'rollout-abc123'.")
     return candidate
 
 
-def _validate_runtime(runtime: str) -> str:
+def validate_runtime(runtime: str) -> str:
     if not isinstance(runtime, str) or not runtime.strip():
         raise RolloutError("runtime must be a non-empty string.")
     return normalize_runtime_name(runtime)
 
 
-def _validate_non_empty(value: str | None, *, field_name: str) -> str:
+def validate_non_empty(value: str | None, *, field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise RolloutError(f"{field_name} must be a non-empty string.")
     return value.strip()
 
 
-def _validate_rollout_mode(mode: str) -> str:
+def validate_rollout_mode(mode: str) -> str:
     if not isinstance(mode, str) or not mode.strip():
         raise InvalidRolloutModeError("mode must be a non-empty string.")
     selected = mode.strip().lower()
-    if selected not in _SUPPORTED_MODES:
+    if selected not in SUPPORTED_MODES:
         raise InvalidRolloutModeError(f"Unsupported rollout mode '{selected}'. Supported modes: script, repo.")
     return selected
 
 
-def _slugify_rollout_name(name: str) -> str:
+def slugify_rollout_name(name: str) -> str:
     slug = re.sub(r"[^A-Za-z0-9_-]+", "-", name.strip()).strip("-").lower()
     return slug[:40] or "job"
 
 
-def _validate_rollout_file_path(path: str) -> PurePosixPath:
+def validate_rollout_file_path(path: str) -> PurePosixPath:
     if not isinstance(path, str):
         raise RolloutError("Rollout file paths must be strings.")
 
@@ -235,11 +235,11 @@ def _validate_rollout_file_path(path: str) -> PurePosixPath:
     return normalized
 
 
-def _is_git_url(source: str) -> bool:
-    return source.startswith(_GIT_URL_PREFIXES) or source.endswith(".git")
+def is_git_url(source: str) -> bool:
+    return source.startswith(GIT_URL_PREFIXES) or source.endswith(".git")
 
 
-def _run_git_checked(cmd: list[str], *, cwd: Path | None = None, error_cls: type[RolloutError] = RolloutError) -> str:
+def run_git_checked(cmd: list[str], *, cwd: Path | None = None, error_cls: type[RolloutError] = RolloutError) -> str:
     try:
         completed = subprocess.run(cmd, cwd=str(cwd) if cwd is not None else None, check=True, capture_output=True, text=True)
         return completed.stdout.strip()
@@ -275,38 +275,38 @@ class Rollouts:
         command: str | None = None,
         base_image: str | None = None,
     ) -> Rollout:
-        rollout_name = _validate_non_empty(name, field_name="name")
-        rollout_mode = _validate_rollout_mode(mode)
-        rollout_runtime = _validate_runtime(base_image if base_image is not None else runtime)
+        rollout_name = validate_non_empty(name, field_name="name")
+        rollout_mode = validate_rollout_mode(mode)
+        rollout_runtime = validate_runtime(base_image if base_image is not None else runtime)
 
         resolved_run_cmd = run_cmd.strip() if isinstance(run_cmd, str) and run_cmd.strip() else None
         if resolved_run_cmd is None and isinstance(command, str) and command.strip():
             resolved_run_cmd = command.strip()
-        rollout_run_cmd = _validate_non_empty(resolved_run_cmd, field_name="run_cmd")
+        rollout_run_cmd = validate_non_empty(resolved_run_cmd, field_name="run_cmd")
 
         if disk_mb is None:
-            rollout_disk_mb = _REPO_DEFAULT_DISK_MB if rollout_mode == "repo" else _SCRIPT_DEFAULT_DISK_MB
+            rollout_disk_mb = REPO_DEFAULT_DISK_MB if rollout_mode == "repo" else SCRIPT_DEFAULT_DISK_MB
         elif isinstance(disk_mb, bool) or not isinstance(disk_mb, int) or disk_mb <= 0:
             raise RolloutError("disk_mb must be a positive integer.")
         else:
             rollout_disk_mb = disk_mb
 
         ensure_dir(self.rollouts_dir, exist_ok=True)
-        metadata = self._load_metadata()
-        metadata = self._drop_existing_rollouts_with_same_name(metadata=metadata, rollout_name=rollout_name)
+        metadata = self.load_metadata()
+        metadata = self.drop_existing_rollouts_with_same_name(metadata=metadata, rollout_name=rollout_name)
 
-        rollout_id = self._generate_rollout_id(
+        rollout_id = self.generate_rollout_id(
             rollout_name=rollout_name,
             existing_ids={entry.get("id") for entry in metadata["rollouts"]},
         )
         rollout_path = self.rollouts_dir / rollout_id
-        created_at = _now_utc_iso()
+        created_at = now_utc_iso()
 
         try:
             ensure_dir(rollout_path, exist_ok=False)
 
             if rollout_mode == "script":
-                rollout_item = self._create_script_rollout(
+                rollout_item = self.create_script_rollout(
                     rollout_id=rollout_id,
                     rollout_name=rollout_name,
                     rollout_runtime=rollout_runtime,
@@ -318,7 +318,7 @@ class Rollouts:
                     created_at=created_at,
                 )
             else:
-                rollout_item = self._create_repo_rollout(
+                rollout_item = self.create_repo_rollout(
                     rollout_id=rollout_id,
                     rollout_name=rollout_name,
                     rollout_runtime=rollout_runtime,
@@ -332,13 +332,13 @@ class Rollouts:
                 )
 
             metadata["rollouts"].append(rollout_item.to_metadata_entry())
-            self._write_metadata(metadata)
+            self.write_metadata(metadata)
             return rollout_item
         except Exception:
             remove_tree(rollout_path, ignore_errors=True)
             raise
 
-    def _drop_existing_rollouts_with_same_name(self, *, metadata: dict[str, Any], rollout_name: str) -> dict[str, Any]:
+    def drop_existing_rollouts_with_same_name(self, *, metadata: dict[str, Any], rollout_name: str) -> dict[str, Any]:
         rollouts_raw = metadata.get("rollouts", [])
         if not isinstance(rollouts_raw, list):
             return metadata
@@ -368,10 +368,10 @@ class Rollouts:
 
         updated = dict(metadata)
         updated["rollouts"] = kept
-        self._write_metadata(updated)
+        self.write_metadata(updated)
         return updated
 
-    def _create_script_rollout(
+    def create_script_rollout(
         self,
         *,
         rollout_id: str,
@@ -389,7 +389,7 @@ class Rollouts:
 
         normalized_files: list[tuple[PurePosixPath, str | bytes]] = []
         for rel_path, content in files.items():
-            safe_path = _validate_rollout_file_path(rel_path)
+            safe_path = validate_rollout_file_path(rel_path)
             if not isinstance(content, (str, bytes)):
                 raise RolloutError(f"Rollout file content for {rel_path!r} must be str or bytes.")
             normalized_files.append((safe_path, content))
@@ -429,7 +429,7 @@ class Rollouts:
             "disk_mb": disk_mb,
             "created_at": created_at,
         }
-        self._write_rollout_json(rollout_path / "rollout.json", rollout_json)
+        self.write_rollout_json(rollout_path / "rollout.json", rollout_json)
 
         return Rollout(
             id=rollout_id,
@@ -446,7 +446,7 @@ class Rollouts:
             updated_at=None,
         )
 
-    def _create_repo_rollout(
+    def create_repo_rollout(
         self,
         *,
         rollout_id: str,
@@ -471,10 +471,10 @@ class Rollouts:
         created_files: list[str] = ["repo/"]
 
         source_payload: dict[str, Any]
-        if _is_git_url(raw_source):
-            source_payload = self._prepare_repo_from_git_url(repo_dir=repo_dir, source=raw_source, ref=ref)
+        if is_git_url(raw_source):
+            source_payload = self.prepare_repo_from_git_url(repo_dir=repo_dir, source=raw_source, ref=ref)
         else:
-            source_payload = self._prepare_repo_from_local_path(repo_dir=repo_dir, source=Path(raw_source))
+            source_payload = self.prepare_repo_from_local_path(repo_dir=repo_dir, source=Path(raw_source))
 
         if rollout_setup_cmd is not None:
             setup_sh_path = rollout_path / "setup.sh"
@@ -499,7 +499,7 @@ class Rollouts:
             "disk_mb": disk_mb,
             "created_at": created_at,
         }
-        self._write_rollout_json(rollout_path / "rollout.json", rollout_json)
+        self.write_rollout_json(rollout_path / "rollout.json", rollout_json)
 
         return Rollout(
             id=rollout_id,
@@ -516,7 +516,7 @@ class Rollouts:
             updated_at=None,
         )
 
-    def _prepare_repo_from_local_path(self, *, repo_dir: Path, source: Path) -> dict[str, Any]:
+    def prepare_repo_from_local_path(self, *, repo_dir: Path, source: Path) -> dict[str, Any]:
         source_path = source.expanduser().resolve()
         if not source_path.exists():
             raise InvalidRepoError(f"Local repo source does not exist: {source_path}")
@@ -526,16 +526,16 @@ class Rollouts:
         if not git_dir.is_dir():
             raise InvalidRepoError("Local repo source must be a Git repository containing a .git directory.")
 
-        shutil.copytree(source_path, repo_dir, symlinks=True, ignore=_COPYTREE_IGNORE)
-        commit = _run_git_checked(["git", "rev-parse", "HEAD"], cwd=source_path, error_cls=InvalidRepoError)
+        shutil.copytree(source_path, repo_dir, symlinks=True, ignore=COPYTREE_IGNORE)
+        commit = run_git_checked(["git", "rev-parse", "HEAD"], cwd=source_path, error_cls=InvalidRepoError)
         return {
             "type": "local",
             "path": str(source_path),
             "commit": commit,
         }
 
-    def _prepare_repo_from_git_url(self, *, repo_dir: Path, source: str, ref: str | None) -> dict[str, Any]:
-        _run_git_checked(["git", "clone", source, str(repo_dir)], error_cls=InvalidRepoError)
+    def prepare_repo_from_git_url(self, *, repo_dir: Path, source: str, ref: str | None) -> dict[str, Any]:
+        run_git_checked(["git", "clone", source, str(repo_dir)], error_cls=InvalidRepoError)
 
         source_payload: dict[str, Any] = {
             "type": "git",
@@ -544,10 +544,10 @@ class Rollouts:
 
         if isinstance(ref, str) and ref.strip():
             clean_ref = ref.strip()
-            _run_git_checked(["git", "checkout", clean_ref], cwd=repo_dir, error_cls=InvalidRepoError)
+            run_git_checked(["git", "checkout", clean_ref], cwd=repo_dir, error_cls=InvalidRepoError)
             source_payload["ref"] = clean_ref
 
-        commit = _run_git_checked(["git", "rev-parse", "HEAD"], cwd=repo_dir, error_cls=InvalidRepoError)
+        commit = run_git_checked(["git", "rev-parse", "HEAD"], cwd=repo_dir, error_cls=InvalidRepoError)
         source_payload["commit"] = commit
 
         git_dir = repo_dir / ".git"
@@ -557,7 +557,7 @@ class Rollouts:
         return source_payload
 
     def list(self) -> list[Rollout]:
-        metadata = self._load_metadata()
+        metadata = self.load_metadata()
         items: list[Rollout] = []
         for entry in metadata["rollouts"]:
             rollout_stub = Rollout.from_metadata_entry(entry)
@@ -566,13 +566,13 @@ class Rollouts:
             rollout_json_path = rollout_stub.path / "rollout.json"
             if not rollout_json_path.is_file():
                 continue
-            rollout_obj = self._load_rollout_json(rollout_json_path)
+            rollout_obj = self.load_rollout_json(rollout_json_path)
             items.append(rollout_obj)
         return items
 
     def get_by_id(self, rollout_id: str) -> Rollout:
-        candidate_id = _validate_rollout_id(rollout_id)
-        metadata = self._load_metadata()
+        candidate_id = validate_rollout_id(rollout_id)
+        metadata = self.load_metadata()
         for entry in metadata["rollouts"]:
             if entry.get("id") != candidate_id:
                 continue
@@ -582,12 +582,12 @@ class Rollouts:
             rollout_json_path = rollout_item.path / "rollout.json"
             if not rollout_json_path.is_file():
                 raise RolloutNotFoundError(f"rollout.json missing for id '{candidate_id}'.")
-            return self._load_rollout_json(rollout_json_path)
+            return self.load_rollout_json(rollout_json_path)
         raise RolloutNotFoundError(f"Rollout not found: {candidate_id}")
 
     def delete_by_id(self, rollout_id: str) -> None:
-        candidate_id = _validate_rollout_id(rollout_id)
-        metadata = self._load_metadata()
+        candidate_id = validate_rollout_id(rollout_id)
+        metadata = self.load_metadata()
         rollouts = metadata["rollouts"]
 
         target_index = -1
@@ -609,7 +609,7 @@ class Rollouts:
                 raise RolloutError(f"Could not delete rollout directory: {rollout_path}") from exc
 
         del rollouts[target_index]
-        self._write_metadata(metadata)
+        self.write_metadata(metadata)
 
     def exists(self, rollout_id: str) -> bool:
         try:
@@ -618,8 +618,8 @@ class Rollouts:
             return False
         return True
 
-    def _generate_rollout_id(self, *, rollout_name: str, existing_ids: set[Any]) -> str:
-        name_slug = _slugify_rollout_name(rollout_name)
+    def generate_rollout_id(self, *, rollout_name: str, existing_ids: set[Any]) -> str:
+        name_slug = slugify_rollout_name(rollout_name)
         for _ in range(64):
             candidate = f"rollout-{name_slug}-{secrets.token_hex(8)}"
             if candidate in existing_ids:
@@ -629,7 +629,7 @@ class Rollouts:
             return candidate
         raise RolloutError("Could not allocate a unique rollout id.")
 
-    def _load_rollout_json(self, rollout_json_path: Path) -> Rollout:
+    def load_rollout_json(self, rollout_json_path: Path) -> Rollout:
         try:
             payload = read_json(rollout_json_path, encoding="utf-8")
         except json.JSONDecodeError as exc:
@@ -638,10 +638,10 @@ class Rollouts:
             raise RolloutMetadataError(f"Could not read rollout file: {rollout_json_path}") from exc
         return Rollout.from_rollout_json(payload, rollout_path=rollout_json_path.parent)
 
-    def _load_metadata(self) -> dict[str, Any]:
+    def load_metadata(self) -> dict[str, Any]:
         if not self.metadata_path.exists():
             ensure_dir(self.rollouts_dir, exist_ok=True)
-            return {"version": _METADATA_VERSION, "rollouts": []}
+            return {"version": METADATA_VERSION, "rollouts": []}
 
         try:
             raw = read_json(self.metadata_path, encoding="utf-8")
@@ -653,7 +653,7 @@ class Rollouts:
         if not isinstance(raw, dict):
             raise RolloutMetadataError("metadata.json must contain a JSON object.")
 
-        version = raw.get("version", _METADATA_VERSION)
+        version = raw.get("version", METADATA_VERSION)
         rollouts = raw.get("rollouts", [])
         if not isinstance(version, int):
             raise RolloutMetadataError("metadata.json field 'version' must be an integer.")
@@ -661,11 +661,11 @@ class Rollouts:
             raise RolloutMetadataError("metadata.json field 'rollouts' must be a list.")
         return {"version": version, "rollouts": rollouts}
 
-    def _write_rollout_json(self, path: Path, payload: dict[str, Any]) -> None:
+    def write_rollout_json(self, path: Path, payload: dict[str, Any]) -> None:
         text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
         write_text(path, text, encoding="utf-8")
 
-    def _write_metadata(self, metadata: dict[str, Any]) -> None:
+    def write_metadata(self, metadata: dict[str, Any]) -> None:
         ensure_dir(self.rollouts_dir, exist_ok=True)
         tmp_path = self.rollouts_dir / "metadata.json.tmp"
         final_path = self.metadata_path

@@ -13,7 +13,7 @@ from .result import PhaseResult, VMResult
 from .rollouts import Rollout
 
 
-def _run_checked(cmd: list[str]) -> None:
+def run_checked(cmd: list[str]) -> None:
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True)
     except FileNotFoundError as exc:
@@ -25,7 +25,7 @@ def _run_checked(cmd: list[str]) -> None:
         raise ExecutionDiskError(f"Command failed: {' '.join(cmd)}\n{detail}") from exc
 
 
-def _validate_relative_path(path: str) -> PurePosixPath:
+def validate_relative_path(path: str) -> PurePosixPath:
     if not isinstance(path, str):
         raise ExecutionDiskError("Execution disk file path must be a string.")
 
@@ -53,7 +53,7 @@ def create_ext4_image(path: Path, size_mib: int, *, source_dir: Path | None = No
 
     image_path = Path(path)
     ensure_dir(image_path.parent, exist_ok=True)
-    _run_checked(
+    run_checked(
         [
             "dd",
             "if=/dev/zero",
@@ -68,7 +68,7 @@ def create_ext4_image(path: Path, size_mib: int, *, source_dir: Path | None = No
         mkfs_cmd.extend(["-d", str(source_dir)])
     mkfs_cmd.append(str(image_path))
     try:
-        _run_checked(mkfs_cmd)
+        run_checked(mkfs_cmd)
     except ExecutionDiskError as exc:
         detail = str(exc).lower()
         if source_dir is not None and "invalid option" in detail and "-d" in detail:
@@ -83,13 +83,13 @@ def create_ext4_image(path: Path, size_mib: int, *, source_dir: Path | None = No
 def mount_ext4(path: Path, mount_dir: Path) -> None:
     mount_path = Path(mount_dir)
     ensure_dir(mount_path, exist_ok=True)
-    _run_checked(["mount", "-o", "loop", str(path), str(mount_path)])
+    run_checked(["mount", "-o", "loop", str(path), str(mount_path)])
 
 
 def copy_files_into_mount(files: dict[str, str | bytes], mount_dir: Path) -> None:
     target_dir = Path(mount_dir)
     for raw_path, content in files.items():
-        safe_path = _validate_relative_path(raw_path)
+        safe_path = validate_relative_path(raw_path)
         destination = target_dir / Path(safe_path.as_posix())
         ensure_dir(destination.parent, exist_ok=True)
         if isinstance(content, bytes):
@@ -101,12 +101,12 @@ def copy_files_into_mount(files: dict[str, str | bytes], mount_dir: Path) -> Non
 
 
 def unmount_ext4(mount_dir: Path) -> None:
-    _run_checked(["umount", str(mount_dir)])
+    run_checked(["umount", str(mount_dir)])
 
 
-def _debugfs_dump_file(image_path: Path, fs_path: str, output_path: Path) -> bool:
+def debugfs_dump_file(image_path: Path, fs_path: str, output_path: Path) -> bool:
     try:
-        _run_checked(["debugfs", "-R", f"dump -p {fs_path} {output_path}", str(image_path)])
+        run_checked(["debugfs", "-R", f"dump -p {fs_path} {output_path}", str(image_path)])
         # Some debugfs versions can exit successfully even when no output file is produced.
         # Treat that as a missing file so callers can apply fallback behavior.
         return output_path.exists()
@@ -172,7 +172,7 @@ class ExecutionDisk:
         duration_ms: int,
         firecracker_log_path: Path | None,
     ) -> VMResult:
-        def _read_int_file(path: Path, *, fs_path: str) -> int:
+        def read_int_file(path: Path, *, fs_path: str) -> int:
             raw = read_text(path, encoding="utf-8").strip()
             try:
                 return int(raw)
@@ -182,46 +182,46 @@ class ExecutionDisk:
         with tempfile.TemporaryDirectory(prefix="sparkvm-execution-read-") as tmp_dir_str:
             tmp_dir = Path(tmp_dir_str)
             final_exit_code_path = tmp_dir / "final_exit_code"
-            has_phased_results = _debugfs_dump_file(self.path, "/results/final_exit_code", final_exit_code_path)
+            has_phased_results = debugfs_dump_file(self.path, "/results/final_exit_code", final_exit_code_path)
 
             setup: PhaseResult | None = None
             run: PhaseResult | None = None
 
             if has_phased_results:
-                final_exit_code = _read_int_file(final_exit_code_path, fs_path="/results/final_exit_code")
+                final_exit_code = read_int_file(final_exit_code_path, fs_path="/results/final_exit_code")
 
                 setup_exit_code_path = tmp_dir / "setup.exit_code"
-                if _debugfs_dump_file(self.path, "/results/setup.exit_code", setup_exit_code_path):
+                if debugfs_dump_file(self.path, "/results/setup.exit_code", setup_exit_code_path):
                     setup_stdout_path = tmp_dir / "setup.stdout.log"
                     setup_stderr_path = tmp_dir / "setup.stderr.log"
                     setup_stdout = ""
                     setup_stderr = ""
-                    if _debugfs_dump_file(self.path, "/results/setup.stdout.log", setup_stdout_path):
+                    if debugfs_dump_file(self.path, "/results/setup.stdout.log", setup_stdout_path):
                         setup_stdout = read_text(setup_stdout_path, encoding="utf-8")
-                    if _debugfs_dump_file(self.path, "/results/setup.stderr.log", setup_stderr_path):
+                    if debugfs_dump_file(self.path, "/results/setup.stderr.log", setup_stderr_path):
                         setup_stderr = read_text(setup_stderr_path, encoding="utf-8")
                     setup = PhaseResult(
                         name="setup",
                         stdout=setup_stdout,
                         stderr=setup_stderr,
-                        exit_code=_read_int_file(setup_exit_code_path, fs_path="/results/setup.exit_code"),
+                        exit_code=read_int_file(setup_exit_code_path, fs_path="/results/setup.exit_code"),
                     )
 
                 run_exit_code_path = tmp_dir / "run.exit_code"
-                if _debugfs_dump_file(self.path, "/results/run.exit_code", run_exit_code_path):
+                if debugfs_dump_file(self.path, "/results/run.exit_code", run_exit_code_path):
                     run_stdout_path = tmp_dir / "run.stdout.log"
                     run_stderr_path = tmp_dir / "run.stderr.log"
                     run_stdout = ""
                     run_stderr = ""
-                    if _debugfs_dump_file(self.path, "/results/run.stdout.log", run_stdout_path):
+                    if debugfs_dump_file(self.path, "/results/run.stdout.log", run_stdout_path):
                         run_stdout = read_text(run_stdout_path, encoding="utf-8")
-                    if _debugfs_dump_file(self.path, "/results/run.stderr.log", run_stderr_path):
+                    if debugfs_dump_file(self.path, "/results/run.stderr.log", run_stderr_path):
                         run_stderr = read_text(run_stderr_path, encoding="utf-8")
                     run = PhaseResult(
                         name="run",
                         stdout=run_stdout,
                         stderr=run_stderr,
-                        exit_code=_read_int_file(run_exit_code_path, fs_path="/results/run.exit_code"),
+                        exit_code=read_int_file(run_exit_code_path, fs_path="/results/run.exit_code"),
                     )
 
                 status = "passed"
@@ -238,16 +238,16 @@ class ExecutionDisk:
 
                 stdout = ""
                 stderr = ""
-                if _debugfs_dump_file(self.path, "/output.log", output_log_path):
+                if debugfs_dump_file(self.path, "/output.log", output_log_path):
                     stdout = read_text(output_log_path, encoding="utf-8")
-                if _debugfs_dump_file(self.path, "/error.log", error_log_path):
+                if debugfs_dump_file(self.path, "/error.log", error_log_path):
                     stderr = read_text(error_log_path, encoding="utf-8")
-                if not _debugfs_dump_file(self.path, "/exit_code", exit_code_path):
+                if not debugfs_dump_file(self.path, "/exit_code", exit_code_path):
                     raise ExecutionDiskError(
                         "Guest did not produce result files (/results or /exit_code) on execution disk. "
                         "Execution considered failed."
                     )
-                final_exit_code = _read_int_file(exit_code_path, fs_path="/exit_code")
+                final_exit_code = read_int_file(exit_code_path, fs_path="/exit_code")
                 run = PhaseResult(name="run", stdout=stdout, stderr=stderr, exit_code=final_exit_code)
                 status = "passed" if final_exit_code == 0 else "run_failed"
 
@@ -306,7 +306,7 @@ def scrub_files_from_ext4_image(
         mount_ext4(image_path, mount_dir)
         mounted = True
         for rel_path in rel_paths:
-            safe_path = _validate_relative_path(rel_path)
+            safe_path = validate_relative_path(rel_path)
             remove_file(mount_dir / Path(safe_path.as_posix()), missing_ok=True)
     finally:
         if mounted:

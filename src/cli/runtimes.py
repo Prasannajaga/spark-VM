@@ -23,11 +23,11 @@ _IP_CANDIDATE_PATHS = ("/sbin/ip", "/bin/ip", "/usr/sbin/ip", "/usr/bin/ip")
 _SHUTDOWN_FALLBACK_PATHS = ("/sbin/poweroff", "/usr/sbin/poweroff", "/sbin/halt", "/usr/sbin/halt", "/sbin/reboot", "/usr/sbin/reboot")
 
 
-def _utc_now_iso() -> str:
+def utc_now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def _run_checked(cmd: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+def run_checked(cmd: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
             cmd,
@@ -45,7 +45,7 @@ def _run_checked(cmd: list[str], *, cwd: Path | None = None) -> subprocess.Compl
         raise SparkVMSetupError(f"Command failed: {' '.join(cmd)}\n{detail}") from exc
 
 
-def _run_docker_export(container_id: str, rootfs_dir: Path) -> None:
+def run_docker_export(container_id: str, rootfs_dir: Path) -> None:
     try:
         export_proc = subprocess.Popen(["docker", "export", container_id], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except FileNotFoundError as exc:
@@ -78,7 +78,7 @@ def _run_docker_export(container_id: str, rootfs_dir: Path) -> None:
         raise SparkVMSetupError(f"Command failed: tar -xf - -C {rootfs_dir}\n{detail}")
 
 
-def _assert_rootfs_basics(rootfs_dir: Path) -> None:
+def assert_rootfs_basics(rootfs_dir: Path) -> None:
     sh_path = rootfs_dir / "bin" / "sh"
     if not sh_path.exists():
         raise SparkVMSetupError(f"Runtime rootfs missing required file/tool: /bin/sh. Checked rootfs: {rootfs_dir}.")
@@ -98,7 +98,7 @@ def _assert_rootfs_basics(rootfs_dir: Path) -> None:
         )
 
 
-def _runtime_validation_metadata(rootfs_dir: Path) -> dict[str, object]:
+def runtime_validation_metadata(rootfs_dir: Path) -> dict[str, object]:
     ip_present = [candidate for candidate in _IP_CANDIDATE_PATHS if (rootfs_dir / candidate.lstrip("/")).exists()]
     shutdown_present = [
         candidate for candidate in _SHUTDOWN_FALLBACK_PATHS if (rootfs_dir / candidate.lstrip("/")).exists()
@@ -118,7 +118,7 @@ def _runtime_validation_metadata(rootfs_dir: Path) -> dict[str, object]:
     }
 
 
-def _resolve_owner(owner: str) -> tuple[int, int]:
+def resolve_owner(owner: str) -> tuple[int, int]:
     try:
         user_info = pwd.getpwnam(owner)
     except KeyError as exc:
@@ -126,12 +126,12 @@ def _resolve_owner(owner: str) -> tuple[int, int]:
     return user_info.pw_uid, user_info.pw_gid
 
 
-def _chown_path(path: Path, owner: str) -> None:
-    uid, gid = _resolve_owner(owner)
+def chown_path(path: Path, owner: str) -> None:
+    uid, gid = resolve_owner(owner)
     os.chown(path, uid, gid)
 
 
-def _dockify_requires_root_message(image: str, home_dir: Path, owner: str | None) -> str:
+def dockify_requires_root_message(image: str, home_dir: Path, owner: str | None) -> str:
     sparkvm_exe = shutil.which("sparkvm") or str(Path(sys.argv[0]).resolve())
     if owner is None:
         owner = pwd.getpwuid(os.getuid()).pw_name
@@ -142,17 +142,17 @@ def _dockify_requires_root_message(image: str, home_dir: Path, owner: str | None
     )
 
 
-def _default_owner_for_root() -> str | None:
+def default_owner_for_root() -> str | None:
     sudo_user = os.getenv("SUDO_USER", "").strip()
     if sudo_user and sudo_user != "root":
         return sudo_user
     return None
 
 
-def _build_ext4_from_rootfs(*, temp_ext4: Path, rootfs_dir: Path, size_mb: int) -> None:
-    _run_checked(["dd", "if=/dev/zero", f"of={temp_ext4}", "bs=1M", f"count={size_mb}", "status=none"])
+def build_ext4_from_rootfs(*, temp_ext4: Path, rootfs_dir: Path, size_mb: int) -> None:
+    run_checked(["dd", "if=/dev/zero", f"of={temp_ext4}", "bs=1M", f"count={size_mb}", "status=none"])
     try:
-        _run_checked(["mkfs.ext4", "-d", str(rootfs_dir), "-F", str(temp_ext4)])
+        run_checked(["mkfs.ext4", "-d", str(rootfs_dir), "-F", str(temp_ext4)])
         return
     except SparkVMSetupError as exc:
         detail = str(exc).lower()
@@ -170,18 +170,18 @@ def _build_ext4_from_rootfs(*, temp_ext4: Path, rootfs_dir: Path, size_mb: int) 
 
     with tempfile.TemporaryDirectory(prefix="sparkvm-dockify-mnt-") as tmp_mount_dir_str:
         mount_dir = Path(tmp_mount_dir_str)
-        _run_checked(["mkfs.ext4", "-F", str(temp_ext4)])
-        _run_checked(["mount", "-o", "loop", str(temp_ext4), str(mount_dir)])
+        run_checked(["mkfs.ext4", "-F", str(temp_ext4)])
+        run_checked(["mount", "-o", "loop", str(temp_ext4), str(mount_dir)])
         mounted = True
         try:
-            _run_checked(["cp", "-a", f"{rootfs_dir}/.", str(mount_dir)])
-            _run_checked(["sync"])
-            _run_checked(["umount", str(mount_dir)])
+            run_checked(["cp", "-a", f"{rootfs_dir}/.", str(mount_dir)])
+            run_checked(["sync"])
+            run_checked(["umount", str(mount_dir)])
             mounted = False
         finally:
             if mounted:
                 try:
-                    _run_checked(["umount", str(mount_dir)])
+                    run_checked(["umount", str(mount_dir)])
                 except Exception:
                     pass
 
@@ -217,7 +217,7 @@ def run_dockify_command(
 
     effective_owner = owner
     if effective_owner is None:
-        effective_owner = _default_owner_for_root()
+        effective_owner = default_owner_for_root()
 
     container_id = ""
     final_rootfs = runtime_file_paths.rootfs
@@ -234,16 +234,16 @@ def run_dockify_command(
         try:
             if pull:
                 print(f"[dockify] Pulling image: {image}", flush=True)
-                _run_checked(["docker", "pull", image])
+                run_checked(["docker", "pull", image])
 
             print(f"[dockify] Creating container from: {image}", flush=True)
-            create = _run_checked(["docker", "create", image])
+            create = run_checked(["docker", "create", image])
             container_id = create.stdout.strip()
             if not container_id:
                 raise SparkVMSetupError("docker create returned empty container id")
 
             print("[dockify] Exporting container filesystem", flush=True)
-            _run_docker_export(container_id, rootfs_dir)
+            run_docker_export(container_id, rootfs_dir)
 
             # Rootfs is mounted read-only by Firecracker; ensure /job mountpoint exists in-image.
             ensure_dir(rootfs_dir / "job", exist_ok=True)
@@ -253,18 +253,18 @@ def run_dockify_command(
             write_text(init_path, SPARKVM_INIT_TEMPLATE, encoding="utf-8")
             init_path.chmod(0o755)
 
-            _assert_rootfs_basics(rootfs_dir)
-            validation = _runtime_validation_metadata(rootfs_dir)
+            assert_rootfs_basics(rootfs_dir)
+            validation = runtime_validation_metadata(rootfs_dir)
 
             print(f"[dockify] Building ext4 image ({size_mb} MiB)", flush=True)
-            _build_ext4_from_rootfs(temp_ext4=temp_ext4, rootfs_dir=rootfs_dir, size_mb=size_mb)
+            build_ext4_from_rootfs(temp_ext4=temp_ext4, rootfs_dir=rootfs_dir, size_mb=size_mb)
 
             metadata = {
                 "runtime": runtime_name,
                 "source_image": image,
                 "rootfs": str(final_rootfs),
                 "size_mb": size_mb,
-                "created_at": _utc_now_iso(),
+                "created_at": utc_now_iso(),
                 "init_injected": True,
                 "validation": validation,
             }
@@ -275,8 +275,8 @@ def run_dockify_command(
             write_json_atomic(final_metadata, metadata, encoding="utf-8", pretty=True)
 
             if effective_owner is not None:
-                _chown_path(final_rootfs, effective_owner)
-                _chown_path(final_metadata, effective_owner)
+                chown_path(final_rootfs, effective_owner)
+                chown_path(final_metadata, effective_owner)
 
         except Exception:
             remove_file(temp_ext4, missing_ok=True)
@@ -286,7 +286,7 @@ def run_dockify_command(
         finally:
             if container_id:
                 try:
-                    _run_checked(["docker", "rm", "-f", container_id])
+                    run_checked(["docker", "rm", "-f", container_id])
                 except Exception:
                     pass
 

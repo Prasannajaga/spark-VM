@@ -19,7 +19,7 @@ from sparkvm.fsops import (
 _ROLLOUT_METADATA_VERSION = 1
 
 
-def _run_checked(cmd: list[str]) -> None:
+def run_checked(cmd: list[str]) -> None:
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True)
     except FileNotFoundError as exc:
@@ -31,27 +31,27 @@ def _run_checked(cmd: list[str]) -> None:
         raise CleanupError(f"Command failed: {' '.join(cmd)}\n{detail}") from exc
 
 
-def _rollouts_dir(config: SparkVMConfig) -> Path:
+def rollouts_dir(config: SparkVMConfig) -> Path:
     return config.home_dir / "rollouts"
 
 
-def _workers_dir(config: SparkVMConfig) -> Path:
+def workers_dir(config: SparkVMConfig) -> Path:
     return config.workers_dir
 
 
-def _metadata_payload() -> dict[str, object]:
+def metadata_payload() -> dict[str, object]:
     return {"version": _ROLLOUT_METADATA_VERSION, "rollouts": []}
 
 
-def _write_rollout_metadata_reset(rollouts_dir: Path) -> None:
-    metadata_path = rollouts_dir / "metadata.json"
+def write_rollout_metadata_reset(rollouts_dir_path: Path) -> None:
+    metadata_path = rollouts_dir_path / "metadata.json"
     try:
-        write_json_atomic(metadata_path, _metadata_payload(), encoding="utf-8", pretty=True)
+        write_json_atomic(metadata_path, metadata_payload(), encoding="utf-8", pretty=True)
     except OSError as exc:
         raise CleanupError(f"Could not reset rollout metadata at {metadata_path}") from exc
 
 
-def _path_within(base: Path, candidate: Path) -> bool:
+def path_within(base: Path, candidate: Path) -> bool:
     try:
         candidate.relative_to(base)
         return True
@@ -59,7 +59,7 @@ def _path_within(base: Path, candidate: Path) -> bool:
         return False
 
 
-def _unescape_mount_path(raw: str) -> str:
+def unescape_mount_path(raw: str) -> str:
     return (
         raw.replace("\\040", " ")
         .replace("\\011", "\t")
@@ -68,7 +68,7 @@ def _unescape_mount_path(raw: str) -> str:
     )
 
 
-def _mount_points_under(base_dir: Path) -> list[Path]:
+def mount_points_under(base_dir: Path) -> list[Path]:
     mountinfo = Path("/proc/self/mountinfo")
     if not mountinfo.exists():
         return []
@@ -83,17 +83,17 @@ def _mount_points_under(base_dir: Path) -> list[Path]:
         parts = line.split()
         if len(parts) < 5:
             continue
-        mount_path = Path(_unescape_mount_path(parts[4]))
-        if mount_path == base_dir or _path_within(base_dir, mount_path):
+        mount_path = Path(unescape_mount_path(parts[4]))
+        if mount_path == base_dir or path_within(base_dir, mount_path):
             points.append(mount_path)
 
     return sorted(points, key=lambda path: len(path.parts), reverse=True)
 
 
-def _unmount_under(base_dir: Path) -> None:
-    for mount_path in _mount_points_under(base_dir):
+def unmount_under(base_dir: Path) -> None:
+    for mount_path in mount_points_under(base_dir):
         try:
-            _run_checked(["umount", str(mount_path)])
+            run_checked(["umount", str(mount_path)])
         except CleanupError as exc:
             raise CleanupError(
                 f"Could not unmount active mount '{mount_path}' while cleaning '{base_dir}'. "
@@ -104,33 +104,33 @@ def _unmount_under(base_dir: Path) -> None:
 def cleanup_rollouts(config: SparkVMConfig, *, force: bool = False, dry_run: bool = False) -> None:
     del force  # CLI handles user confirmation before calling this function.
 
-    rollouts_dir = _rollouts_dir(config)
-    for child in list_dirs_with_prefix(rollouts_dir, "rollout-"):
+    rollouts_dir_path = rollouts_dir(config)
+    for child in list_dirs_with_prefix(rollouts_dir_path, "rollout-"):
         if not dry_run:
             remove_tree(child, ignore_errors=False)
 
     if not dry_run:
-        _write_rollout_metadata_reset(rollouts_dir)
+        write_rollout_metadata_reset(rollouts_dir_path)
 
 
 def cleanup_workers(config: SparkVMConfig, *, force: bool = False, dry_run: bool = False) -> None:
     del force  # CLI handles user confirmation before calling this function.
 
-    workers_dir = _workers_dir(config)
-    if not workers_dir.exists():
+    workers_dir_path = workers_dir(config)
+    if not workers_dir_path.exists():
         return
 
-    for vm_dir in list_dirs_with_prefix(workers_dir, "vm-"):
+    for vm_dir in list_dirs_with_prefix(workers_dir_path, "vm-"):
         if dry_run:
             continue
-        _unmount_under(vm_dir)
+        unmount_under(vm_dir)
         remove_tree(vm_dir, ignore_errors=False)
 
     if dry_run:
         return
 
     # Remove stale socket/image files left behind outside vm-* directories.
-    for candidate in workers_dir.rglob("*"):
+    for candidate in workers_dir_path.rglob("*"):
         if candidate.name not in {"firecracker.sock", "rollout.ext4"}:
             continue
         try:
@@ -178,17 +178,17 @@ def run_cleanup_command(home_dir: str | None, target: str, force: bool) -> int:
     return 0
 
 
-def _reset_home(config: SparkVMConfig, *, dry_run: bool = False) -> None:
+def reset_home(config: SparkVMConfig, *, dry_run: bool = False) -> None:
     home_dir = config.home_dir
     if not home_dir.exists():
         return
 
     # Ensure mounted worker subpaths are unmounted before deleting home contents.
-    workers_dir = config.workers_dir
-    if workers_dir.exists():
-        for vm_dir in list_dirs_with_prefix(workers_dir, "vm-"):
+    workers_dir_path = config.workers_dir
+    if workers_dir_path.exists():
+        for vm_dir in list_dirs_with_prefix(workers_dir_path, "vm-"):
             if not dry_run:
-                _unmount_under(vm_dir)
+                unmount_under(vm_dir)
 
     for child in home_dir.iterdir():
         if dry_run:
@@ -214,7 +214,7 @@ def run_reset_command(home_dir: str | None, force: bool) -> int:
         runtime=DEFAULT_RUNTIME,
         home_dir=home_dir,
     )
-    _reset_home(config, dry_run=False)
+    reset_home(config, dry_run=False)
     print("SparkVM reset complete.")
     return 0
 

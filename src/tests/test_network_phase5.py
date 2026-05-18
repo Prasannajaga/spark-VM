@@ -32,8 +32,8 @@ class NetworkPhase5Test(unittest.TestCase):
                 return _CP("1.1.1.1 via 192.168.1.1 dev wlp2s0 src 192.168.1.22")
             return _CP("")
 
-        with patch("sparkvm.network._has_network_privileges", return_value=True), patch.object(
-            manager, "_run_raw", side_effect=_fake_run_raw
+        with patch("sparkvm.network.has_network_privileges", return_value=True), patch.object(
+            manager, "run_raw", side_effect=_fake_run_raw
         ):
             config = manager.setup("vm-02e67edfc7a0")
 
@@ -54,8 +54,8 @@ class NetworkPhase5Test(unittest.TestCase):
         def _capture(cmd: list[str]) -> None:
             calls.append(list(cmd))
 
-        with patch.object(manager, "_run_checked", side_effect=_capture):
-            cfg = manager.setup.__globals__["_build_network_config"](vm_id="vm-abcd1234", out_iface="eth0")
+        with patch.object(manager, "run_checked", side_effect=_capture):
+            cfg = manager.setup.__globals__["build_network_config"](vm_id="vm-abcd1234", out_iface="eth0")
             manager.cleanup(cfg)
 
         self.assertIn(["ip", "link", "delete", cfg.tap_name], calls)
@@ -82,13 +82,13 @@ class NetworkPhase5Test(unittest.TestCase):
         def _fail(_cmd: list[str]) -> None:
             raise Exception("boom")
 
-        with patch.object(manager, "_run_checked", side_effect=_fail):
-            cfg = manager.setup.__globals__["_build_network_config"](vm_id="vm-abcd1234", out_iface="eth0")
+        with patch.object(manager, "run_checked", side_effect=_fail):
+            cfg = manager.setup.__globals__["build_network_config"](vm_id="vm-abcd1234", out_iface="eth0")
             with self.assertRaises(CleanupError):
                 manager.cleanup(cfg)
 
     def test_render_network_env_file(self) -> None:
-        cfg = NetworkManager.setup.__globals__["_build_network_config"](vm_id="vm-xyz", out_iface="eth0")
+        cfg = NetworkManager.setup.__globals__["build_network_config"](vm_id="vm-xyz", out_iface="eth0")
         text = render_network_env_file(cfg)
         self.assertIn("SPARKVM_NET_ENABLED=1", text)
         self.assertIn("SPARKVM_GUEST_CIDR=", text)

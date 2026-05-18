@@ -23,7 +23,7 @@ from cli.setup import (
 from sparkvm.workers import Workers
 
 
-def _build_parser() -> argparse.ArgumentParser:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="sparkvm", description="SparkVM setup and diagnostics")
     parser.add_argument(
         "--home-dir",
@@ -109,14 +109,14 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _run_doctor(home_dir: str | None) -> int:
+def run_doctor(home_dir: str | None) -> int:
     paths = get_sparkvm_paths(home_dir)
     status = doctor_status(paths)
     print(format_doctor_report(status))
     return 0
 
 
-def _run_workers_list(home_dir: str | None) -> int:
+def run_workers_list(home_dir: str | None) -> int:
     workers = Workers(home_dir=home_dir)
     items = workers.list()
     if not items:
@@ -151,7 +151,7 @@ def _run_workers_list(home_dir: str | None) -> int:
     return 0
 
 
-def _run_workers_view(
+def run_workers_view(
     home_dir: str | None,
     vm_id: str,
     *,
@@ -173,7 +173,7 @@ def _run_workers_view(
     return 0
 
 
-def _run_workers_delete(home_dir: str | None, vm_id: str, *, force: bool) -> int:
+def run_workers_delete(home_dir: str | None, vm_id: str, *, force: bool) -> int:
     if not force:
         response = input(f"Delete worker {vm_id}? [y/N] ").strip().lower()
         if response not in {"y", "yes"}:
@@ -187,16 +187,16 @@ def _run_workers_delete(home_dir: str | None, vm_id: str, *, force: bool) -> int
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = _build_parser()
+    parser = build_parser()
     args = parser.parse_args(argv)
 
     try:
         if args.command == "doctor":
-            return _run_doctor(args.home_dir)
+            return run_doctor(args.home_dir)
 
         if args.command == "network":
             if args.network_command == "doctor":
-                return _run_doctor(args.home_dir)
+                return run_doctor(args.home_dir)
             parser.error(f"Unknown network command: {args.network_command}")
             return 2
 
@@ -232,9 +232,9 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "workers":
             if args.workers_command == "list":
-                return _run_workers_list(args.home_dir)
+                return run_workers_list(args.home_dir)
             if args.workers_command == "view":
-                return _run_workers_view(
+                return run_workers_view(
                     args.home_dir,
                     args.vm_id,
                     tail=args.tail,
@@ -242,7 +242,7 @@ def main(argv: list[str] | None = None) -> int:
                     show_path=args.path,
                 )
             if args.workers_command == "delete":
-                return _run_workers_delete(args.home_dir, args.vm_id, force=args.force)
+                return run_workers_delete(args.home_dir, args.vm_id, force=args.force)
             parser.error(f"Unknown workers command: {args.workers_command}")
             return 2
 
