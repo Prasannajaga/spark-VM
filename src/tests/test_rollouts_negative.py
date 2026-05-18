@@ -9,15 +9,15 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sparkvm.errors import RolloutError, RolloutMetadataError, RolloutNotFoundError
-from sparkvm.rollouts import Rollout
+from sparkvm.errors import BaseImageNotFound, InvalidRolloutModeError, RolloutError, RolloutMetadataError, RolloutNotFoundError
+from sparkvm.rollouts import Rollouts
 
 
 class RolloutNegativeTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory(prefix="sparkvm-rollout-negative-")
         self.home_dir = Path(self.tmp.name)
-        self.rollout = Rollout(home_dir=self.home_dir)
+        self.rollout = Rollouts(home_dir=self.home_dir)
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
@@ -33,35 +33,41 @@ class RolloutNegativeTest(unittest.TestCase):
         with self.assertRaises(RolloutError):
             self.rollout.create(
                 name="bad-empty-files",
-                runtime="python-3.12",
                 files={},
-                command="python3 /job/main.py",
+                run_cmd="python3 /job/main.py",
             )
 
-    def test_create_rejects_invalid_runtime(self) -> None:
-        with self.assertRaises(RolloutError):
+    def test_create_rejects_invalid_base_image(self) -> None:
+        with self.assertRaises(BaseImageNotFound):
             self.rollout.create(
-                name="bad-runtime",
-                runtime="python-3.11",
+                name="bad-image",
+                base_image="python-3.11",
                 files={"main.py": "print('x')"},
-                command="python3 /job/main.py",
+                run_cmd="python3 /job/main.py",
+            )
+
+    def test_create_rejects_invalid_mode(self) -> None:
+        with self.assertRaises(InvalidRolloutModeError):
+            self.rollout.create(
+                name="bad-mode",
+                mode="container",
+                files={"main.py": "print('x')"},
+                run_cmd="python3 /job/main.py",
             )
 
     def test_create_rejects_invalid_name_and_command(self) -> None:
         with self.assertRaises(RolloutError):
             self.rollout.create(
                 name="",
-                runtime="python-3.12",
                 files={"main.py": "print('x')"},
-                command="python3 /job/main.py",
+                run_cmd="python3 /job/main.py",
             )
 
         with self.assertRaises(RolloutError):
             self.rollout.create(
                 name="bad-command",
-                runtime="python-3.12",
                 files={"main.py": "print('x')"},
-                command="  ",
+                run_cmd="  ",
             )
 
     def test_create_rejects_invalid_rollout_paths(self) -> None:
@@ -80,18 +86,16 @@ class RolloutNegativeTest(unittest.TestCase):
                 with self.assertRaises(RolloutError):
                     self.rollout.create(
                         name="bad-path",
-                        runtime="python-3.12",
                         files={path: "print('x')"},
-                        command="python3 /job/main.py",
+                        run_cmd="python3 /job/main.py",
                     )
 
     def test_create_rejects_invalid_file_content_type(self) -> None:
         with self.assertRaises(RolloutError):
             self.rollout.create(
                 name="bad-content",
-                runtime="python-3.12",
                 files={"main.py": 123},  # type: ignore[arg-type]
-                command="python3 /job/main.py",
+                run_cmd="python3 /job/main.py",
             )
 
     def test_get_by_id_rejects_invalid_rollout_id_format(self) -> None:
@@ -108,9 +112,10 @@ class RolloutNegativeTest(unittest.TestCase):
                     {
                         "id": "rollout-missing-dir",
                         "name": "x",
-                        "runtime": "python-3.12",
+                        "base_image": "debian-minbase",
                         "path": str(self.home_dir / "rollouts" / "rollout-missing-dir"),
                         "command": "python3 /job/main.py",
+                        "run_cmd": "python3 /job/main.py",
                         "files": ["main.py", "run.sh"],
                         "created_at": "2026-01-01T00:00:00Z",
                         "updated_at": None,
@@ -133,9 +138,10 @@ class RolloutNegativeTest(unittest.TestCase):
                     {
                         "id": "rollout-has-dir-no-json",
                         "name": "x",
-                        "runtime": "python-3.12",
+                        "base_image": "debian-minbase",
                         "path": str(rollout_dir),
                         "command": "python3 /job/main.py",
+                        "run_cmd": "python3 /job/main.py",
                         "files": ["main.py", "run.sh"],
                         "created_at": "2026-01-01T00:00:00Z",
                         "updated_at": None,

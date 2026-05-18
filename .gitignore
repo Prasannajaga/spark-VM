@@ -1,2 +1,4 @@
 
 *.pyc
+wget-log
+wget-log.1

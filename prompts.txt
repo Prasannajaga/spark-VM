@@ -1,0 +1,674 @@
+Update SparkVM to use a Debian minbase rootfs as the default managed VM image.
+
+Goal:
+Remove static language runtimes and Docker-export based rootfs creation.
+
+SparkVM should use one lightweight Debian minbase rootfs:
+
+~/.sparkvm/images/debian-rootfs.ext4
+
+Users install dependencies through rollout setup_cmd and execute through run_cmd.
+
+Network support is NOT required in this phase.
+We will implement networking later.
+
+Important:
+Do not use Docker to build rootfs.
+Use debootstrap.
+
+Firecracker still uses:
+- managed Firecracker binary
+- managed kernel image
+- managed Debian rootfs image
+- rollout execution disk
+
+Default managed layout:
+
+~/.sparkvm/
+├── bin/
+│   └── firecracker
+├── images/
+│   ├── vmlinux
+│   └── debian-rootfs.ext4
+├── rollouts/
+│   ├── metadata.json
+│   └── rollout-*/
+├── workers/
+└── cache/
+
+Public user flow:
+
+sparkvm setup
+
+Then:
+
+from sparkvm.rollouts import Rollouts
+from sparkvm import SparkVM
+
+rollouts = Rollouts()
+
+rollout = rollouts.create(
+    name="repo-test",
+    mode="repo",
+    source="./my-repo",
+    setup_cmd="apt-get update && apt-get install -y python3 python3-pip && pip3 install -r requirements.txt",
+    run_cmd="pytest -q",
+    disk_mb=8192,
+)
+
+result = SparkVM(vcpu=2, memory="4G", timeout=900).run(rollout.id)
+
+print(result.stdout)
+print(result.stderr)
+print(result.exit_code)
+
+Important limitation:
+Since VM networking is not implemented yet, setup_cmd commands that require internet access may fail inside the VM.
+Document this clearly.
+For now, users can:
+- vendor dependencies inside the repo
+- use local files in rollout
+- wait for networking support
+
+Do not fake networking support.
+
+--------------------------------------------------
+1. Replace runtime/base image model
+--------------------------------------------------
+
+Remove python-3.12 runtime requirement.
+
+Use:
+
+base_image = "debian-minbase"
+
+In rollout metadata:
+- use base_image instead of runtime
+
+Default:
+- base_image = "debian-minbase"
+
+For MVP, only this base image is supported.
+
+Invalid base_image should raise BaseImageNotFound or SparkVMConfigError.
+
+Update Rollout dataclass:
+
+@dataclass(frozen=True)
+class Rollout:
+    id: str
+    name: str
+    mode: str
+    base_image: str
+    path: Path
+    command: str | None
+    setup_cmd: str | None
+    run_cmd: str | None
+    disk_mb: int
+    files: list[str]
+    created_at: str
+    updated_at: str | None = None
+
+For script mode:
+- command may be kept for backwards compatibility, but run_cmd is preferred.
+- run_cmd is required.
+
+For repo mode:
+- setup_cmd optional
+- run_cmd required
+
+--------------------------------------------------
+2. Image resolver
+--------------------------------------------------
+
+Update sparkvm/image.py.
+
+Rename RuntimeImage to BaseImage if needed.
+
+Create:
+
+@dataclass(frozen=True)
+class BaseImage:
+    name: str
+    kernel_image: Path
+    rootfs_image: Path
+    boot_args: str
+
+Function:
+
+resolve_base_image(base_image: str, config: SparkVMConfig) -> BaseImage
+
+For base_image="debian-minbase":
+- kernel_image = ~/.sparkvm/images/vmlinux
+- rootfs_image = ~/.sparkvm/images/debian-rootfs.ext4
+- boot_args = "console=ttyS0 reboot=k panic=1 pci=off init=/init"
+
+If kernel or rootfs is missing, raise BaseImageNotFound with:
+
+"Debian base image not found. Run `sparkvm setup`."
+
+Do not require users to pass kernel/rootfs paths.
+
+--------------------------------------------------
+3. Setup behavior
+--------------------------------------------------
+
+Update `sparkvm setup`.
+
+It should:
+
+1. Create directories:
+   - ~/.sparkvm
+   - ~/.sparkvm/bin
+   - ~/.sparkvm/images
+   - ~/.sparkvm/rollouts
+   - ~/.sparkvm/workers
+   - ~/.sparkvm/cache
+
+2. Install or verify Firecracker binary:
+   - ~/.sparkvm/bin/firecracker
+
+3. Install or verify kernel image:
+   - ~/.sparkvm/images/vmlinux
+
+4. Build Debian minbase rootfs:
+   - ~/.sparkvm/images/debian-rootfs.ext4
+
+5. Inject SparkVM /init into rootfs.
+
+6. Ensure /init is executable.
+
+7. Initialize rollouts metadata:
+   - ~/.sparkvm/rollouts/metadata.json
+
+8. Run basic doctor checks.
+
+Remove:
+- sparkvm setup python
+
+If user runs `sparkvm setup python`, print:
+"Language-specific setup is no longer required. Use rollout setup_cmd instead."
+
+--------------------------------------------------
+4. Host requirements
+--------------------------------------------------
+
+`sparkvm doctor` should check:
+
+Required:
+- Linux host
+- architecture x86_64 or aarch64
+- /dev/kvm exists and is accessible
+- firecracker binary exists and is executable
+- debootstrap installed
+- dd installed
+- mkfs.ext4 installed
+- mount installed
+- umount installed
+- chroot installed
+- sudo available if current user is not root
+- enough disk space in ~/.sparkvm/images
+
+Optional:
+- git installed, required for repo Git URL rollouts
+
+Doctor output should clearly show:
+- OK / MISSING / ERROR
+
+If debootstrap is missing:
+- show install hint:
+  Debian/Ubuntu host:
+  sudo apt-get install -y debootstrap
+
+Do not install host dependencies automatically unless already designed elsewhere.
+Fail clearly.
+
+--------------------------------------------------
+5. Debian rootfs builder
+--------------------------------------------------
+
+Implement rootfs build helper in setup.py or image builder module.
+
+Function:
+
+build_debian_minbase_rootfs(
+    *,
+    output_path: Path,
+    size_mb: int = 2048,
+    suite: str = "bookworm",
+    mirror: str = "http://deb.debian.org/debian",
+    force: bool = False,
+) -> Path
+
+Behavior:
+
+1. If output_path exists and force=False:
+   - reuse it
+   - return output_path
+
+2. Create temp build directory under:
+   ~/.sparkvm/cache/build-debian-*/
+
+3. Create rootfs directory:
+   <temp>/rootfs
+
+4. Run debootstrap:
+
+   sudo debootstrap \
+     --variant=minbase \
+     --include=ca-certificates,curl,iproute2,procps,coreutils,util-linux \
+     bookworm \
+     <temp>/rootfs \
+     http://deb.debian.org/debian
+
+Notes:
+- ca-certificates/curl are useful later when network is implemented.
+- iproute2 is needed later for guest network config.
+- util-linux/coreutils provide common tools.
+- Do not install python/node/go by default.
+- Keep the rootfs minimal.
+
+5. Inject /init:
+   write <temp>/rootfs/init
+   chmod +x <temp>/rootfs/init
+
+6. Ensure basic files exist:
+   - /bin/sh
+   - /init
+   - /sbin/poweroff or equivalent
+   - /bin/mount or /usr/bin/mount
+
+7. Create ext4 image:
+
+   dd if=/dev/zero of=<output_path>.tmp bs=1M count=<size_mb>
+   mkfs.ext4 -F <output_path>.tmp
+
+8. Mount image:
+
+   sudo mount <output_path>.tmp <mount_dir>
+
+9. Copy rootfs into mounted image:
+
+   sudo cp -a <temp>/rootfs/. <mount_dir>/
+
+10. Sync and unmount:
+
+   sync
+   sudo umount <mount_dir>
+
+11. Atomic rename:
+
+   mv <output_path>.tmp <output_path>
+
+12. Cleanup temp dirs even on failure where safe.
+
+Errors:
+- Missing debootstrap -> SparkVMSetupError
+- debootstrap failure -> SparkVMSetupError
+- mount failure -> SparkVMSetupError
+- copy failure -> SparkVMSetupError
+- unmount failure -> CleanupError or SparkVMSetupError
+
+Important:
+Do not leave mounted filesystems behind.
+Use finally blocks for unmount cleanup.
+
+--------------------------------------------------
+6. SparkVM /init for Debian rootfs
+--------------------------------------------------
+
+Inject this /init into the Debian rootfs:
+
+#!/bin/sh
+set +e
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev || true
+
+mkdir -p /job
+mount /dev/vdb /job
+
+mkdir -p /job/results
+
+cd /job
+
+if [ -f /job/setup.sh ]; then
+  sh /job/setup.sh > /job/results/setup.stdout.log 2> /job/results/setup.stderr.log
+  setup_code=$?
+else
+  setup_code=0
+fi
+
+echo "$setup_code" > /job/results/setup.exit_code
+
+if [ "$setup_code" -ne 0 ]; then
+  echo "$setup_code" > /job/results/final_exit_code
+  sync
+  poweroff -f
+fi
+
+sh /job/run.sh > /job/results/run.stdout.log 2> /job/results/run.stderr.log
+run_code=$?
+
+echo "$run_code" > /job/results/run.exit_code
+echo "$run_code" > /job/results/final_exit_code
+
+sync
+poweroff -f
+
+Important:
+- /init must not assume Python exists.
+- /init must not assume network exists.
+- /init must only run setup.sh if it exists.
+- /init must always run run.sh after successful setup.
+- /init must write phase logs into /job/results.
+- /init must power off the VM.
+
+--------------------------------------------------
+7. Rollouts.create() update
+--------------------------------------------------
+
+Update Rollouts.create() signature:
+
+def create(
+    self,
+    *,
+    name: str,
+    mode: str = "script",
+    base_image: str = "debian-minbase",
+
+    # script mode
+    files: dict[str, str | bytes] | None = None,
+
+    # repo mode
+    source: str | Path | None = None,
+    ref: str | None = None,
+
+    # execution
+    setup_cmd: str | None = None,
+    run_cmd: str,
+    disk_mb: int | None = None,
+) -> Rollout:
+    ...
+
+Rules:
+- run_cmd is required for both modes.
+- setup_cmd is optional.
+- mode must be "script" or "repo".
+- base_image must be "debian-minbase" for MVP.
+- script default disk_mb = 1024
+- repo default disk_mb = 4096
+- user-provided disk_mb overrides default
+
+Script mode:
+- files required and non-empty
+- write files to rollout directory
+- write setup.sh only if setup_cmd is provided
+- write run.sh:
+
+#!/bin/sh
+set -eu
+cd /job
+<run_cmd>
+
+Repo mode:
+- source required
+- local source must exist and contain .git
+- if no .git, raise InvalidRepoError:
+  "Local repo source must be a Git repository containing a .git directory."
+- Git URL source should clone
+- copy or clone into rollout/repo
+- write setup.sh only if setup_cmd is provided
+- write run.sh:
+
+#!/bin/sh
+set -eu
+cd /job/repo
+<run_cmd>
+
+Do not create instructions.md.
+
+Users who need agent instructions can keep them inside the repo or create them as part of setup_cmd/run_cmd.
+
+--------------------------------------------------
+8. Result collection
+--------------------------------------------------
+
+Keep phase-based result collection.
+
+Read from execution disk:
+
+/results/setup.stdout.log
+/results/setup.stderr.log
+/results/setup.exit_code
+
+/results/run.stdout.log
+/results/run.stderr.log
+/results/run.exit_code
+
+/results/final_exit_code
+
+VMResult:
+
+@dataclass(frozen=True)
+class PhaseResult:
+    name: str
+    stdout: str
+    stderr: str
+    exit_code: int
+
+@dataclass(frozen=True)
+class VMResult:
+    rollout_id: str
+    rollout_name: str
+    rollout_mode: str
+    base_image: str
+    vm_id: str
+    status: str
+    exit_code: int
+    duration_ms: int
+    setup: PhaseResult | None = None
+    run: PhaseResult | None = None
+    timed_out: bool = False
+    oom_killed: bool = False
+    firecracker_log_path: Path | None = None
+    execution_disk_path: Path | None = None
+
+Properties:
+- stdout returns run.stdout if run exists else ""
+- stderr returns run.stderr if run exists else ""
+- passed returns exit_code == 0 and not timed_out and not oom_killed
+
+Status rules:
+- setup_failed if setup.exit_code != 0
+- run_failed if run.exit_code != 0
+- passed if final_exit_code == 0
+- infrastructure_failed for boot/disk/api failures
+- timeout for timeout
+- oom for likely OOM
+
+--------------------------------------------------
+9. SparkVM.run()
+--------------------------------------------------
+
+Update SparkVM.run() to use base image resolver:
+
+1. Load rollout.
+2. Resolve base image from rollout.base_image.
+3. Create temporary worker dir:
+   ~/.sparkvm/workers/<vm-id>/
+4. Create execution disk:
+   ~/.sparkvm/workers/<vm-id>/rollout.ext4
+5. Copy full rollout directory into execution disk.
+6. Start Firecracker:
+   ~/.sparkvm/bin/firecracker
+7. Configure:
+   - boot source: ~/.sparkvm/images/vmlinux
+   - rootfs: ~/.sparkvm/images/debian-rootfs.ext4
+   - rollout disk: /dev/vdb
+   - CPU/memory
+8. Start VM.
+9. Wait for exit.
+10. Read phase results from execution disk.
+11. Return VMResult.
+12. Cleanup worker dir on:
+   - successful execution 
+13. Preserve worker dir:
+   - setup cmd failure
+   - run cmd failure 
+   - infrastructure failure
+
+No networking in this phase.
+Do not attach TAP device.
+Do not implement NAT.
+Do not configure guest eth0.
+
+--------------------------------------------------
+10. CLI updates
+--------------------------------------------------
+
+Update setup CLI:
+
+sparkvm setup
+- installs/verifies Firecracker
+- installs/verifies kernel
+- builds/verifies Debian minbase rootfs
+- initializes SparkVM directories
+
+sparkvm doctor
+- checks Debian rootfs exists
+- checks debootstrap
+- checks KVM
+- checks Firecracker
+- checks tools
+
+Remove:
+
+sparkvm setup python
+
+Rollout CLI examples:
+
+Script mode:
+
+sparkvm rollouts create \
+  --name hello \
+  --mode script \
+  --file main.py \
+  --setup-cmd "echo no setup" \
+  --run-cmd "sh /job/main.py"
+
+Repo mode:
+
+sparkvm rollouts create \
+  --name repo-test \
+  --mode repo \
+  --source ./my-repo \
+  --setup-cmd "echo setup placeholder" \
+  --run-cmd "pytest -q" \
+  --disk-mb 8192
+
+Since networking is not implemented yet, docs should warn:
+- apt-get/pip/npm install inside VM may fail until networking is enabled.
+- Use vendored dependencies or offline artifacts for now.
+
+--------------------------------------------------
+11. Documentation
+--------------------------------------------------
+
+Update phase docs and README.
+
+Must explain:
+1. SparkVM now uses Debian minbase, not Ubuntu, Docker image export, or python-specific rootfs.
+2. `sparkvm setup` builds:
+   ~/.sparkvm/images/debian-rootfs.ext4
+3. Language dependencies are user responsibility through setup_cmd.
+4. setup_cmd runs inside the VM, not on host.
+5. run_cmd runs after setup_cmd.
+6. Network access is not implemented yet.
+7. Commands requiring internet access will not work until networking is added.
+8. The rootfs is intentionally minimal.
+9. Users can vendor dependencies into the repo/rollout as a workaround.
+
+Also update phase<no>.md:
+If this is current Phase 3, update phase3.md.
+If this is a new phase, create phase4.md.
+
+The phase document must explain:
+- what was changed
+- why Debian minbase was chosen
+- why Docker export was removed
+- why language-specific rootfs was removed
+- current no-network limitation
+- what remains for future networking phase
+
+--------------------------------------------------
+12. Tests
+--------------------------------------------------
+
+Unit tests:
+1. resolve_base_image("debian-minbase") returns managed paths.
+2. missing debian-rootfs.ext4 raises BaseImageNotFound.
+3. Rollouts.create() defaults base_image to debian-minbase.
+4. Rollouts.create(mode="script") writes setup.sh only when setup_cmd exists.
+5. Rollouts.create(mode="repo") writes setup.sh only when setup_cmd exists.
+6. rollout.json includes base_image.
+7. metadata.json includes base_image.
+8. invalid base_image rejected.
+9. result parsing handles setup/run phase logs.
+
+Setup tests:
+Mock subprocess calls for:
+- debootstrap
+- dd
+- mkfs.ext4
+- mount
+- cp
+- umount
+
+Verify:
+- debootstrap called with --variant=minbase
+- output path is ~/.sparkvm/images/debian-rootfs.ext4
+- /init is injected
+- cleanup attempts unmount on failure
+
+Integration tests:
+Skip unless SPARKVM_RUN_INTEGRATION=1.
+
+Basic script integration:
+- create script rollout with no setup_cmd
+- file: hello.sh
+- run_cmd: "sh /job/hello.sh"
+- hello.sh prints "integration-ok"
+- SparkVM.run returns passed result
+
+Repo integration:
+- create temp local Git repo
+- add hello.sh
+- commit
+- create repo rollout with no setup_cmd
+- run_cmd: "sh hello.sh"
+- SparkVM.run returns passed result
+
+Do not require networking in integration tests.
+
+--------------------------------------------------
+Acceptance criteria
+--------------------------------------------------
+
+1. Docker is no longer used to build the rootfs.
+2. Ubuntu rootfs is not used.
+3. python-3.12 rootfs/runtime is not required.
+4. `sparkvm setup` builds/verifies ~/.sparkvm/images/debian-rootfs.ext4.
+5. Rootfs is built using debootstrap --variant=minbase.
+6. /init is injected into Debian rootfs.
+7. Rollouts use base_image="debian-minbase".
+8. setup_cmd is optional and runs before run_cmd.
+9. run_cmd is required.
+10. Script mode commands run inside /job.
+11. Repo mode commands run inside /job/repo.
+12. SparkVM.run uses ~/.sparkvm/images/vmlinux and ~/.sparkvm/images/debian-rootfs.ext4.
+13. No networking is implemented in this phase.
+14. Docs clearly state network-dependent setup commands may fail for now.
+15. Successful runs and normal command failures clean up worker directory.
+16. Infrastructure failures preserve worker directory with failure.json.

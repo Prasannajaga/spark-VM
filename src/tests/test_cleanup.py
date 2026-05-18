@@ -9,9 +9,9 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sparkvm.cleanup import cleanup_all, cleanup_rollouts, cleanup_workers
+from cli.cleanup import cleanup_all, cleanup_rollouts, cleanup_workers
 from sparkvm.cli import main as cli_main
-from sparkvm.config import DEFAULT_MEMORY, DEFAULT_RUNTIME, DEFAULT_TIMEOUT_SEC, DEFAULT_VCPU, build_config
+from sparkvm.config import DEFAULT_BASE_IMAGE, DEFAULT_MEMORY, DEFAULT_TIMEOUT_SEC, DEFAULT_VCPU, build_config
 
 
 class CleanupTest(unittest.TestCase):
@@ -22,7 +22,7 @@ class CleanupTest(unittest.TestCase):
             vcpu=DEFAULT_VCPU,
             memory=DEFAULT_MEMORY,
             timeout=DEFAULT_TIMEOUT_SEC,
-            runtime=DEFAULT_RUNTIME,
+            base_image=DEFAULT_BASE_IMAGE,
             home_dir=self.home,
         )
 
@@ -42,9 +42,10 @@ class CleanupTest(unittest.TestCase):
                         {
                             "id": "rollout-example-1",
                             "name": "example",
-                            "runtime": "python-3.12",
+                            "base_image": "debian-minbase",
                             "path": str(rollout_dir),
                             "command": "python3 /job/main.py",
+                            "run_cmd": "python3 /job/main.py",
                             "files": ["main.py", "run.sh"],
                             "created_at": "2026-01-01T00:00:00Z",
                             "updated_at": None,
@@ -92,7 +93,7 @@ class CleanupTest(unittest.TestCase):
         cache_dir.mkdir(parents=True, exist_ok=True)
         (bin_dir / "firecracker").write_text("binary\n", encoding="utf-8")
         (image_dir / "vmlinux").write_text("kernel\n", encoding="utf-8")
-        (image_dir / "python-3.12-rootfs.ext4").write_text("rootfs\n", encoding="utf-8")
+        (image_dir / "debian-rootfs.ext4").write_text("rootfs\n", encoding="utf-8")
 
         cleanup_all(self.config, force=True, dry_run=False)
 
@@ -101,7 +102,7 @@ class CleanupTest(unittest.TestCase):
         self.assertTrue(cache_dir.exists())
         self.assertTrue((bin_dir / "firecracker").exists())
         self.assertTrue((image_dir / "vmlinux").exists())
-        self.assertTrue((image_dir / "python-3.12-rootfs.ext4").exists())
+        self.assertTrue((image_dir / "debian-rootfs.ext4").exists())
         self.assertFalse((self.home / "workers" / "vm-abc123").exists())
         self.assertFalse((self.home / "rollouts" / "rollout-example-1").exists())
 
@@ -134,6 +135,41 @@ class CleanupTest(unittest.TestCase):
         code = cli_main(["--home-dir", str(self.home), "cleanup", "workers", "--force"])
         self.assertEqual(0, code)
         self.assertFalse(worker_dir.exists())
+
+    def test_reset_force_deletes_all_home_contents(self) -> None:
+        self._write_rollout_state()
+        self._write_workers_state()
+        (self.home / "images").mkdir(parents=True, exist_ok=True)
+        (self.home / "images" / "vmlinux").write_text("kernel\n", encoding="utf-8")
+        (self.home / "images" / "debian-rootfs.ext4").write_text("rootfs\n", encoding="utf-8")
+        (self.home / "bin").mkdir(parents=True, exist_ok=True)
+        (self.home / "bin" / "firecracker").write_text("fc\n", encoding="utf-8")
+        (self.home / "cache").mkdir(parents=True, exist_ok=True)
+        (self.home / "cache" / "tmp.txt").write_text("tmp\n", encoding="utf-8")
+
+        code = cli_main(["--home-dir", str(self.home), "reset", "--force"])
+        self.assertEqual(0, code)
+        self.assertTrue(self.home.exists())
+        self.assertEqual([], list(self.home.iterdir()))
+
+    def test_reset_without_force_declined_prompt_deletes_nothing(self) -> None:
+        self._write_rollout_state()
+        rollout_dir = self.home / "rollouts" / "rollout-example-1"
+
+        with patch("builtins.input", return_value="n"):
+            code = cli_main(["--home-dir", str(self.home), "reset"])
+
+        self.assertEqual(0, code)
+        self.assertTrue(rollout_dir.exists())
+
+    def test_reset_without_force_accepted_prompt_deletes_contents(self) -> None:
+        self._write_rollout_state()
+        with patch("builtins.input", return_value="yes"):
+            code = cli_main(["--home-dir", str(self.home), "reset"])
+
+        self.assertEqual(0, code)
+        self.assertTrue(self.home.exists())
+        self.assertEqual([], list(self.home.iterdir()))
 
 
 if __name__ == "__main__":

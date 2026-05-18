@@ -2,16 +2,16 @@
 from __future__ import annotations
 
 from sparkvm import SparkVM
-from sparkvm.rollouts import Rollout
+from sparkvm.rollouts import Rollouts
 
 
 def main() -> int:
-    manager = Rollout()
+    manager = Rollouts()
     rollout = manager.create(
         name="loop-run",
-        runtime="python-3.12",
+        mode="script",
         files={"main.py": "for _ in range(100):\n    print('hello from vm run example')\n"},
-        command="python3 /job/main.py",
+        run_cmd="python3 /job/main.py",
     )
 
     print("Created rollout")

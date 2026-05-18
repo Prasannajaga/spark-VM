@@ -7,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from sparkvm import SparkVMError
 from sparkvm.errors import (
     CleanupError,
+    BaseImageNotFound,
     ExecutionDiskError,
     FirecrackerAPIError,
     FirecrackerBinaryNotInstalled,
@@ -15,6 +16,8 @@ from sparkvm.errors import (
     GuestExecutionError,
     GuestOOMError,
     HostDiskPressureError,
+    InvalidRepoError,
+    InvalidRolloutModeError,
     InvalidMemoryError,
     InvalidResourceError,
     JobDiskError,
@@ -38,6 +41,7 @@ class ErrorInheritanceTest(unittest.TestCase):
 
     def test_runtime_hierarchy(self) -> None:
         self.assertTrue(issubclass(FirecrackerBinaryNotInstalled, SparkVMError))
+        self.assertTrue(issubclass(BaseImageNotFound, SparkVMError))
         self.assertTrue(issubclass(KVMUnavailableError, SparkVMError))
         self.assertTrue(issubclass(FirecrackerProcessError, SparkVMError))
         self.assertTrue(issubclass(FirecrackerAPIError, SparkVMError))
@@ -54,6 +58,8 @@ class ErrorInheritanceTest(unittest.TestCase):
         self.assertTrue(issubclass(RolloutError, SparkVMError))
         self.assertTrue(issubclass(RolloutNotFoundError, RolloutError))
         self.assertTrue(issubclass(RolloutMetadataError, RolloutError))
+        self.assertTrue(issubclass(InvalidRepoError, RolloutError))
+        self.assertTrue(issubclass(InvalidRolloutModeError, RolloutError))
 
     def test_worker_hierarchy(self) -> None:
         self.assertTrue(issubclass(WorkerError, SparkVMError))

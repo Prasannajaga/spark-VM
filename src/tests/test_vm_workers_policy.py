@@ -11,9 +11,9 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sparkvm.errors import FirecrackerBinaryNotInstalled
-from sparkvm.image import RuntimeImage
+from sparkvm.image import BaseImage
 from sparkvm.result import VMResult
-from sparkvm.rollouts import RolloutItem
+from sparkvm.rollouts import Rollout
 from sparkvm.vm import SparkVM
 
 
@@ -62,12 +62,16 @@ class VMWorkersPolicyTest(unittest.TestCase):
         self.rollout_dir = self.home / "rollout-item"
         self.rollout_dir.mkdir(parents=True, exist_ok=True)
         (self.rollout_dir / "rollout.json").write_text("{}", encoding="utf-8")
-        self.rollout = RolloutItem(
+        self.rollout = Rollout(
             id="rollout-example-1",
             name="example",
-            runtime="python-3.12",
+            mode="script",
+            base_image="debian-minbase",
             path=self.rollout_dir,
             command="python3 /job/main.py",
+            setup_cmd=None,
+            run_cmd="python3 /job/main.py",
+            disk_mb=1024,
             files=["main.py", "run.sh"],
             created_at="2026-01-01T00:00:00Z",
             updated_at=None,
@@ -82,8 +86,8 @@ class VMWorkersPolicyTest(unittest.TestCase):
         vm._setup.firecracker_binary_path = MethodType(lambda _self: Path("/fake/firecracker"), vm._setup)
         vm._setup.assert_kvm_available = MethodType(lambda _self: None, vm._setup)
         vm._images.resolve = MethodType(
-            lambda _self, _runtime=None: RuntimeImage(
-                name="python-3.12",
+            lambda _self, _runtime=None: BaseImage(
+                name="debian-minbase",
                 kernel_image=Path("/fake/vmlinux"),
                 rootfs_image=Path("/fake/rootfs.ext4"),
                 boot_args="console=ttyS0",
@@ -95,7 +99,7 @@ class VMWorkersPolicyTest(unittest.TestCase):
             vm,
         )
         vm._configure_microvm = MethodType(
-            lambda _self, api, runtime_image, execution_disk_path: None,  # type: ignore[return-value]
+            lambda _self, api, base_image, execution_disk_path: None,  # type: ignore[return-value]
             vm,
         )
         return vm
@@ -111,11 +115,13 @@ class VMWorkersPolicyTest(unittest.TestCase):
             return VMResult(
                 rollout_id=self.rollout.id,
                 rollout_name=self.rollout.name,
+                rollout_mode=self.rollout.mode,
+                base_image=self.rollout.base_image,
                 vm_id=vm_id,
-                stdout="ok\n",
-                stderr="",
+                status="passed",
                 exit_code=0,
                 duration_ms=duration_ms,
+                run=None,
                 firecracker_log_path=firecracker_log_path,
                 execution_disk_path=self_obj.path,
             )
@@ -141,11 +147,13 @@ class VMWorkersPolicyTest(unittest.TestCase):
             return VMResult(
                 rollout_id=self.rollout.id,
                 rollout_name=self.rollout.name,
+                rollout_mode=self.rollout.mode,
+                base_image=self.rollout.base_image,
                 vm_id=vm_id,
-                stdout="",
-                stderr="traceback",
+                status="run_failed",
                 exit_code=2,
                 duration_ms=duration_ms,
+                run=None,
                 firecracker_log_path=firecracker_log_path,
                 execution_disk_path=self_obj.path,
             )
@@ -177,7 +185,7 @@ class VMWorkersPolicyTest(unittest.TestCase):
         failure_path = worker_dirs[0] / "failure.json"
         self.assertTrue(failure_path.exists())
         payload = json.loads(failure_path.read_text(encoding="utf-8"))
-        self.assertEqual("failed", payload["status"])
+        self.assertEqual("infrastructure_failed", payload["status"])
         self.assertEqual("FirecrackerBinaryNotInstalled", payload["error_type"])
         self.assertEqual(self.rollout.id, payload["rollout_id"])
 
