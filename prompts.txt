@@ -1246,3 +1246,590 @@ Acceptance criteria
 8. SparkVM.run never converts Docker image.
 9. Runtimes can be listed/inspected/deleted.
 10. Existing worker cleanup policy remains unchanged.
+
+
+
+=================================================================================
+
+Implement phase 5 SparkVM network support and runtime environment variable injection.
+
+Goal:
+Support this public API:
+
+import os
+from sparkvm import SparkVM
+
+vm = SparkVM(
+    runtime="python-3.12-slim",
+    vcpu=2,
+    memory="2G",
+    timeout=300,
+    network=True,
+    env={
+        "OPENAI_API_KEY": os.environ["OPENAI_API_KEY"],
+    },
+)
+
+result = vm.run(rollout.id)
+
+Requirements:
+1. network=True gives the Firecracker guest internet access.
+2. env variables are available to setup.sh/run.sh inside the VM.
+3. env values must NOT be stored in persistent rollouts.
+4. env values must NOT be written to failure.json.
+5. env values must NOT be printed in logs by SparkVM.
+6. env values may be written only to the temporary execution disk during one VM run.
+7. On successful run, the worker directory is deleted, so env files are deleted.
+8. On infrastructure failure, preserve worker directory for debugging but delete/redact any env file first.
+9. Do not store secrets in ~/.sparkvm/rollouts/.
+10. Do not store secrets in ~/.sparkvm/images/.
+11. Do not store secrets in ~/.sparkvm/workers/*/failure.json.
+
+Important:
+There is no safe way to pass arbitrary env vars to a Firecracker guest purely “in memory” with the current disk-based runner unless we implement vsock/serial agent later.
+For this phase, implement ephemeral runtime env file on the temporary execution disk, then delete/redact it before preserving any failed worker.
+Document this clearly.
+
+Public behavior:
+- SparkVM(env={...}) applies env to setup.sh and run.sh.
+- The env is scoped only to that VM execution.
+- Rollouts remain reusable and secret-free.
+
+--------------------------------------------------
+1. Config/API updates
+--------------------------------------------------
+
+Update SparkVM constructor:
+
+class SparkVM:
+    def __init__(
+        self,
+        *,
+        runtime: str = "python-3.12-slim",
+        vcpu: int = 1,
+        memory: int | str = "512M",
+        timeout: float = 30,
+        network: bool = False,
+        env: dict[str, str] | None = None,
+        home_dir: str | Path | None = None,
+    ) -> None:
+        ...
+
+Rules:
+- network default is False.
+- env default is empty dict.
+- Validate env:
+  - keys must be non-empty strings
+  - keys must match shell env var pattern: ^[A-Za-z_][A-Za-z0-9_]*$
+  - values must be strings
+- Store env in memory only on SparkVM instance.
+- Do not include env in repr().
+- Do not include env in config serialization.
+- Do not write env to rollout metadata.
+- Do not write env to failure.json.
+
+Add config fields:
+- network_enabled: bool
+- env: Mapping[str, str] or keep env private on SparkVM
+
+Prefer keeping env private:
+self._env = dict(env or {})
+
+--------------------------------------------------
+2. Runtime env injection
+--------------------------------------------------
+
+During SparkVM.run(), when creating the temporary execution disk, write an env file:
+
+/.sparkvm/env.sh
+
+inside the execution disk.
+
+Example content:
+
+export OPENAI_API_KEY='...shell-escaped...'
+export FOO='bar'
+
+Important:
+- This file exists only on the temporary execution disk.
+- It is not copied into persistent rollout.
+- It must be deleted or redacted before preserving failed worker artifacts.
+
+Add helper:
+
+def shell_quote(value: str) -> str:
+    ...
+
+Use shlex.quote.
+
+Add helper:
+
+def render_env_file(env: Mapping[str, str]) -> str:
+    ...
+
+Return:
+export KEY=<quoted-value>
+
+If env is empty, do not create env.sh.
+
+Execution disk layout:
+
+/job/
+├── repo/ or script files
+├── setup.sh
+├── run.sh
+├── rollout.json
+├── .sparkvm/
+│   ├── env.sh          # runtime-only, secret-bearing
+│   └── network.env     # runtime-only, non-secret
+└── results/
+
+Important:
+.env files are temporary execution-only files.
+
+--------------------------------------------------
+3. Rootfs /init update for env
+--------------------------------------------------
+
+Update dockified /init template.
+
+Before setup.sh and run.sh execute, source env file if present:
+
+if [ -f /job/.sparkvm/env.sh ]; then
+  set -a
+  . /job/.sparkvm/env.sh
+  set +a
+fi
+
+Then run setup/run.
+
+Full intended flow:
+1. mount proc/sys/dev
+2. mount rootfs writable tmpfs dirs if needed
+3. configure network if network.env exists
+4. mount /dev/vdb to /job
+5. source /job/.sparkvm/env.sh if exists
+6. run setup.sh
+7. run run.sh
+8. write phase results
+9. shutdown
+
+Security:
+- Do not print env values.
+- Do not echo env file.
+- If setup/run prints env values, SparkVM cannot prevent that. Document this limitation.
+
+--------------------------------------------------
+4. Network support design
+--------------------------------------------------
+
+Implement TAP/NAT based networking.
+
+Add new file:
+
+sparkvm/network.py
+
+Create dataclass:
+
+@dataclass(frozen=True)
+class NetworkConfig:
+    enabled: bool
+    tap_name: str
+    guest_mac: str
+    host_ip: str
+    guest_ip: str
+    guest_cidr: str
+    subnet_cidr: str
+    out_iface: str
+    dns: str = "1.1.1.1"
+
+Create class:
+
+class NetworkManager:
+    def __init__(self, *, home_dir: Path) -> None:
+        ...
+
+    def setup(self, vm_id: str) -> NetworkConfig:
+        ...
+
+    def cleanup(self, config: NetworkConfig) -> None:
+        ...
+
+Network topology:
+- One TAP device per VM.
+- Host side IP: 172.30.X.1/30
+- Guest side IP: 172.30.X.2/30
+- Subnet: 172.30.X.0/30
+- X allocated from vm_id hash or random free range.
+- TAP name must fit Linux IFNAMSIZ limit, max 15 chars.
+  Example: spk<8-char-id>
+  For vm_id vm-02e67edfc7a0:
+    tap name could be spk02e67edf
+
+Host setup steps:
+1. Detect default outbound interface:
+   ip route get 1.1.1.1
+   parse "dev <iface>"
+
+2. Create TAP:
+   ip tuntap add dev <tap_name> mode tap
+
+3. Assign host IP:
+   ip addr add <host_ip>/30 dev <tap_name>
+
+4. Bring TAP up:
+   ip link set dev <tap_name> up
+
+5. Enable IPv4 forwarding:
+   sysctl -w net.ipv4.ip_forward=1
+
+6. Add NAT:
+   iptables -t nat -A POSTROUTING -s <subnet_cidr> -o <out_iface> -j MASQUERADE
+
+7. Add forwarding:
+   iptables -A FORWARD -i <tap_name> -o <out_iface> -j ACCEPT
+   iptables -A FORWARD -i <out_iface> -o <tap_name> -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+
+8. Block cloud metadata endpoint:
+   iptables -A FORWARD -i <tap_name> -d 169.254.169.254 -j REJECT
+
+Cleanup steps:
+Reverse exactly:
+1. Delete NAT rule with -D.
+2. Delete FORWARD rules with -D.
+3. Delete metadata block rule with -D.
+4. Delete TAP device:
+   ip link delete <tap_name>
+
+Important:
+- Do not leave stale TAP devices.
+- Cleanup should be best-effort but must raise CleanupError if it cannot clean and no prior exception exists.
+- If cleanup fails after an original run error, preserve original error and include cleanup failure in failure.json if possible.
+
+Privileges:
+Network setup needs root/CAP_NET_ADMIN.
+
+Behavior:
+- If network=True and current user cannot create TAP or iptables rules, raise NetworkSetupError with clear message.
+- Do not prompt for sudo password.
+- Do not call interactive sudo.
+- For now, simplest accepted behavior:
+  network=True requires the SparkVM process to run with root privileges or the required capabilities.
+- Error message:
+  "Network setup requires root/CAP_NET_ADMIN for TAP and iptables. Run with sudo or configure capabilities."
+
+Later we can add a privileged helper service, but not in this phase.
+
+--------------------------------------------------
+5. Firecracker network attach
+--------------------------------------------------
+
+Update FirecrackerAPI if needed:
+
+def attach_network(
+    self,
+    *,
+    iface_id: str = "eth0",
+    host_dev_name: str,
+    guest_mac: str,
+) -> None:
+    ...
+
+Payload:
+
+{
+  "iface_id": "eth0",
+  "host_dev_name": "<tap_name>",
+  "guest_mac": "<guest_mac>"
+}
+
+Call this before InstanceStart.
+
+SparkVM.run() flow:
+1. Create worker dir.
+2. Create execution disk.
+3. If network=True:
+   - network_config = NetworkManager.setup(vm_id)
+   - write /job/.sparkvm/network.env into execution disk
+4. Start Firecracker.
+5. Configure boot source.
+6. Configure machine.
+7. Attach rootfs read-only.
+8. Attach rollout disk read-write.
+9. If network=True:
+   - attach network interface with TAP and guest MAC.
+10. Start instance.
+11. Wait for exit.
+12. Read result.
+13. Cleanup network in finally.
+14. Cleanup worker dir on normal completion.
+
+--------------------------------------------------
+6. network.env inside execution disk
+--------------------------------------------------
+
+If network=True, write:
+
+/.sparkvm/network.env
+
+Content:
+
+SPARKVM_NET_ENABLED=1
+SPARKVM_GUEST_CIDR=172.30.X.2/30
+SPARKVM_HOST_IP=172.30.X.1
+SPARKVM_DNS=1.1.1.1
+
+If network=False:
+- do not write network.env
+
+--------------------------------------------------
+7. /init network config
+--------------------------------------------------
+
+Update /init template to configure guest eth0 if network.env exists.
+
+After mounting /dev and /job:
+
+if [ -f /job/.sparkvm/network.env ]; then
+  . /job/.sparkvm/network.env
+
+  if [ "$SPARKVM_NET_ENABLED" = "1" ]; then
+    ip link set eth0 up
+    ip addr add "$SPARKVM_GUEST_CIDR" dev eth0
+    ip route add default via "$SPARKVM_HOST_IP" dev eth0
+    echo "nameserver ${SPARKVM_DNS:-1.1.1.1}" > /etc/resolv.conf
+  fi
+fi
+
+Requirements:
+Dockified runtime images need ip command:
+- iproute2 should be present in runtime image if network=True.
+- If missing, guest network config fails and setup/run likely fails.
+- Doctor/dockify should warn if image lacks /sbin/ip, /bin/ip, /usr/sbin/ip, or /usr/bin/ip.
+
+Do not hardcode IPs in /init.
+Use network.env.
+
+--------------------------------------------------
+8. Dockify update
+--------------------------------------------------
+
+When dockifying runtime images, inject updated /init with:
+- shutdown fallback
+- tmpfs mounts for /tmp /run /var/tmp
+- network.env support
+- env.sh support
+- setup/run phase logging
+
+Also validate/warn:
+- /bin/sh exists
+- mount exists
+- shutdown fallback exists
+- if possible, ip exists for networking
+
+Do not require iproute2 for all images, only warn:
+"Runtime image does not contain ip command. network=True will fail unless installed."
+
+--------------------------------------------------
+9. Secret cleanup/redaction
+--------------------------------------------------
+
+Implement function:
+
+def scrub_sensitive_execution_files(worker_dir: Path) -> None:
+    ...
+
+Behavior:
+- Mount execution disk if needed or if already mounted.
+- Remove:
+  /job/.sparkvm/env.sh
+- If unable to mount/remove, write warning into failure.json but never include env values.
+- Also ensure failure.json does not include env.
+
+Simpler MVP:
+Since env.sh is inside rollout.ext4, before preserving worker on infrastructure failure:
+1. Try to mount rollout.ext4.
+2. Delete .sparkvm/env.sh.
+3. Unmount.
+4. Preserve worker.
+
+If scrubbing fails:
+- Prefer deleting rollout.ext4 entirely over preserving secrets.
+- Write failure.json with:
+  "execution_disk_preserved": false,
+  "secret_scrub_failed": true,
+  "note": "Execution disk removed to avoid preserving runtime secrets."
+
+Important:
+Never preserve a disk containing env secrets.
+
+Policy:
+- If env is non-empty and infrastructure failure occurs:
+  - scrub env.sh from disk
+  - if scrub fails, delete rollout.ext4
+  - preserve firecracker.log and failure.json only
+
+--------------------------------------------------
+10. failure.json update
+--------------------------------------------------
+
+When infrastructure failure occurs, failure.json should include:
+
+{
+  "vm_id": "...",
+  "rollout_id": "...",
+  "rollout_name": "...",
+  "runtime": "python-3.12-slim",
+  "network_enabled": true,
+  "env_keys": ["OPENAI_API_KEY"],
+  "env_values_stored": false,
+  "status": "failed",
+  "error_type": "...",
+  "error_message": "...",
+  "duration_ms": 1234,
+  "firecracker_log_path": "...",
+  "execution_disk_path": "..." or null,
+  "execution_disk_preserved": true/false,
+  "secret_scrubbed": true/false,
+  "created_at": "..."
+}
+
+Only env keys are allowed, never values.
+
+--------------------------------------------------
+11. CLI/doctor updates
+--------------------------------------------------
+
+Update sparkvm doctor:
+- Check if ip command exists on host.
+- Check if iptables exists.
+- Check if sysctl exists.
+- Check if current user is root or has CAP_NET_ADMIN if possible.
+- Print:
+  Network support:
+    host tools: OK/MISSING
+    privileges: OK/NEEDS ROOT
+- List runtimes and warn if runtime likely lacks ip command if metadata has validation info.
+
+Add optional CLI test command:
+
+sparkvm network doctor
+
+or include in normal doctor.
+
+Do not implement persistent network daemon.
+
+--------------------------------------------------
+12. Tests
+--------------------------------------------------
+
+Unit tests:
+
+Env:
+1. valid env keys accepted.
+2. invalid env key rejected.
+3. env values not present in repr/config/failure.json.
+4. render_env_file shell-quotes values.
+5. execution disk writer writes .sparkvm/env.sh only for runtime execution.
+6. rollout metadata never includes env.
+
+Network:
+1. detect_default_iface parses `ip route get`.
+2. tap name is <=15 chars.
+3. NetworkManager.setup builds correct ip/iptable commands.
+4. NetworkManager.cleanup builds reverse -D commands.
+5. network.env content is correct.
+6. Firecracker attach_network payload is correct.
+7. network cleanup called in finally.
+
+Secret cleanup:
+1. on infrastructure failure with env, env.sh is removed from execution disk if possible.
+2. if scrub fails, rollout.ext4 is deleted.
+3. failure.json includes env_keys only.
+4. failure.json does not include env values.
+
+Init template:
+1. contains network.env sourcing.
+2. contains env.sh sourcing.
+3. contains tmpfs mounts.
+4. contains shutdown fallback.
+
+Integration test:
+Skip unless SPARKVM_RUN_INTEGRATION=1 and SPARKVM_RUN_NETWORK_INTEGRATION=1.
+
+Test:
+1. dockify or use runtime with curl/python installed and iproute2.
+2. Create rollout:
+   mode=script
+   files={"check.py": code that calls https://api.openai.com/v1/models or a simple https endpoint}
+   run_cmd="python3 /job/check.py"
+3. SparkVM(network=True, env={"OPENAI_API_KEY": os.environ["OPENAI_API_KEY"]}).run(...)
+4. Assert request succeeds if OPENAI_API_KEY present.
+
+Also add simpler network test without OpenAI:
+- curl https://example.com
+or
+- python urllib.request.urlopen("https://example.com")
+
+This test should be skipped unless root/CAP_NET_ADMIN is available.
+
+--------------------------------------------------
+13. Documentation
+--------------------------------------------------
+
+Update phase 5 and phase docs.
+
+Explain:
+
+Network:
+- network=False by default.
+- network=True enables TAP/NAT internet access.
+- network=True requires root/CAP_NET_ADMIN in this phase.
+- SparkVM creates one TAP device per VM and cleans it up after execution.
+- Guest config is passed through temporary network.env.
+- No network config is stored in rollout.
+
+Env:
+- env passed to SparkVM is runtime-only.
+- env is not stored in rollout.
+- env values are written only to temporary execution disk for the active run.
+- On success, worker directory is deleted.
+- On infrastructure failure, SparkVM scrubs env.sh or deletes rollout.ext4.
+- failure.json stores env keys only, not values.
+- If user code prints secrets, SparkVM cannot prevent them from appearing in stdout/stderr.
+
+Example:
+
+vm = SparkVM(
+    runtime="python-3.12-slim",
+    vcpu=2,
+    memory="2G",
+    timeout=300,
+    network=True,
+    env={"OPENAI_API_KEY": os.environ["OPENAI_API_KEY"]},
+)
+
+result = vm.run(rollout.id)
+
+--------------------------------------------------
+Acceptance criteria
+--------------------------------------------------
+
+1. SparkVM accepts network=True.
+2. SparkVM accepts env dict.
+3. env keys/values are available to setup.sh and run.sh inside VM.
+4. env is never stored in rollout metadata.
+5. env values are never written to failure.json.
+6. network=True creates TAP/NAT and attaches network to Firecracker.
+7. network=True writes network.env only to temporary execution disk.
+8. Guest configures eth0 from network.env.
+9. Network cleanup runs after VM exits.
+10. Rootfs is still attached read-only.
+11. Rollout execution disk is attached read-write.
+12. On success, worker dir is deleted.
+13. On normal setup/run failure, worker dir is deleted.
+14. On infrastructure failure, worker dir is preserved.
+15. If env exists and failure occurs, env.sh is scrubbed or rollout.ext4 is deleted.
+16. Missing network privileges produces clear NetworkSetupError.
+17. No interactive sudo prompts.
+18. Documentation clearly states the security limits.

@@ -34,6 +34,9 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("doctor", help="Show SparkVM host and asset diagnostics")
+    network_parser = subparsers.add_parser("network", help="Network diagnostics")
+    network_subparsers = network_parser.add_subparsers(dest="network_command", required=True)
+    network_subparsers.add_parser("doctor", help="Show SparkVM network diagnostics")
 
     setup_parser = subparsers.add_parser("setup", help="Install/verify managed SparkVM assets")
     setup_parser.add_argument("runtime", nargs="?", help="Deprecated setup target")
@@ -190,6 +193,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "doctor":
             return _run_doctor(args.home_dir)
+
+        if args.command == "network":
+            if args.network_command == "doctor":
+                return _run_doctor(args.home_dir)
+            parser.error(f"Unknown network command: {args.network_command}")
+            return 2
 
         if args.command == "setup":
             return run_setup_command(args.home_dir, args.runtime, args.force, owner=args.owner)

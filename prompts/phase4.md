@@ -86,4 +86,4 @@ sparkvm dockify python:3.12-slim
 
 ## 8. Networking status
 
-Networking is still not implemented. `setup_cmd` that requires internet may fail inside guest VMs unless dependencies are pre-baked in the dockified runtime or included in rollout assets.
+Phase 4 left networking unimplemented; Phase 5 introduces TAP/NAT networking, runtime-only network/env injection files on the execution disk, and secret scrubbing for preserved infrastructure-failure workers.

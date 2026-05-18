@@ -19,6 +19,9 @@ from sparkvm.image import normalize_runtime_name
 from sparkvm.runtime_store import list_runtime_records, runtime_paths
 from sparkvm.runtimes.debian import SPARKVM_INIT_TEMPLATE
 
+_IP_CANDIDATE_PATHS = ("/sbin/ip", "/bin/ip", "/usr/sbin/ip", "/usr/bin/ip")
+_SHUTDOWN_FALLBACK_PATHS = ("/sbin/poweroff", "/usr/sbin/poweroff", "/sbin/halt", "/usr/sbin/halt", "/sbin/reboot", "/usr/sbin/reboot")
+
 
 def _utc_now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -93,6 +96,26 @@ def _assert_rootfs_basics(rootfs_dir: Path) -> None:
         raise SparkVMSetupError(
             f"Runtime rootfs missing recommended tool: mount command. Checked rootfs: {rootfs_dir}."
         )
+
+
+def _runtime_validation_metadata(rootfs_dir: Path) -> dict[str, object]:
+    ip_present = [candidate for candidate in _IP_CANDIDATE_PATHS if (rootfs_dir / candidate.lstrip("/")).exists()]
+    shutdown_present = [
+        candidate for candidate in _SHUTDOWN_FALLBACK_PATHS if (rootfs_dir / candidate.lstrip("/")).exists()
+    ]
+
+    warnings: list[str] = []
+    if not ip_present:
+        warnings.append("Runtime image does not contain ip command. network=True will fail unless installed.")
+    if not shutdown_present:
+        warnings.append("Runtime image does not contain poweroff/halt/reboot binaries; /init shutdown fallback loop may be used.")
+
+    return {
+        "ip_command_present": bool(ip_present),
+        "ip_command_paths": ip_present,
+        "shutdown_command_present": bool(shutdown_present),
+        "warnings": warnings,
+    }
 
 
 def _resolve_owner(owner: str) -> tuple[int, int]:
@@ -222,11 +245,16 @@ def run_dockify_command(
             print("[dockify] Exporting container filesystem", flush=True)
             _run_docker_export(container_id, rootfs_dir)
 
+            # Rootfs is mounted read-only by Firecracker; ensure /job mountpoint exists in-image.
+            ensure_dir(rootfs_dir / "job", exist_ok=True)
+            ensure_dir(rootfs_dir / "job" / "results", exist_ok=True)
+
             init_path = rootfs_dir / "init"
             write_text(init_path, SPARKVM_INIT_TEMPLATE, encoding="utf-8")
             init_path.chmod(0o755)
 
             _assert_rootfs_basics(rootfs_dir)
+            validation = _runtime_validation_metadata(rootfs_dir)
 
             print(f"[dockify] Building ext4 image ({size_mb} MiB)", flush=True)
             _build_ext4_from_rootfs(temp_ext4=temp_ext4, rootfs_dir=rootfs_dir, size_mb=size_mb)
@@ -238,6 +266,7 @@ def run_dockify_command(
                 "size_mb": size_mb,
                 "created_at": _utc_now_iso(),
                 "init_injected": True,
+                "validation": validation,
             }
 
             remove_file(final_rootfs, missing_ok=True)
@@ -264,6 +293,14 @@ def run_dockify_command(
     print(f"Dockified runtime '{runtime_name}'")
     print(f"Rootfs: {final_rootfs}")
     print(f"Metadata: {final_metadata}")
+    metadata_payload = read_json(final_metadata, encoding="utf-8")
+    validation_payload = metadata_payload.get("validation")
+    if isinstance(validation_payload, dict):
+        warnings = validation_payload.get("warnings")
+        if isinstance(warnings, list):
+            for warning in warnings:
+                if isinstance(warning, str) and warning.strip():
+                    print(f"Warning: {warning}")
     return 0
 
 

@@ -21,7 +21,8 @@ FIRECRACKER_VERSION = "v1.15.1"
 KERNEL_FILENAME = "vmlinux"
 SUPPORTED_ARCHES = {"x86_64", "aarch64"}
 _REQUIRED_SETUP_TOOLS = ("curl", "tar")
-_DOCTOR_TOOLS = ("docker", "dd", "mkfs.ext4", "mount", "umount", "debugfs")
+_DOCTOR_TOOLS = ("docker", "dd", "mkfs.ext4", "mount", "umount", "debugfs", "ip", "iptables", "sysctl")
+_DOCTOR_NETWORK_TOOLS = ("ip", "iptables", "sysctl")
 
 _ARCH_ALIASES = {
     "amd64": "x86_64",
@@ -59,6 +60,8 @@ class DoctorStatus:
     kvm_accessible: bool
     kernel_found: bool
     host_tools: dict[str, bool]
+    network_host_tools_ok: bool
+    network_privileges_ok: bool
     available_runtimes: list[RuntimeRecord]
     image_dir_free_mb: int | None
 
@@ -141,6 +144,39 @@ def check_kvm_access() -> None:
 def host_tool_status() -> dict[str, bool]:
     tools = set(_REQUIRED_SETUP_TOOLS) | set(_DOCTOR_TOOLS)
     return {tool: shutil.which(tool) is not None for tool in sorted(tools)}
+
+
+def _has_cap_net_admin() -> bool:
+    status_path = Path("/proc/self/status")
+    if not status_path.exists():
+        return False
+
+    try:
+        lines = status_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return False
+
+    cap_eff_raw = None
+    for line in lines:
+        if line.startswith("CapEff:"):
+            cap_eff_raw = line.split(":", 1)[1].strip()
+            break
+    if cap_eff_raw is None:
+        return False
+
+    try:
+        cap_eff = int(cap_eff_raw, 16)
+    except ValueError:
+        return False
+
+    cap_net_admin_bit = 12
+    return bool(cap_eff & (1 << cap_net_admin_bit))
+
+
+def _network_privileges_ok() -> bool:
+    if os.geteuid() == 0:
+        return True
+    return _has_cap_net_admin()
 
 
 def require_setup_tools() -> None:
@@ -358,6 +394,9 @@ def doctor_status(paths: SparkVMPaths) -> DoctorStatus:
     else:
         free_mb = None
 
+    network_tools_ok = all(tools.get(tool, False) for tool in _DOCTOR_NETWORK_TOOLS)
+    network_privileges_ok = _network_privileges_ok()
+
     return DoctorStatus(
         paths=paths,
         home_exists=paths.home_dir.exists(),
@@ -370,6 +409,8 @@ def doctor_status(paths: SparkVMPaths) -> DoctorStatus:
         kvm_accessible=kvm_ok,
         kernel_found=paths.kernel_image.exists(),
         host_tools=tools,
+        network_host_tools_ok=network_tools_ok,
+        network_privileges_ok=network_privileges_ok,
         available_runtimes=list_runtime_records(paths.image_dir),
         image_dir_free_mb=free_mb,
     )
@@ -398,13 +439,20 @@ def format_doctor_report(status: DoctorStatus) -> str:
         marker = _flag(status.host_tools.get(tool, False))
         lines.append(f"  - {tool}: {marker}")
 
+    lines.append("Network support:")
+    lines.append(f"  host tools: {'OK' if status.network_host_tools_ok else 'MISSING'}")
+    lines.append(f"  privileges: {'OK' if status.network_privileges_ok else 'NEEDS ROOT'}")
+
     lines.append("Available runtimes:")
     if not status.available_runtimes:
         lines.append("  no runtime images found. Run `sparkvm dockify python:3.12-slim`.")
     else:
         for runtime in status.available_runtimes:
             source = runtime.source_image or "unknown"
-            lines.append(f"  - {runtime.name}  source={source}")
+            runtime_line = f"  - {runtime.name}  source={source}"
+            if runtime.ip_command_present is False:
+                runtime_line += "  warning=missing ip command (network=True may fail)"
+            lines.append(runtime_line)
 
     return "\n".join(lines)
 
@@ -422,9 +470,6 @@ def run_setup_command(home_dir: str | None, runtime: str | None, force: bool, *,
     print("SparkVM setup complete.")
     print(f"Firecracker: {paths.firecracker_bin}")
     print(f"Kernel: {paths.kernel_image}")
-    print(
-        "Note: VM networking is not implemented yet; internet-dependent setup_cmd commands may fail inside the guest."
-    )
     return 0
 
 

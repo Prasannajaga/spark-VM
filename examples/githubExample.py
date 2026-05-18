@@ -10,6 +10,8 @@ Usage:
 Edit REPO_URL / REF / SETUP_CMD / RUN_CMD below for your project.
 """
 
+import os
+
 from sparkvm import SparkVM
 from sparkvm.rollouts import Rollouts
 
@@ -18,7 +20,7 @@ REPO_URL = "/home/prasanna/coding/test-fastapi"
 REF = "main"
 
 # Optional setup command; set to None or "" to skip setup.sh generation.
-# Note: VM networking is not implemented yet, so internet-dependent installs may fail.
+# With network=True, internet-dependent installs (pip/apt/etc.) can run in-guest.
 SETUP_CMD = "pip install -r requirements.txt"
 RUN_CMD = "uvicorn src.main:app --reload"
 
@@ -41,7 +43,20 @@ def main() -> int:
     print(f"mode: {rollout.mode}")
     print(f"path: {rollout.path}")
 
-    vm = SparkVM(vcpu=2, memory="4G", timeout=600.0, runtime='ubuntu-24.04')
+    runtime_env = {}
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if api_key:
+        runtime_env["OPENAI_API_KEY"] = api_key
+
+    vm = SparkVM(
+        vcpu=2,
+        memory="2G",
+        timeout=500.0,
+        runtime="ubuntu-24.04",
+        network=True,
+        # Optional: pass runtime-only env vars for setup.sh/run.sh.
+        env=runtime_env,
+    )
     result = vm.run(rollout.id)
 
     print("\nVM run result")
