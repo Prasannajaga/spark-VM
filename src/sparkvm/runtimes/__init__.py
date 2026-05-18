@@ -1,5 +1,5 @@
-"""Built-in SparkVM runtime metadata."""
+"""Built-in SparkVM base-image metadata."""
 
-from .python import INIT_TEMPLATE, PYTHON_RUNTIME_ID
+from .python import DEBIAN_MINBASE_IMAGE_ID, INIT_TEMPLATE
 
-__all__ = ["PYTHON_RUNTIME_ID", "INIT_TEMPLATE"]
+__all__ = ["DEBIAN_MINBASE_IMAGE_ID", "INIT_TEMPLATE"]

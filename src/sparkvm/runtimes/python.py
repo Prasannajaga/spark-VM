@@ -1,10 +1,12 @@
-"""Python runtime metadata and init script template."""
+"""Guest init script template used by the managed Debian base image."""
 
 from __future__ import annotations
 
-PYTHON_RUNTIME_ID = "python-3.12"
+DEBIAN_MINBASE_IMAGE_ID = "debian-minbase"
 
 INIT_TEMPLATE = '''#!/bin/sh
+set +e
+
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mount -t devtmpfs devtmpfs /dev || true
@@ -12,16 +14,34 @@ mount -t devtmpfs devtmpfs /dev || true
 mkdir -p /job
 mount /dev/vdb /job
 
+mkdir -p /job/results
+
 cd /job
 
-timeout "${SPARKVM_TIMEOUT_SEC:-30}" sh /job/run.sh > /job/output.log 2> /job/error.log
-code=$?
+if [ -f /job/setup.sh ]; then
+  sh /job/setup.sh > /job/results/setup.stdout.log 2> /job/results/setup.stderr.log
+  setup_code=$?
+else
+  setup_code=0
+fi
 
-echo "$code" > /job/exit_code
+echo "$setup_code" > /job/results/setup.exit_code
+
+if [ "$setup_code" -ne 0 ]; then
+  echo "$setup_code" > /job/results/final_exit_code
+  sync
+  poweroff -f
+fi
+
+sh /job/run.sh > /job/results/run.stdout.log 2> /job/results/run.stderr.log
+run_code=$?
+
+echo "$run_code" > /job/results/run.exit_code
+echo "$run_code" > /job/results/final_exit_code
 
 sync
 poweroff -f
 '''
 
 
-__all__ = ["PYTHON_RUNTIME_ID", "INIT_TEMPLATE"]
+__all__ = ["DEBIAN_MINBASE_IMAGE_ID", "INIT_TEMPLATE"]

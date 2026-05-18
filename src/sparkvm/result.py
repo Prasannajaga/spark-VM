@@ -7,22 +7,45 @@ from pathlib import Path
 
 
 @dataclass(frozen=True)
-class VMResult:
-    rollout_id: str
-    rollout_name: str
-    vm_id: str
+class PhaseResult:
+    name: str
     stdout: str
     stderr: str
     exit_code: int
+
+
+@dataclass(frozen=True)
+class VMResult:
+    rollout_id: str
+    rollout_name: str
+    rollout_mode: str
+    base_image: str
+    vm_id: str
+    status: str
+    exit_code: int
     duration_ms: int
+    setup: PhaseResult | None = None
+    run: PhaseResult | None = None
     timed_out: bool = False
     oom_killed: bool = False
     firecracker_log_path: Path | None = None
     execution_disk_path: Path | None = None
 
     @property
+    def stdout(self) -> str:
+        if self.run is None:
+            return ""
+        return self.run.stdout
+
+    @property
+    def stderr(self) -> str:
+        if self.run is None:
+            return ""
+        return self.run.stderr
+
+    @property
     def passed(self) -> bool:
         return self.exit_code == 0 and not self.timed_out and not self.oom_killed
 
 
-__all__ = ["VMResult"]
+__all__ = ["PhaseResult", "VMResult"]

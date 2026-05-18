@@ -7,40 +7,129 @@ import os
 import re
 import secrets
 import shutil
+import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from .config import resolve_home_dir
-from .errors import RolloutError, RolloutMetadataError, RolloutNotFoundError
-from .runtimes.python import PYTHON_RUNTIME_ID
+from .config import DEFAULT_BASE_IMAGE, resolve_home_dir
+from .errors import (
+    BaseImageNotFound,
+    InvalidRepoError,
+    InvalidRolloutModeError,
+    RolloutError,
+    RolloutMetadataError,
+    RolloutNotFoundError,
+)
+from .fsops import ensure_dir, read_json, remove_tree, write_bytes, write_text
+from .runtimes.python import DEBIAN_MINBASE_IMAGE_ID
 
 _ROLLOUT_ID_RE = re.compile(r"^rollout-[A-Za-z0-9_-]+$")
 _METADATA_VERSION = 1
+_SUPPORTED_MODES = {"script", "repo"}
+_SCRIPT_DEFAULT_DISK_MB = 1024
+_REPO_DEFAULT_DISK_MB = 4096
+_GIT_URL_PREFIXES = ("http://", "https://", "git@", "ssh://")
+_COPYTREE_IGNORE = shutil.ignore_patterns(".git", "__pycache__", ".venv", "node_modules", "target", "dist", "build")
 
 
 @dataclass(frozen=True)
-class RolloutItem:
+class Rollout:
     id: str
     name: str
-    runtime: str
+    mode: str
+    base_image: str
     path: Path
-    command: str
+    command: str | None
+    setup_cmd: str | None
+    run_cmd: str | None
+    disk_mb: int
     files: list[str]
     created_at: str
     updated_at: str | None = None
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "RolloutItem":
+    def from_rollout_json(
+        cls,
+        data: dict[str, Any],
+        *,
+        rollout_path: Path,
+    ) -> "Rollout":
+        if not isinstance(data, dict):
+            raise RolloutMetadataError("rollout.json must contain a JSON object.")
+
+        mode = str(data.get("mode") or "script")
+        if mode not in _SUPPORTED_MODES:
+            raise RolloutMetadataError(f"rollout.json has unsupported mode: {mode!r}")
+
+        command_raw = data.get("command")
+        command = str(command_raw) if isinstance(command_raw, str) else None
+        setup_raw = data.get("setup_cmd")
+        setup_cmd = str(setup_raw) if isinstance(setup_raw, str) and setup_raw.strip() else None
+        run_raw = data.get("run_cmd")
+        run_cmd = str(run_raw) if isinstance(run_raw, str) and run_raw.strip() else None
+
+        if run_cmd is None and command is not None:
+            run_cmd = command
+
+        disk_mb_raw = data.get("disk_mb")
+        if isinstance(disk_mb_raw, int):
+            disk_mb = disk_mb_raw
+        else:
+            disk_mb = _REPO_DEFAULT_DISK_MB if mode == "repo" else _SCRIPT_DEFAULT_DISK_MB
+
+        files_raw = data.get("files")
+        if isinstance(files_raw, list):
+            files = [str(item) for item in files_raw]
+        else:
+            files = []
+
         try:
             return cls(
                 id=str(data["id"]),
                 name=str(data["name"]),
-                runtime=str(data["runtime"]),
+                mode=mode,
+                base_image=str(data.get("base_image") or DEFAULT_BASE_IMAGE),
+                path=rollout_path.resolve(),
+                command=command,
+                setup_cmd=setup_cmd,
+                run_cmd=run_cmd,
+                disk_mb=disk_mb,
+                files=files,
+                created_at=str(data["created_at"]),
+                updated_at=data.get("updated_at"),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RolloutMetadataError(f"Invalid rollout.json content: {data!r}") from exc
+
+    @classmethod
+    def from_metadata_entry(cls, data: dict[str, Any]) -> "Rollout":
+        try:
+            mode = str(data.get("mode") or "script")
+            command_raw = data.get("command")
+            command = str(command_raw) if isinstance(command_raw, str) else None
+            run_cmd_raw = data.get("run_cmd")
+            run_cmd = str(run_cmd_raw) if isinstance(run_cmd_raw, str) else command
+            setup_cmd_raw = data.get("setup_cmd")
+            setup_cmd = str(setup_cmd_raw) if isinstance(setup_cmd_raw, str) else None
+            disk_mb_raw = data.get("disk_mb")
+            if isinstance(disk_mb_raw, int):
+                disk_mb = disk_mb_raw
+            else:
+                disk_mb = _REPO_DEFAULT_DISK_MB if mode == "repo" else _SCRIPT_DEFAULT_DISK_MB
+
+            return cls(
+                id=str(data["id"]),
+                name=str(data["name"]),
+                mode=mode,
+                base_image=str(data.get("base_image") or DEFAULT_BASE_IMAGE),
                 path=Path(str(data["path"])),
-                command=str(data["command"]),
-                files=[str(item) for item in data["files"]],
+                command=command,
+                setup_cmd=setup_cmd,
+                run_cmd=run_cmd,
+                disk_mb=disk_mb,
+                files=[str(item) for item in data.get("files", [])],
                 created_at=str(data["created_at"]),
                 updated_at=data.get("updated_at"),
             )
@@ -51,9 +140,13 @@ class RolloutItem:
         return {
             "id": self.id,
             "name": self.name,
-            "runtime": self.runtime,
+            "mode": self.mode,
+            "base_image": self.base_image,
             "path": str(self.path),
             "command": self.command,
+            "setup_cmd": self.setup_cmd,
+            "run_cmd": self.run_cmd,
+            "disk_mb": self.disk_mb,
             "files": list(self.files),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -73,19 +166,28 @@ def _validate_rollout_id(rollout_id: str) -> str:
     return candidate
 
 
-def _validate_runtime(runtime: str) -> str:
-    if not isinstance(runtime, str) or not runtime.strip():
-        raise RolloutError("runtime must be a non-empty string.")
-    selected = runtime.strip()
-    if selected != PYTHON_RUNTIME_ID:
-        raise RolloutError(f"Unsupported runtime '{selected}'. Only '{PYTHON_RUNTIME_ID}' is supported.")
+def _validate_base_image(base_image: str) -> str:
+    if not isinstance(base_image, str) or not base_image.strip():
+        raise RolloutError("base_image must be a non-empty string.")
+    selected = base_image.strip()
+    if selected != DEBIAN_MINBASE_IMAGE_ID:
+        raise BaseImageNotFound(f"Unsupported base image '{selected}'. Only '{DEFAULT_BASE_IMAGE}' is supported.")
     return selected
 
 
-def _validate_non_empty(value: str, *, field_name: str) -> str:
+def _validate_non_empty(value: str | None, *, field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise RolloutError(f"{field_name} must be a non-empty string.")
     return value.strip()
+
+
+def _validate_rollout_mode(mode: str) -> str:
+    if not isinstance(mode, str) or not mode.strip():
+        raise InvalidRolloutModeError("mode must be a non-empty string.")
+    selected = mode.strip().lower()
+    if selected not in _SUPPORTED_MODES:
+        raise InvalidRolloutModeError(f"Unsupported rollout mode '{selected}'. Supported modes: script, repo.")
+    return selected
 
 
 def _slugify_rollout_name(name: str) -> str:
@@ -117,7 +219,24 @@ def _validate_rollout_file_path(path: str) -> PurePosixPath:
     return normalized
 
 
-class Rollout:
+def _is_git_url(source: str) -> bool:
+    return source.startswith(_GIT_URL_PREFIXES) or source.endswith(".git")
+
+
+def _run_git_checked(cmd: list[str], *, cwd: Path | None = None, error_cls: type[RolloutError] = RolloutError) -> str:
+    try:
+        completed = subprocess.run(cmd, cwd=str(cwd) if cwd is not None else None, check=True, capture_output=True, text=True)
+        return completed.stdout.strip()
+    except FileNotFoundError as exc:
+        raise error_cls(f"Required command not found: {cmd[0]}") from exc
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or "").strip()
+        stdout = (exc.stdout or "").strip()
+        detail = stderr or stdout or "command failed"
+        raise error_cls(f"Command failed: {' '.join(cmd)}\n{detail}") from exc
+
+
+class Rollouts:
     """Rollout manager."""
 
     def __init__(self, home_dir: str | Path | None = None) -> None:
@@ -129,26 +248,33 @@ class Rollout:
         self,
         *,
         name: str,
-        runtime: str = PYTHON_RUNTIME_ID,
-        files: dict[str, str | bytes],
-        command: str,
-    ) -> RolloutItem:
-        
+        mode: str = "script",
+        base_image: str = DEFAULT_BASE_IMAGE,
+        files: dict[str, str | bytes] | None = None,
+        source: str | Path | None = None,
+        ref: str | None = None,
+        setup_cmd: str | None = None,
+        run_cmd: str | None = None,
+        disk_mb: int | None = None,
+        command: str | None = None,
+    ) -> Rollout:
         rollout_name = _validate_non_empty(name, field_name="name")
-        rollout_runtime = _validate_runtime(runtime)
-        rollout_command = _validate_non_empty(command, field_name="command")
+        rollout_mode = _validate_rollout_mode(mode)
+        rollout_base_image = _validate_base_image(base_image)
 
-        if not isinstance(files, dict) or not files:
-            raise RolloutError("files must be a non-empty dict[str, str | bytes].")
+        resolved_run_cmd = run_cmd.strip() if isinstance(run_cmd, str) and run_cmd.strip() else None
+        if resolved_run_cmd is None and isinstance(command, str) and command.strip():
+            resolved_run_cmd = command.strip()
+        rollout_run_cmd = _validate_non_empty(resolved_run_cmd, field_name="run_cmd")
 
-        normalized_files: list[tuple[PurePosixPath, str | bytes]] = []
-        for rel_path, content in files.items():
-            safe_path = _validate_rollout_file_path(rel_path)
-            if not isinstance(content, (str, bytes)):
-                raise RolloutError(f"Rollout file content for {rel_path!r} must be str or bytes.")
-            normalized_files.append((safe_path, content))
+        if disk_mb is None:
+            rollout_disk_mb = _REPO_DEFAULT_DISK_MB if rollout_mode == "repo" else _SCRIPT_DEFAULT_DISK_MB
+        elif isinstance(disk_mb, bool) or not isinstance(disk_mb, int) or disk_mb <= 0:
+            raise RolloutError("disk_mb must be a positive integer.")
+        else:
+            rollout_disk_mb = disk_mb
 
-        self.rollouts_dir.mkdir(parents=True, exist_ok=True)
+        ensure_dir(self.rollouts_dir, exist_ok=True)
         metadata = self._load_metadata()
 
         rollout_id = self._generate_rollout_id(
@@ -159,78 +285,253 @@ class Rollout:
         created_at = _now_utc_iso()
 
         try:
-            rollout_path.mkdir(parents=True, exist_ok=False)
+            ensure_dir(rollout_path, exist_ok=False)
 
-            created_file_names: list[str] = []
-            for safe_path, content in normalized_files:
-                destination = rollout_path / Path(safe_path.as_posix())
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                if isinstance(content, bytes):
-                    destination.write_bytes(content)
-                else:
-                    destination.write_text(content, encoding="utf-8")
-                created_file_names.append(safe_path.as_posix())
-
-            run_sh_path = rollout_path / "run.sh"
-            run_sh_path.write_text(
-                f"#!/bin/sh\nset -eu\ncd /job\n{rollout_command}\n",
-                encoding="utf-8",
-            )
-            run_sh_path.chmod(0o755)
-            created_file_names.append("run.sh")
-
-            rollout_item = RolloutItem(
-                id=rollout_id,
-                name=rollout_name,
-                runtime=rollout_runtime,
-                path=rollout_path.resolve(),
-                command=rollout_command,
-                files=sorted(set(created_file_names)),
-                created_at=created_at,
-                updated_at=None,
-            )
-
-            rollout_json = {
-                "id": rollout_item.id,
-                "name": rollout_item.name,
-                "runtime": rollout_item.runtime,
-                "command": rollout_item.command,
-                "files": rollout_item.files,
-                "created_at": rollout_item.created_at,
-            }
-            (rollout_path / "rollout.json").write_text(
-                json.dumps(rollout_json, indent=2, sort_keys=True) + "\n",
-                encoding="utf-8",
-            )
+            if rollout_mode == "script":
+                rollout_item = self._create_script_rollout(
+                    rollout_id=rollout_id,
+                    rollout_name=rollout_name,
+                    rollout_base_image=rollout_base_image,
+                    rollout_path=rollout_path,
+                    files=files,
+                    setup_cmd=setup_cmd,
+                    run_cmd=rollout_run_cmd,
+                    disk_mb=rollout_disk_mb,
+                    created_at=created_at,
+                )
+            else:
+                rollout_item = self._create_repo_rollout(
+                    rollout_id=rollout_id,
+                    rollout_name=rollout_name,
+                    rollout_base_image=rollout_base_image,
+                    rollout_path=rollout_path,
+                    source=source,
+                    setup_cmd=setup_cmd,
+                    run_cmd=rollout_run_cmd,
+                    ref=ref,
+                    disk_mb=rollout_disk_mb,
+                    created_at=created_at,
+                )
 
             metadata["rollouts"].append(rollout_item.to_metadata_entry())
             self._write_metadata(metadata)
             return rollout_item
         except Exception:
-            shutil.rmtree(rollout_path, ignore_errors=True)
+            remove_tree(rollout_path, ignore_errors=True)
             raise
 
-    def list(self) -> list[RolloutItem]:
+    def _create_script_rollout(
+        self,
+        *,
+        rollout_id: str,
+        rollout_name: str,
+        rollout_base_image: str,
+        rollout_path: Path,
+        files: dict[str, str | bytes] | None,
+        setup_cmd: str | None,
+        run_cmd: str,
+        disk_mb: int,
+        created_at: str,
+    ) -> Rollout:
+        if not isinstance(files, dict) or not files:
+            raise RolloutError("files must be a non-empty dict[str, str | bytes].")
+
+        normalized_files: list[tuple[PurePosixPath, str | bytes]] = []
+        for rel_path, content in files.items():
+            safe_path = _validate_rollout_file_path(rel_path)
+            if not isinstance(content, (str, bytes)):
+                raise RolloutError(f"Rollout file content for {rel_path!r} must be str or bytes.")
+            normalized_files.append((safe_path, content))
+
+        created_file_names: list[str] = []
+        for safe_path, content in normalized_files:
+            destination = rollout_path / Path(safe_path.as_posix())
+            ensure_dir(destination.parent, exist_ok=True)
+            if isinstance(content, bytes):
+                write_bytes(destination, content)
+            else:
+                write_text(destination, content, encoding="utf-8")
+            created_file_names.append(safe_path.as_posix())
+
+        setup_script = setup_cmd.strip() if isinstance(setup_cmd, str) and setup_cmd.strip() else None
+        if setup_script is not None:
+            setup_sh_path = rollout_path / "setup.sh"
+            write_text(setup_sh_path, f"#!/bin/sh\nset -eu\ncd /job\n{setup_script}\n", encoding="utf-8")
+            setup_sh_path.chmod(0o755)
+            created_file_names.append("setup.sh")
+
+        run_sh_path = rollout_path / "run.sh"
+        write_text(run_sh_path, f"#!/bin/sh\nset -eu\ncd /job\n{run_cmd}\n", encoding="utf-8")
+        run_sh_path.chmod(0o755)
+        created_file_names.append("run.sh")
+
+        files_list = sorted(set(created_file_names))
+        rollout_json = {
+            "id": rollout_id,
+            "name": rollout_name,
+            "mode": "script",
+            "base_image": rollout_base_image,
+            "command": run_cmd,
+            "setup_cmd": setup_script,
+            "run_cmd": run_cmd,
+            "files": files_list,
+            "disk_mb": disk_mb,
+            "created_at": created_at,
+        }
+        self._write_rollout_json(rollout_path / "rollout.json", rollout_json)
+
+        return Rollout(
+            id=rollout_id,
+            name=rollout_name,
+            mode="script",
+            base_image=rollout_base_image,
+            path=rollout_path.resolve(),
+            command=run_cmd,
+            setup_cmd=setup_script,
+            run_cmd=run_cmd,
+            disk_mb=disk_mb,
+            files=files_list,
+            created_at=created_at,
+            updated_at=None,
+        )
+
+    def _create_repo_rollout(
+        self,
+        *,
+        rollout_id: str,
+        rollout_name: str,
+        rollout_base_image: str,
+        rollout_path: Path,
+        source: str | Path | None,
+        setup_cmd: str | None,
+        run_cmd: str,
+        ref: str | None,
+        disk_mb: int,
+        created_at: str,
+    ) -> Rollout:
+        if source is None:
+            raise InvalidRepoError("source is required for mode='repo'.")
+        raw_source = str(source).strip()
+        if not raw_source:
+            raise InvalidRepoError("source must be a non-empty path or git URL for mode='repo'.")
+        rollout_setup_cmd = setup_cmd.strip() if isinstance(setup_cmd, str) and setup_cmd.strip() else None
+
+        repo_dir = rollout_path / "repo"
+        created_files: list[str] = ["repo/"]
+
+        source_payload: dict[str, Any]
+        if _is_git_url(raw_source):
+            source_payload = self._prepare_repo_from_git_url(repo_dir=repo_dir, source=raw_source, ref=ref)
+        else:
+            source_payload = self._prepare_repo_from_local_path(repo_dir=repo_dir, source=Path(raw_source))
+
+        if rollout_setup_cmd is not None:
+            setup_sh_path = rollout_path / "setup.sh"
+            write_text(setup_sh_path, f"#!/bin/sh\nset -eu\ncd /job/repo\n{rollout_setup_cmd}\n", encoding="utf-8")
+            setup_sh_path.chmod(0o755)
+            created_files.append("setup.sh")
+
+        run_sh_path = rollout_path / "run.sh"
+        write_text(run_sh_path, f"#!/bin/sh\nset -eu\ncd /job/repo\n{run_cmd}\n", encoding="utf-8")
+        run_sh_path.chmod(0o755)
+        created_files.append("run.sh")
+
+        rollout_json = {
+            "id": rollout_id,
+            "name": rollout_name,
+            "mode": "repo",
+            "base_image": rollout_base_image,
+            "source": source_payload,
+            "setup_cmd": rollout_setup_cmd,
+            "run_cmd": run_cmd,
+            "files": created_files,
+            "disk_mb": disk_mb,
+            "created_at": created_at,
+        }
+        self._write_rollout_json(rollout_path / "rollout.json", rollout_json)
+
+        return Rollout(
+            id=rollout_id,
+            name=rollout_name,
+            mode="repo",
+            base_image=rollout_base_image,
+            path=rollout_path.resolve(),
+            command=None,
+            setup_cmd=rollout_setup_cmd,
+            run_cmd=run_cmd,
+            disk_mb=disk_mb,
+            files=created_files,
+            created_at=created_at,
+            updated_at=None,
+        )
+
+    def _prepare_repo_from_local_path(self, *, repo_dir: Path, source: Path) -> dict[str, Any]:
+        source_path = source.expanduser().resolve()
+        if not source_path.exists():
+            raise InvalidRepoError(f"Local repo source does not exist: {source_path}")
+        if not source_path.is_dir():
+            raise InvalidRepoError(f"Local repo source must be a directory: {source_path}")
+        git_dir = source_path / ".git"
+        if not git_dir.is_dir():
+            raise InvalidRepoError("Local repo source must be a Git repository containing a .git directory.")
+
+        shutil.copytree(source_path, repo_dir, symlinks=True, ignore=_COPYTREE_IGNORE)
+        commit = _run_git_checked(["git", "rev-parse", "HEAD"], cwd=source_path, error_cls=InvalidRepoError)
+        return {
+            "type": "local",
+            "path": str(source_path),
+            "commit": commit,
+        }
+
+    def _prepare_repo_from_git_url(self, *, repo_dir: Path, source: str, ref: str | None) -> dict[str, Any]:
+        _run_git_checked(["git", "clone", source, str(repo_dir)], error_cls=InvalidRepoError)
+
+        source_payload: dict[str, Any] = {
+            "type": "git",
+            "url": source,
+        }
+
+        if isinstance(ref, str) and ref.strip():
+            clean_ref = ref.strip()
+            _run_git_checked(["git", "checkout", clean_ref], cwd=repo_dir, error_cls=InvalidRepoError)
+            source_payload["ref"] = clean_ref
+
+        commit = _run_git_checked(["git", "rev-parse", "HEAD"], cwd=repo_dir, error_cls=InvalidRepoError)
+        source_payload["commit"] = commit
+
+        git_dir = repo_dir / ".git"
+        if git_dir.exists():
+            remove_tree(git_dir, ignore_errors=True)
+
+        return source_payload
+
+    def list(self) -> list[Rollout]:
         metadata = self._load_metadata()
-        items: list[RolloutItem] = []
+        items: list[Rollout] = []
         for entry in metadata["rollouts"]:
-            rollout_item = RolloutItem.from_dict(entry)
-            if rollout_item.path.is_dir():
-                items.append(rollout_item)
+            rollout_stub = Rollout.from_metadata_entry(entry)
+            if not rollout_stub.path.is_dir():
+                continue
+            rollout_json_path = rollout_stub.path / "rollout.json"
+            if not rollout_json_path.is_file():
+                continue
+            rollout_obj = self._load_rollout_json(rollout_json_path)
+            items.append(rollout_obj)
         return items
 
-    def get_by_id(self, rollout_id: str) -> RolloutItem:
+    def get_by_id(self, rollout_id: str) -> Rollout:
         candidate_id = _validate_rollout_id(rollout_id)
         metadata = self._load_metadata()
         for entry in metadata["rollouts"]:
             if entry.get("id") != candidate_id:
                 continue
-            rollout_item = RolloutItem.from_dict(entry)
+            rollout_item = Rollout.from_metadata_entry(entry)
             if not rollout_item.path.is_dir():
                 raise RolloutNotFoundError(f"Rollout directory missing for id '{candidate_id}'.")
-            if not (rollout_item.path / "rollout.json").is_file():
+            rollout_json_path = rollout_item.path / "rollout.json"
+            if not rollout_json_path.is_file():
                 raise RolloutNotFoundError(f"rollout.json missing for id '{candidate_id}'.")
-            return rollout_item
+            return self._load_rollout_json(rollout_json_path)
         raise RolloutNotFoundError(f"Rollout not found: {candidate_id}")
 
     def delete_by_id(self, rollout_id: str) -> None:
@@ -252,7 +553,7 @@ class Rollout:
         rollout_path = Path(str(target_entry["path"]))
         if rollout_path.exists():
             try:
-                shutil.rmtree(rollout_path)
+                remove_tree(rollout_path, ignore_errors=False)
             except OSError as exc:
                 raise RolloutError(f"Could not delete rollout directory: {rollout_path}") from exc
 
@@ -277,13 +578,22 @@ class Rollout:
             return candidate
         raise RolloutError("Could not allocate a unique rollout id.")
 
+    def _load_rollout_json(self, rollout_json_path: Path) -> Rollout:
+        try:
+            payload = read_json(rollout_json_path, encoding="utf-8")
+        except json.JSONDecodeError as exc:
+            raise RolloutMetadataError(f"Corrupt rollout file: {rollout_json_path}") from exc
+        except OSError as exc:
+            raise RolloutMetadataError(f"Could not read rollout file: {rollout_json_path}") from exc
+        return Rollout.from_rollout_json(payload, rollout_path=rollout_json_path.parent)
+
     def _load_metadata(self) -> dict[str, Any]:
         if not self.metadata_path.exists():
-            self.rollouts_dir.mkdir(parents=True, exist_ok=True)
+            ensure_dir(self.rollouts_dir, exist_ok=True)
             return {"version": _METADATA_VERSION, "rollouts": []}
 
         try:
-            raw = json.loads(self.metadata_path.read_text(encoding="utf-8"))
+            raw = read_json(self.metadata_path, encoding="utf-8")
         except json.JSONDecodeError as exc:
             raise RolloutMetadataError(f"Corrupt metadata file: {self.metadata_path}") from exc
         except OSError as exc:
@@ -300,26 +610,19 @@ class Rollout:
             raise RolloutMetadataError("metadata.json field 'rollouts' must be a list.")
         return {"version": version, "rollouts": rollouts}
 
+    def _write_rollout_json(self, path: Path, payload: dict[str, Any]) -> None:
+        text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+        write_text(path, text, encoding="utf-8")
+
     def _write_metadata(self, metadata: dict[str, Any]) -> None:
-        self.rollouts_dir.mkdir(parents=True, exist_ok=True)
+        ensure_dir(self.rollouts_dir, exist_ok=True)
         tmp_path = self.rollouts_dir / "metadata.json.tmp"
-        payload = json.dumps(metadata, indent=2, sort_keys=True) + "\n"
+        final_path = self.metadata_path
+        text = json.dumps(metadata, indent=2, sort_keys=True) + "\n"
 
         try:
-            with tmp_path.open("w", encoding="utf-8") as handle:
-                handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(tmp_path, self.metadata_path)
-
-            try:
-                dir_fd = os.open(self.rollouts_dir, os.O_DIRECTORY)
-            except OSError:
-                return
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
+            write_text(tmp_path, text, encoding="utf-8")
+            os.replace(tmp_path, final_path)
         except OSError as exc:
             raise RolloutMetadataError(f"Could not write metadata file: {self.metadata_path}") from exc
         finally:
@@ -330,4 +633,7 @@ class Rollout:
                     pass
 
 
-__all__ = ["Rollout"]
+# Backward compatibility alias.
+RolloutManager = Rollouts
+
+__all__ = ["Rollout", "Rollouts", "RolloutManager"]

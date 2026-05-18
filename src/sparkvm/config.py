@@ -7,12 +7,14 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from .errors import InvalidMemoryError, InvalidResourceError, SparkVMConfigError
+from .errors import BaseImageNotFound, InvalidMemoryError, InvalidResourceError, SparkVMConfigError
 
 DEFAULT_VCPU = 1
 DEFAULT_MEMORY = "512M"
 DEFAULT_TIMEOUT_SEC = 30.0
-DEFAULT_RUNTIME = "python-3.12"
+DEFAULT_BASE_IMAGE = "debian-minbase"
+# Backward compatibility alias.
+DEFAULT_RUNTIME = DEFAULT_BASE_IMAGE
 DEFAULT_HOME_DIR = Path.home() / ".sparkvm"
 
 _MEMORY_RE = re.compile(r"^(?P<amount>\d+)\s*(?P<unit>m|mb|mib|g|gb|gib)?$", re.IGNORECASE)
@@ -23,7 +25,7 @@ class SparkVMConfig:
     vcpu: int
     memory_mib: int
     timeout_sec: float
-    runtime: str
+    base_image: str
     home_dir: Path
     workers_dir: Path
     bin_dir: Path
@@ -80,12 +82,22 @@ def parse_memory_to_mib(memory: int | str) -> int:
     raise InvalidMemoryError(f"Unsupported memory unit: {unit}")
 
 
+def _validate_base_image(base_image: str) -> str:
+    if not isinstance(base_image, str) or not base_image.strip():
+        raise SparkVMConfigError("base_image must be a non-empty string.")
+    selected = base_image.strip()
+    if selected != DEFAULT_BASE_IMAGE:
+        raise BaseImageNotFound(f"Unsupported base image '{selected}'. Only '{DEFAULT_BASE_IMAGE}' is supported.")
+    return selected
+
+
 def build_config(
     *,
     vcpu: int,
     memory: int | str,
     timeout: float,
-    runtime: str,
+    base_image: str | None = None,
+    runtime: str | None = None,
     home_dir: str | Path | None,
 ) -> SparkVMConfig:
     if type(vcpu) is not int or vcpu <= 0:
@@ -94,8 +106,9 @@ def build_config(
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
         raise InvalidResourceError("timeout must be a positive number of seconds.")
 
-    if not isinstance(runtime, str) or not runtime.strip():
-        raise SparkVMConfigError("runtime must be a non-empty string.")
+    selected_base_image = base_image if base_image is not None else runtime
+    if selected_base_image is None:
+        selected_base_image = DEFAULT_BASE_IMAGE
 
     resolved_home = resolve_home_dir(home_dir)
 
@@ -103,7 +116,7 @@ def build_config(
         vcpu=vcpu,
         memory_mib=parse_memory_to_mib(memory),
         timeout_sec=float(timeout),
-        runtime=runtime.strip(),
+        base_image=_validate_base_image(selected_base_image),
         home_dir=resolved_home,
         workers_dir=resolved_home / "workers",
         bin_dir=resolved_home / "bin",
@@ -117,6 +130,7 @@ __all__ = [
     "DEFAULT_VCPU",
     "DEFAULT_MEMORY",
     "DEFAULT_TIMEOUT_SEC",
+    "DEFAULT_BASE_IMAGE",
     "DEFAULT_RUNTIME",
     "DEFAULT_HOME_DIR",
     "resolve_home_dir",

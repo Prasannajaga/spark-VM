@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +11,7 @@ from typing import Any
 
 from .config import resolve_home_dir
 from .errors import CleanupError, WorkerMetadataError, WorkerNotFoundError
+from .fsops import list_dirs_with_prefix, read_text, remove_tree
 
 _WORKER_ID_RE = re.compile(r"^vm-[A-Za-z0-9]+$")
 
@@ -61,7 +61,7 @@ def _mount_points_under(base_dir: Path) -> list[Path]:
 
     points: list[Path] = []
     try:
-        lines = mountinfo.read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = read_text(mountinfo, encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return []
 
@@ -109,13 +109,8 @@ class Workers:
         return self.workers_dir / _validate_worker_id(vm_id)
 
     def list(self) -> list[Worker]:
-        if not self.workers_dir.exists():
-            return []
-
         items: list[Worker] = []
-        for candidate in sorted(self.workers_dir.iterdir()):
-            if not candidate.is_dir() or not candidate.name.startswith("vm-"):
-                continue
+        for candidate in list_dirs_with_prefix(self.workers_dir, "vm-"):
             items.append(self._build_worker(candidate))
         return items
 
@@ -130,7 +125,7 @@ class Workers:
         worker = self.get_by_id(vm_id)
         _unmount_under(worker.path)
         try:
-            shutil.rmtree(worker.path)
+            remove_tree(worker.path, ignore_errors=False)
         except OSError as exc:
             raise CleanupError(f"Could not delete worker directory: {worker.path}") from exc
 
@@ -140,7 +135,7 @@ class Workers:
         if not log_path.exists():
             return ""
         try:
-            text = log_path.read_text(encoding="utf-8", errors="replace")
+            text = read_text(log_path, encoding="utf-8", errors="replace")
         except OSError as exc:
             raise WorkerMetadataError(f"Could not read worker log: {log_path}") from exc
 
@@ -210,7 +205,7 @@ class Workers:
 
 def _read_failure_json(failure_path: Path) -> dict[str, Any]:
     try:
-        data = json.loads(failure_path.read_text(encoding="utf-8"))
+        data = json.loads(read_text(failure_path, encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise WorkerMetadataError(f"Corrupt worker failure metadata: {failure_path}") from exc
     except OSError as exc:
