@@ -24,13 +24,15 @@ from .errors import (
 from .fsops import ensure_dir, read_json, remove_tree, write_bytes, write_text
 from .image import normalize_runtime_name
 
-ROLLOUT_ID_RE = re.compile(r"^rollout-[A-Za-z0-9_-]+$")
-METADATA_VERSION = 1
-SUPPORTED_MODES = {"script", "repo"}
-SCRIPT_DEFAULT_DISK_MB = 1024
-REPO_DEFAULT_DISK_MB = 4096
-GIT_URL_PREFIXES = ("http://", "https://", "git@", "ssh://")
-COPYTREE_IGNORE = shutil.ignore_patterns(".git", "__pycache__", ".venv", "node_modules", "target", "dist", "build")
+from .constants import (
+    COPYTREE_IGNORE,
+    GIT_URL_PREFIXES,
+    METADATA_VERSION,
+    REPO_DEFAULT_DISK_MB,
+    ROLLOUT_ID_RE,
+    SCRIPT_DEFAULT_DISK_MB,
+    SUPPORTED_MODES,
+)
 
 
 @dataclass(frozen=True)

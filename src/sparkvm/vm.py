@@ -36,7 +36,7 @@ from .result import VMResult
 from .rollouts import Rollout, Rollouts
 from cli.setup import ManagedSetup
 
-_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+from .constants import ENV_KEY_RE
 
 
 def shell_quote(value: str) -> str:
@@ -58,7 +58,7 @@ def validate_env_mapping(env: Mapping[str, str] | None) -> dict[str, str]:
     for key, value in env.items():
         if not isinstance(key, str) or not key:
             raise ValueError("Environment variable keys must be non-empty strings.")
-        if _ENV_KEY_RE.fullmatch(key) is None:
+        if ENV_KEY_RE.fullmatch(key) is None:
             raise ValueError(f"Invalid environment variable name: {key!r}")
         if not isinstance(value, str):
             raise TypeError(f"Environment variable value for {key!r} must be a string.")

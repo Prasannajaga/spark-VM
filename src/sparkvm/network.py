@@ -11,10 +11,7 @@ from pathlib import Path
 
 from .errors import CleanupError, NetworkSetupError
 
-_NET_SETUP_PRIVILEGE_MESSAGE = (
-    "Network setup requires root/CAP_NET_ADMIN for TAP and iptables. "
-    "Run with sudo or configure capabilities."
-)
+from .constants import NET_SETUP_PRIVILEGE_MESSAGE
 
 
 @dataclass(frozen=True)
@@ -55,7 +52,7 @@ class NetworkManager:
 
     def setup(self, vm_id: str) -> NetworkConfig:
         if not has_network_privileges():
-            raise NetworkSetupError(_NET_SETUP_PRIVILEGE_MESSAGE)
+            raise NetworkSetupError(NET_SETUP_PRIVILEGE_MESSAGE)
 
         out_iface = self.detect_default_iface()
         config = build_network_config(vm_id=vm_id, out_iface=out_iface)
@@ -179,7 +176,7 @@ class NetworkManager:
             stdout = (exc.stdout or "").strip()
             detail = stderr or stdout or "command failed"
             if looks_like_privilege_error(detail):
-                raise NetworkSetupError(_NET_SETUP_PRIVILEGE_MESSAGE) from exc
+                raise NetworkSetupError(NET_SETUP_PRIVILEGE_MESSAGE) from exc
             raise NetworkSetupError(f"Command failed: {' '.join(cmd)}\\n{detail}") from exc
 
     def run_checked(self, cmd: list[str]) -> None:

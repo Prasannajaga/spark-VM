@@ -13,7 +13,7 @@ from .config import resolve_home_dir
 from .errors import CleanupError, WorkerMetadataError, WorkerNotFoundError
 from .fsops import list_dirs_with_prefix, read_text, remove_tree
 
-_WORKER_ID_RE = re.compile(r"^vm-[A-Za-z0-9]+$")
+from .constants import WORKER_ID_RE
 
 
 def run_checked(cmd: list[str]) -> None:
@@ -32,7 +32,7 @@ def validate_worker_id(vm_id: str) -> str:
     if not isinstance(vm_id, str) or not vm_id.strip():
         raise WorkerNotFoundError("vm_id must be a non-empty string.")
     candidate = vm_id.strip()
-    if not _WORKER_ID_RE.fullmatch(candidate):
+    if not WORKER_ID_RE.fullmatch(candidate):
         raise WorkerNotFoundError(f"Invalid worker id format: {vm_id!r}")
     return candidate
 

@@ -17,22 +17,16 @@ from sparkvm.errors import FirecrackerBinaryNotInstalled, KVMUnavailableError, S
 from sparkvm.fsops import ensure_dir, read_json, write_json_atomic
 from sparkvm.runtime_store import RuntimeRecord, list_runtime_records
 
-FIRECRACKER_VERSION = "v1.15.1"
-KERNEL_FILENAME = "vmlinux"
-SUPPORTED_ARCHES = {"x86_64", "aarch64"}
-_REQUIRED_SETUP_TOOLS = ("curl", "tar")
-_DOCTOR_TOOLS = ("docker", "dd", "mkfs.ext4", "mount", "umount", "debugfs", "ip", "iptables", "sysctl")
-_DOCTOR_NETWORK_TOOLS = ("ip", "iptables", "sysctl")
-
-_ARCH_ALIASES = {
-    "amd64": "x86_64",
-    "arm64": "aarch64",
-}
-
-_KERNEL_URLS = {
-    "x86_64": "https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/kernels/vmlinux.bin",
-    "aarch64": "https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/aarch64/kernels/vmlinux.bin",
-}
+from sparkvm.constants import (
+    ARCH_ALIASES as _ARCH_ALIASES,
+    DOCTOR_NETWORK_TOOLS as _DOCTOR_NETWORK_TOOLS,
+    DOCTOR_TOOLS as _DOCTOR_TOOLS,
+    FIRECRACKER_VERSION,
+    KERNEL_FILENAME,
+    KERNEL_URLS as _KERNEL_URLS,
+    REQUIRED_SETUP_TOOLS as _REQUIRED_SETUP_TOOLS,
+    SUPPORTED_ARCHES,
+)
 
 
 @dataclass(frozen=True)

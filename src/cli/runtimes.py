@@ -19,8 +19,7 @@ from sparkvm.image import normalize_runtime_name
 from sparkvm.runtime_store import list_runtime_records, runtime_paths
 from sparkvm.runtimes.debian import SPARKVM_INIT_TEMPLATE
 
-_IP_CANDIDATE_PATHS = ("/sbin/ip", "/bin/ip", "/usr/sbin/ip", "/usr/bin/ip")
-_SHUTDOWN_FALLBACK_PATHS = ("/sbin/poweroff", "/usr/sbin/poweroff", "/sbin/halt", "/usr/sbin/halt", "/sbin/reboot", "/usr/sbin/reboot")
+from sparkvm.constants import IP_CANDIDATE_PATHS, SHUTDOWN_FALLBACK_PATHS
 
 
 def utc_now_iso() -> str:
@@ -99,9 +98,9 @@ def assert_rootfs_basics(rootfs_dir: Path) -> None:
 
 
 def runtime_validation_metadata(rootfs_dir: Path) -> dict[str, object]:
-    ip_present = [candidate for candidate in _IP_CANDIDATE_PATHS if (rootfs_dir / candidate.lstrip("/")).exists()]
+    ip_present = [candidate for candidate in IP_CANDIDATE_PATHS if (rootfs_dir / candidate.lstrip("/")).exists()]
     shutdown_present = [
-        candidate for candidate in _SHUTDOWN_FALLBACK_PATHS if (rootfs_dir / candidate.lstrip("/")).exists()
+        candidate for candidate in SHUTDOWN_FALLBACK_PATHS if (rootfs_dir / candidate.lstrip("/")).exists()
     ]
 
     warnings: list[str] = []

@@ -10,15 +10,15 @@ from pathlib import Path
 
 from .errors import InvalidMemoryError, InvalidResourceError, SparkVMConfigError
 
-DEFAULT_VCPU = 1
-DEFAULT_MEMORY = "512M"
-DEFAULT_TIMEOUT_SEC = 30.0
-DEFAULT_RUNTIME = "python-3.12-slim"
-# Backward compatibility alias.
-DEFAULT_BASE_IMAGE = DEFAULT_RUNTIME
-DEFAULT_HOME_DIR = Path.home() / ".sparkvm"
-
-_MEMORY_RE = re.compile(r"^(?P<amount>\d+)\s*(?P<unit>m|mb|mib|g|gb|gib)?$", re.IGNORECASE)
+from .constants import (
+    DEFAULT_BASE_IMAGE,
+    DEFAULT_HOME_DIR,
+    DEFAULT_MEMORY,
+    DEFAULT_RUNTIME,
+    DEFAULT_TIMEOUT_SEC,
+    DEFAULT_VCPU,
+    MEMORY_RE as _MEMORY_RE,
+)
 
 
 @dataclass(frozen=True)

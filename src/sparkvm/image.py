@@ -9,7 +9,7 @@ from pathlib import Path
 from .config import SparkVMConfig
 from .errors import KernelImageNotFound, RuntimeImageNotFound
 
-BOOT_ARGS = "console=ttyS0 reboot=k panic=1 pci=off init=/init"
+from .constants import BOOT_ARGS
 
 
 def normalize_runtime_name(image_name: str) -> str:
@@ -89,7 +89,7 @@ class ManagedImageResolver:
 # Backward compatibility aliases.
 BaseImage = RuntimeImage
 resolve_base_image = resolve_runtime_image
-DEBIAN_BOOT_ARGS = BOOT_ARGS
+from .constants import DEBIAN_BOOT_ARGS
 
 
 __all__ = [
