@@ -51,7 +51,7 @@ class FirecrackerAPIClientTest(unittest.TestCase):
         )
         client = FirecrackerAPIClient(Path("/tmp/fc.sock"), timeout_sec=10.0)
 
-        with patch("firecracker.api.socket.socket", return_value=fake_sock):
+        with patch("sparkvm.firecracker.api.socket.socket", return_value=fake_sock):
             response = client.put("/boot-source", {"kernel_image_path": "/vmlinux", "boot_args": "console=ttyS0"})
 
         self.assertEqual(204, response.status_code)
@@ -68,7 +68,7 @@ class FirecrackerAPIClientTest(unittest.TestCase):
         )
         client = FirecrackerAPIClient(Path("/tmp/fc.sock"), timeout_sec=10.0)
 
-        with patch("firecracker.api.socket.socket", return_value=fake_sock):
+        with patch("sparkvm.firecracker.api.socket.socket", return_value=fake_sock):
             response = client.get("/machine-config")
 
         self.assertEqual(200, response.status_code)
@@ -83,7 +83,7 @@ class FirecrackerAPIClientTest(unittest.TestCase):
         )
         client = FirecrackerAPIClient(Path("/tmp/fc.sock"), timeout_sec=10.0)
 
-        with patch("firecracker.api.socket.socket", return_value=fake_sock):
+        with patch("sparkvm.firecracker.api.socket.socket", return_value=fake_sock):
             with self.assertRaises(FirecrackerAPIError) as ctx:
                 client.put("/boot-source", {"bad": "payload"})
 
@@ -97,7 +97,7 @@ class FirecrackerAPIClientTest(unittest.TestCase):
         fake_sock = _FakeUnixSocket([socket.timeout("timed out")])
         client = FirecrackerAPIClient(Path("/tmp/fc.sock"), timeout_sec=10.0)
 
-        with patch("firecracker.api.socket.socket", return_value=fake_sock):
+        with patch("sparkvm.firecracker.api.socket.socket", return_value=fake_sock):
             with self.assertRaises(FirecrackerAPIError) as ctx:
                 client.get("/machine-config")
 

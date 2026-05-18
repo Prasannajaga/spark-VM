@@ -4,14 +4,16 @@ from __future__ import annotations
 
 from dataclasses import replace
 import json
+import os
+import pwd
 import subprocess
 import time
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-from firecracker.api import FirecrackerAPIClient
-from .config import DEFAULT_BASE_IMAGE, DEFAULT_MEMORY, DEFAULT_TIMEOUT_SEC, DEFAULT_VCPU, SparkVMConfig, build_config
+from .firecracker.api import FirecrackerAPIClient
+from .config import DEFAULT_MEMORY, DEFAULT_TIMEOUT_SEC, DEFAULT_VCPU, SparkVMConfig, build_config
 from .disk import ExecutionDisk
 from .errors import (
     CleanupError,
@@ -19,12 +21,12 @@ from .errors import (
     FirecrackerBootError,
     FirecrackerProcessError,
     SparkVMError,
-    RolloutError,
+    RuntimeImagePermissionError,
     RolloutNotFoundError,
 )
 from .fsops import ensure_dir, read_text, remove_file, remove_tree, write_text
-from .image import BaseImage, ManagedImageResolver
-from firecracker.process import FirecrackerProcess
+from .image import ManagedImageResolver, RuntimeImage
+from .firecracker.process import FirecrackerProcess
 from .result import VMResult
 from .rollouts import Rollout, Rollouts
 from cli.setup import ManagedSetup
@@ -37,16 +39,21 @@ class SparkVM:
         vcpu: int = DEFAULT_VCPU,
         memory: int | str = DEFAULT_MEMORY,
         timeout: float = DEFAULT_TIMEOUT_SEC,
-        base_image: str = DEFAULT_BASE_IMAGE,
         runtime: str | None = None,
+        base_image: str | None = None,
         home_dir: str | Path | None = None,
     ) -> None:
+        explicit_runtime = runtime
+        if explicit_runtime is None:
+            explicit_runtime = base_image
+        self._runtime_override = explicit_runtime is not None
+
         self.config: SparkVMConfig = build_config(
             vcpu=vcpu,
             memory=memory,
             timeout=timeout,
+            runtime=explicit_runtime,
             base_image=base_image,
-            runtime=runtime,
             home_dir=home_dir,
         )
         self._setup = ManagedSetup(self.config)
@@ -55,7 +62,7 @@ class SparkVM:
 
     def run(self, rollout: str | Rollout) -> VMResult:
         rollout_obj = self._resolve_rollout(rollout)
-        self._validate_rollout_base_image(rollout_obj)
+        selected_runtime = self.config.runtime if self._runtime_override else rollout_obj.runtime
 
         self._setup.ensure_layout()
 
@@ -80,7 +87,8 @@ class SparkVM:
         try:
             firecracker_bin = self._setup.firecracker_binary_path()
             self._setup.assert_kvm_available()
-            base_image = self._images.resolve(rollout_obj.base_image)
+            runtime_image = self._images.resolve(selected_runtime)
+            self._assert_runtime_image_permissions(runtime_image)
 
             execution_disk.copy_rollout()
             firecracker = FirecrackerProcess(
@@ -94,7 +102,7 @@ class SparkVM:
             self._wait_for_firecracker_socket(api, firecracker, timeout_sec=self.config.timeout_sec)
             self._configure_microvm(
                 api=api,
-                base_image=base_image,
+                runtime_image=runtime_image,
                 execution_disk_path=execution_disk_path,
             )
             api.put("/actions", {"action_type": "InstanceStart"})
@@ -107,7 +115,7 @@ class SparkVM:
                     rollout_id=rollout_obj.id,
                     rollout_name=rollout_obj.name,
                     rollout_mode=rollout_obj.mode,
-                    base_image=rollout_obj.base_image,
+                    base_image=selected_runtime,
                     vm_id=vm_id,
                     status="timeout",
                     exit_code=124,
@@ -153,7 +161,7 @@ class SparkVM:
                 worker_dir=worker_dir,
                 vm_id=vm_id,
                 rollout=rollout_obj,
-                base_image=self.config.base_image,
+                runtime=selected_runtime,
                 error=wrapped,
                 duration_ms=int((time.monotonic() - started_at) * 1000),
                 firecracker_log_path=firecracker_log_path,
@@ -167,7 +175,7 @@ class SparkVM:
                 worker_dir=worker_dir,
                 vm_id=vm_id,
                 rollout=rollout_obj,
-                base_image=self.config.base_image,
+                runtime=selected_runtime,
                 error=exc,
                 duration_ms=int((time.monotonic() - started_at) * 1000),
                 firecracker_log_path=firecracker_log_path,
@@ -182,7 +190,7 @@ class SparkVM:
                 worker_dir=worker_dir,
                 vm_id=vm_id,
                 rollout=rollout_obj,
-                base_image=self.config.base_image,
+                runtime=selected_runtime,
                 error=wrapped,
                 duration_ms=int((time.monotonic() - started_at) * 1000),
                 firecracker_log_path=firecracker_log_path,
@@ -204,12 +212,6 @@ class SparkVM:
             return self._rollouts.get_by_id(rollout)
 
         raise TypeError("SparkVM.run expects a rollout id (str) or an object returned by Rollouts.create().")
-
-    def _validate_rollout_base_image(self, rollout: Rollout) -> None:
-        if rollout.base_image != self.config.base_image:
-            raise RolloutError(
-                f"Rollout base_image '{rollout.base_image}' does not match SparkVM base_image '{self.config.base_image}'."
-            )
 
     def _wait_for_firecracker_socket(
         self,
@@ -313,7 +315,7 @@ class SparkVM:
         worker_dir: Path,
         vm_id: str,
         rollout: Rollout,
-        base_image: str,
+        runtime: str,
         error: Exception,
         duration_ms: int,
         firecracker_log_path: Path,
@@ -324,7 +326,7 @@ class SparkVM:
             "rollout_id": rollout.id,
             "rollout_name": rollout.name,
             "rollout_mode": rollout.mode,
-            "base_image": base_image,
+            "runtime": runtime,
             "status": "infrastructure_failed",
             "error_type": type(error).__name__,
             "error_message": str(error),
@@ -369,14 +371,14 @@ class SparkVM:
         self,
         *,
         api: FirecrackerAPIClient,
-        base_image: BaseImage,
+        runtime_image: RuntimeImage,
         execution_disk_path: Path,
     ) -> None:
         api.put(
             "/boot-source",
             {
-                "kernel_image_path": str(base_image.kernel_image),
-                "boot_args": str(base_image.boot_args),
+                "kernel_image_path": str(runtime_image.kernel_image),
+                "boot_args": str(runtime_image.boot_args),
             },
         )
         api.put(
@@ -392,7 +394,7 @@ class SparkVM:
             "/drives/rootfs",
             {
                 "drive_id": "rootfs",
-                "path_on_host": str(base_image.rootfs_image),
+                "path_on_host": str(runtime_image.rootfs_image),
                 "is_root_device": True,
                 "is_read_only": False,
             },
@@ -406,6 +408,19 @@ class SparkVM:
                 "is_read_only": False,
             },
         )
+
+    def _assert_runtime_image_permissions(self, runtime_image: RuntimeImage) -> None:
+        rootfs = runtime_image.rootfs_image
+        if not rootfs.exists():
+            return
+        if not os.access(rootfs, os.R_OK | os.W_OK):
+            raise RuntimeImagePermissionError(
+                "Runtime image exists but is not readable/writable by the current user: "
+                f"{rootfs}\n"
+                "Fix ownership/permissions or recreate with ownership set:\n"
+                f"  sudo chown {pwd.getpwuid(os.getuid()).pw_name}:{pwd.getpwuid(os.getuid()).pw_name} {rootfs}\n"
+                f"  sparkvm dockify {runtime_image.name.replace('-', ':', 1)} --name {runtime_image.name} --force"
+            )
 
 
 __all__ = ["SparkVM"]

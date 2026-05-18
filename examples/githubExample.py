@@ -41,7 +41,7 @@ def main() -> int:
     print(f"mode: {rollout.mode}")
     print(f"path: {rollout.path}")
 
-    vm = SparkVM(vcpu=2, memory="4G", timeout=600.0)
+    vm = SparkVM(vcpu=2, memory="4G", timeout=600.0, runtime='ubuntu-24.04')
     result = vm.run(rollout.id)
 
     print("\nVM run result")

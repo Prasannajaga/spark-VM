@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sparkvm.errors import BaseImageNotFound, InvalidRolloutModeError, RolloutError, RolloutMetadataError, RolloutNotFoundError
+from sparkvm.errors import InvalidRolloutModeError, RolloutError, RolloutMetadataError, RolloutNotFoundError
 from sparkvm.rollouts import Rollouts
 
 
@@ -37,11 +37,11 @@ class RolloutNegativeTest(unittest.TestCase):
                 run_cmd="python3 /job/main.py",
             )
 
-    def test_create_rejects_invalid_base_image(self) -> None:
-        with self.assertRaises(BaseImageNotFound):
+    def test_create_rejects_invalid_runtime(self) -> None:
+        with self.assertRaises(RolloutError):
             self.rollout.create(
                 name="bad-image",
-                base_image="python-3.11",
+                runtime="   ",
                 files={"main.py": "print('x')"},
                 run_cmd="python3 /job/main.py",
             )
@@ -112,7 +112,7 @@ class RolloutNegativeTest(unittest.TestCase):
                     {
                         "id": "rollout-missing-dir",
                         "name": "x",
-                        "base_image": "debian-minbase",
+                        "runtime": "python-3.12-slim",
                         "path": str(self.home_dir / "rollouts" / "rollout-missing-dir"),
                         "command": "python3 /job/main.py",
                         "run_cmd": "python3 /job/main.py",
@@ -138,7 +138,7 @@ class RolloutNegativeTest(unittest.TestCase):
                     {
                         "id": "rollout-has-dir-no-json",
                         "name": "x",
-                        "base_image": "debian-minbase",
+                        "runtime": "python-3.12-slim",
                         "path": str(rollout_dir),
                         "command": "python3 /job/main.py",
                         "run_cmd": "python3 /job/main.py",

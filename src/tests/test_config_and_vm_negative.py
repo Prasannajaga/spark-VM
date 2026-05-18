@@ -4,13 +4,14 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import MethodType
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sparkvm.errors import InvalidMemoryError, InvalidResourceError, RolloutError, RolloutNotFoundError, SparkVMConfigError
+from sparkvm.config import build_config, parse_memory_to_mib, resolve_home_dir
+from sparkvm.errors import InvalidMemoryError, InvalidResourceError, RolloutNotFoundError, RuntimeImageNotFound, SparkVMConfigError
 from sparkvm.rollouts import Rollout
 from sparkvm.vm import SparkVM
-from sparkvm.config import build_config, parse_memory_to_mib
 
 
 class ConfigNegativeTest(unittest.TestCase):
@@ -21,18 +22,29 @@ class ConfigNegativeTest(unittest.TestCase):
                 with self.assertRaises(InvalidMemoryError):
                     parse_memory_to_mib(value)  # type: ignore[arg-type]
 
-    def test_build_config_rejects_invalid_vcpu_timeout_and_base_image(self) -> None:
+    def test_build_config_rejects_invalid_vcpu_timeout_and_runtime(self) -> None:
         with self.assertRaises(InvalidResourceError):
-            build_config(vcpu=0, memory="512M", timeout=30, base_image="debian-minbase", home_dir=None)
+            build_config(vcpu=0, memory="512M", timeout=30, runtime="python-3.12-slim", home_dir=None)
 
         with self.assertRaises(InvalidResourceError):
-            build_config(vcpu=1, memory="512M", timeout=True, base_image="debian-minbase", home_dir=None)
+            build_config(vcpu=1, memory="512M", timeout=True, runtime="python-3.12-slim", home_dir=None)
 
         with self.assertRaises(InvalidResourceError):
-            build_config(vcpu=1, memory="512M", timeout=0, base_image="debian-minbase", home_dir=None)
+            build_config(vcpu=1, memory="512M", timeout=0, runtime="python-3.12-slim", home_dir=None)
 
         with self.assertRaises(SparkVMConfigError):
-            build_config(vcpu=1, memory="512M", timeout=30, base_image="   ", home_dir=None)
+            build_config(vcpu=1, memory="512M", timeout=30, runtime="   ", home_dir=None)
+
+    def test_resolve_home_dir_prefers_sudo_invoking_user_home_when_root(self) -> None:
+        fake_pw = type("P", (), {"pw_dir": "/home/prasanna"})()
+        with unittest.mock.patch(
+            "sparkvm.config.os.getenv",
+            side_effect=lambda key, default=None: {"SPARKVM_HOME": "", "SUDO_USER": "prasanna"}.get(key, default),
+        ), unittest.mock.patch("sparkvm.config.os.geteuid", return_value=0), unittest.mock.patch(
+            "sparkvm.config.pwd.getpwnam", return_value=fake_pw
+        ):
+            resolved = resolve_home_dir(None)
+        self.assertEqual(Path("/home/prasanna/.sparkvm"), resolved)
 
 
 class SparkVMNegativeTest(unittest.TestCase):
@@ -61,7 +73,6 @@ class SparkVMNegativeTest(unittest.TestCase):
             id="rollout-item-missing-path",
             name="missing",
             mode="script",
-            base_image="debian-minbase",
             path=missing_path,
             command="python3 /job/main.py",
             setup_cmd=None,
@@ -69,7 +80,7 @@ class SparkVMNegativeTest(unittest.TestCase):
             disk_mb=1024,
             files=["main.py", "run.sh"],
             created_at="2026-01-01T00:00:00Z",
-            updated_at=None,
+            runtime="python-3.12-slim",
         )
 
         with self.assertRaises(RolloutNotFoundError):
@@ -83,7 +94,6 @@ class SparkVMNegativeTest(unittest.TestCase):
             id="rollout-item-no-json",
             name="missing-json",
             mode="script",
-            base_image="debian-minbase",
             path=rollout_dir,
             command="python3 /job/main.py",
             setup_cmd=None,
@@ -91,45 +101,33 @@ class SparkVMNegativeTest(unittest.TestCase):
             disk_mb=1024,
             files=["main.py", "run.sh"],
             created_at="2026-01-01T00:00:00Z",
-            updated_at=None,
+            runtime="python-3.12-slim",
         )
 
         with self.assertRaises(RolloutNotFoundError):
             vm.run(rollout)
 
-    def test_validate_rollout_base_image_rejects_mismatch(self) -> None:
+    def test_run_uses_rollout_runtime_when_vm_runtime_not_explicit(self) -> None:
         vm = SparkVM(home_dir=self._new_temp_path(prefix="sparkvm-vm-negative-"))
         rollout_dir = self._new_temp_path(prefix="sparkvm-rollout-runtime-")
         (rollout_dir / "rollout.json").write_text("{}", encoding="utf-8")
 
-        rollout = Rollout(
-            id="rollout-bad-image",
-            name="bad-image",
-            mode="script",
-            base_image="some-other-base",
-            path=rollout_dir,
-            command="node /job/main.js",
-            setup_cmd=None,
-            run_cmd="node /job/main.js",
-            disk_mb=1024,
-            files=["main.js", "run.sh"],
-            created_at="2026-01-01T00:00:00Z",
-            updated_at=None,
-        )
+        captured: dict[str, str] = {}
 
-        with self.assertRaises(RolloutError):
-            vm.run(rollout)
+        vm._setup.ensure_layout()
+        vm._setup.firecracker_binary_path = MethodType(lambda _self: Path("/fake/firecracker"), vm._setup)
+        vm._setup.assert_kvm_available = MethodType(lambda _self: None, vm._setup)
 
-    def test_validate_rollout_base_image_accepts_matching_value(self) -> None:
-        vm = SparkVM(base_image="debian-minbase", home_dir=self._new_temp_path(prefix="sparkvm-vm-negative-"))
-        rollout_dir = self._new_temp_path(prefix="sparkvm-rollout-runtime-mismatch-")
-        (rollout_dir / "rollout.json").write_text("{}", encoding="utf-8")
+        def _fake_resolve(_self, runtime: str | None = None):
+            captured["runtime"] = str(runtime)
+            raise RuntimeImageNotFound("missing")
+
+        vm._images.resolve = MethodType(_fake_resolve, vm._images)
 
         rollout = Rollout(
-            id="rollout-runtime-mismatch",
-            name="runtime-mismatch",
+            id="rollout-runtime-uses-rollout",
+            name="runtime-from-rollout",
             mode="script",
-            base_image="debian-minbase",
             path=rollout_dir,
             command="python3 /job/main.py",
             setup_cmd=None,
@@ -137,10 +135,12 @@ class SparkVMNegativeTest(unittest.TestCase):
             disk_mb=1024,
             files=["main.py", "run.sh"],
             created_at="2026-01-01T00:00:00Z",
-            updated_at=None,
+            runtime="ubuntu-24.04",
         )
 
-        vm._validate_rollout_base_image(rollout)
+        with self.assertRaises(RuntimeImageNotFound):
+            vm.run(rollout)
+        self.assertEqual("ubuntu-24.04", captured["runtime"])
 
 
 if __name__ == "__main__":

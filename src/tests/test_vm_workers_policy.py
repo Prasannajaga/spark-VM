@@ -99,7 +99,7 @@ class VMWorkersPolicyTest(unittest.TestCase):
             vm,
         )
         vm._configure_microvm = MethodType(
-            lambda _self, api, base_image, execution_disk_path: None,  # type: ignore[return-value]
+            lambda _self, api, runtime_image, execution_disk_path: None,  # type: ignore[return-value]
             vm,
         )
         return vm

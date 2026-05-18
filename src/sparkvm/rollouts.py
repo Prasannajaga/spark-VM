@@ -13,9 +13,8 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from .config import DEFAULT_BASE_IMAGE, resolve_home_dir
+from .config import DEFAULT_RUNTIME, resolve_home_dir
 from .errors import (
-    BaseImageNotFound,
     InvalidRepoError,
     InvalidRolloutModeError,
     RolloutError,
@@ -23,7 +22,7 @@ from .errors import (
     RolloutNotFoundError,
 )
 from .fsops import ensure_dir, read_json, remove_tree, write_bytes, write_text
-from .runtimes.python import DEBIAN_MINBASE_IMAGE_ID
+from .image import normalize_runtime_name
 
 _ROLLOUT_ID_RE = re.compile(r"^rollout-[A-Za-z0-9_-]+$")
 _METADATA_VERSION = 1
@@ -39,7 +38,6 @@ class Rollout:
     id: str
     name: str
     mode: str
-    base_image: str
     path: Path
     command: str | None
     setup_cmd: str | None
@@ -48,6 +46,19 @@ class Rollout:
     files: list[str]
     created_at: str
     updated_at: str | None = None
+    runtime: str = DEFAULT_RUNTIME
+    base_image: str | None = None
+
+    def __post_init__(self) -> None:
+        runtime_candidate: str | None = self.runtime if isinstance(self.runtime, str) and self.runtime.strip() else None
+        if isinstance(self.base_image, str) and self.base_image.strip():
+            if runtime_candidate is None or runtime_candidate == DEFAULT_RUNTIME:
+                runtime_candidate = self.base_image
+        if runtime_candidate is None:
+            runtime_candidate = DEFAULT_RUNTIME
+        normalized = normalize_runtime_name(runtime_candidate)
+        object.__setattr__(self, "runtime", normalized)
+        object.__setattr__(self, "base_image", normalized)
 
     @classmethod
     def from_rollout_json(
@@ -85,12 +96,16 @@ class Rollout:
         else:
             files = []
 
+        runtime_raw = data.get("runtime")
+        if not isinstance(runtime_raw, str) or not runtime_raw.strip():
+            runtime_raw = str(data.get("base_image") or DEFAULT_RUNTIME)
+
         try:
             return cls(
                 id=str(data["id"]),
                 name=str(data["name"]),
                 mode=mode,
-                base_image=str(data.get("base_image") or DEFAULT_BASE_IMAGE),
+                runtime=normalize_runtime_name(runtime_raw),
                 path=rollout_path.resolve(),
                 command=command,
                 setup_cmd=setup_cmd,
@@ -119,11 +134,15 @@ class Rollout:
             else:
                 disk_mb = _REPO_DEFAULT_DISK_MB if mode == "repo" else _SCRIPT_DEFAULT_DISK_MB
 
+            runtime_raw = data.get("runtime")
+            if not isinstance(runtime_raw, str) or not runtime_raw.strip():
+                runtime_raw = str(data.get("base_image") or DEFAULT_RUNTIME)
+
             return cls(
                 id=str(data["id"]),
                 name=str(data["name"]),
                 mode=mode,
-                base_image=str(data.get("base_image") or DEFAULT_BASE_IMAGE),
+                runtime=normalize_runtime_name(runtime_raw),
                 path=Path(str(data["path"])),
                 command=command,
                 setup_cmd=setup_cmd,
@@ -141,7 +160,7 @@ class Rollout:
             "id": self.id,
             "name": self.name,
             "mode": self.mode,
-            "base_image": self.base_image,
+            "runtime": self.runtime,
             "path": str(self.path),
             "command": self.command,
             "setup_cmd": self.setup_cmd,
@@ -166,13 +185,10 @@ def _validate_rollout_id(rollout_id: str) -> str:
     return candidate
 
 
-def _validate_base_image(base_image: str) -> str:
-    if not isinstance(base_image, str) or not base_image.strip():
-        raise RolloutError("base_image must be a non-empty string.")
-    selected = base_image.strip()
-    if selected != DEBIAN_MINBASE_IMAGE_ID:
-        raise BaseImageNotFound(f"Unsupported base image '{selected}'. Only '{DEFAULT_BASE_IMAGE}' is supported.")
-    return selected
+def _validate_runtime(runtime: str) -> str:
+    if not isinstance(runtime, str) or not runtime.strip():
+        raise RolloutError("runtime must be a non-empty string.")
+    return normalize_runtime_name(runtime)
 
 
 def _validate_non_empty(value: str | None, *, field_name: str) -> str:
@@ -249,7 +265,7 @@ class Rollouts:
         *,
         name: str,
         mode: str = "script",
-        base_image: str = DEFAULT_BASE_IMAGE,
+        runtime: str = DEFAULT_RUNTIME,
         files: dict[str, str | bytes] | None = None,
         source: str | Path | None = None,
         ref: str | None = None,
@@ -257,10 +273,11 @@ class Rollouts:
         run_cmd: str | None = None,
         disk_mb: int | None = None,
         command: str | None = None,
+        base_image: str | None = None,
     ) -> Rollout:
         rollout_name = _validate_non_empty(name, field_name="name")
         rollout_mode = _validate_rollout_mode(mode)
-        rollout_base_image = _validate_base_image(base_image)
+        rollout_runtime = _validate_runtime(base_image if base_image is not None else runtime)
 
         resolved_run_cmd = run_cmd.strip() if isinstance(run_cmd, str) and run_cmd.strip() else None
         if resolved_run_cmd is None and isinstance(command, str) and command.strip():
@@ -291,7 +308,7 @@ class Rollouts:
                 rollout_item = self._create_script_rollout(
                     rollout_id=rollout_id,
                     rollout_name=rollout_name,
-                    rollout_base_image=rollout_base_image,
+                    rollout_runtime=rollout_runtime,
                     rollout_path=rollout_path,
                     files=files,
                     setup_cmd=setup_cmd,
@@ -303,7 +320,7 @@ class Rollouts:
                 rollout_item = self._create_repo_rollout(
                     rollout_id=rollout_id,
                     rollout_name=rollout_name,
-                    rollout_base_image=rollout_base_image,
+                    rollout_runtime=rollout_runtime,
                     rollout_path=rollout_path,
                     source=source,
                     setup_cmd=setup_cmd,
@@ -325,7 +342,7 @@ class Rollouts:
         *,
         rollout_id: str,
         rollout_name: str,
-        rollout_base_image: str,
+        rollout_runtime: str,
         rollout_path: Path,
         files: dict[str, str | bytes] | None,
         setup_cmd: str | None,
@@ -370,7 +387,7 @@ class Rollouts:
             "id": rollout_id,
             "name": rollout_name,
             "mode": "script",
-            "base_image": rollout_base_image,
+            "runtime": rollout_runtime,
             "command": run_cmd,
             "setup_cmd": setup_script,
             "run_cmd": run_cmd,
@@ -384,7 +401,7 @@ class Rollouts:
             id=rollout_id,
             name=rollout_name,
             mode="script",
-            base_image=rollout_base_image,
+            runtime=rollout_runtime,
             path=rollout_path.resolve(),
             command=run_cmd,
             setup_cmd=setup_script,
@@ -400,7 +417,7 @@ class Rollouts:
         *,
         rollout_id: str,
         rollout_name: str,
-        rollout_base_image: str,
+        rollout_runtime: str,
         rollout_path: Path,
         source: str | Path | None,
         setup_cmd: str | None,
@@ -440,7 +457,7 @@ class Rollouts:
             "id": rollout_id,
             "name": rollout_name,
             "mode": "repo",
-            "base_image": rollout_base_image,
+            "runtime": rollout_runtime,
             "source": source_payload,
             "setup_cmd": rollout_setup_cmd,
             "run_cmd": run_cmd,
@@ -454,7 +471,7 @@ class Rollouts:
             id=rollout_id,
             name=rollout_name,
             mode="repo",
-            base_image=rollout_base_image,
+            runtime=rollout_runtime,
             path=rollout_path.resolve(),
             command=None,
             setup_cmd=rollout_setup_cmd,

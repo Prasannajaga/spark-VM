@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import platform
 import pwd
@@ -15,15 +14,14 @@ from typing import Callable
 
 from sparkvm.config import SparkVMConfig, resolve_home_dir
 from sparkvm.errors import FirecrackerBinaryNotInstalled, KVMUnavailableError, SparkVMSetupError
-from sparkvm.fsops import ensure_dir, read_json, write_json_atomic, write_text
-from sparkvm.runtimes.python import DEBIAN_MINBASE_IMAGE_ID, INIT_TEMPLATE
+from sparkvm.fsops import ensure_dir, read_json, write_json_atomic
+from sparkvm.runtime_store import RuntimeRecord, list_runtime_records
 
 FIRECRACKER_VERSION = "v1.15.1"
-DEBIAN_ROOTFS_FILENAME = "debian-rootfs.ext4"
 KERNEL_FILENAME = "vmlinux"
-REQUIRED_HOST_TOOLS = ("curl", "tar", "debootstrap", "dd", "mkfs.ext4", "mount", "umount", "chroot", "debugfs")
-OPTIONAL_HOST_TOOLS = ("git", "sudo")
 SUPPORTED_ARCHES = {"x86_64", "aarch64"}
+_REQUIRED_SETUP_TOOLS = ("curl", "tar")
+_DOCTOR_TOOLS = ("docker", "dd", "mkfs.ext4", "mount", "umount", "debugfs")
 
 _ARCH_ALIASES = {
     "amd64": "x86_64",
@@ -46,12 +44,13 @@ class SparkVMPaths:
     rollouts_dir: Path
     firecracker_bin: Path
     kernel_image: Path
-    debian_rootfs: Path
 
 
 @dataclass(frozen=True)
 class DoctorStatus:
     paths: SparkVMPaths
+    home_exists: bool
+    images_dir_exists: bool
     host_os_ok: bool
     arch_ok: bool
     arch_value: str
@@ -59,10 +58,9 @@ class DoctorStatus:
     firecracker_version: str | None
     kvm_accessible: bool
     kernel_found: bool
-    debian_rootfs_found: bool
     host_tools: dict[str, bool]
-    sudo_required: bool
-    image_dir_free_mb: int
+    available_runtimes: list[RuntimeRecord]
+    image_dir_free_mb: int | None
 
 
 def _emit_progress(progress: Callable[[str], None] | None, message: str) -> None:
@@ -87,7 +85,6 @@ def get_sparkvm_paths(home_dir: str | Path | None = None) -> SparkVMPaths:
         rollouts_dir=rollouts_dir,
         firecracker_bin=bin_dir / "firecracker",
         kernel_image=image_dir / KERNEL_FILENAME,
-        debian_rootfs=image_dir / DEBIAN_ROOTFS_FILENAME,
     )
 
 
@@ -101,7 +98,6 @@ def paths_from_config(config: SparkVMConfig) -> SparkVMPaths:
         rollouts_dir=config.home_dir / "rollouts",
         firecracker_bin=config.bin_dir / "firecracker",
         kernel_image=config.image_dir / KERNEL_FILENAME,
-        debian_rootfs=config.image_dir / DEBIAN_ROOTFS_FILENAME,
     )
 
 
@@ -143,22 +139,15 @@ def check_kvm_access() -> None:
 
 
 def host_tool_status() -> dict[str, bool]:
-    status: dict[str, bool] = {}
-    for tool in (*REQUIRED_HOST_TOOLS, *OPTIONAL_HOST_TOOLS):
-        status[tool] = shutil.which(tool) is not None
-    return status
+    tools = set(_REQUIRED_SETUP_TOOLS) | set(_DOCTOR_TOOLS)
+    return {tool: shutil.which(tool) is not None for tool in sorted(tools)}
 
 
-def require_host_tools() -> None:
+def require_setup_tools() -> None:
     status = host_tool_status()
-    missing = [tool for tool in REQUIRED_HOST_TOOLS if not status[tool]]
-
+    missing = [tool for tool in _REQUIRED_SETUP_TOOLS if not status[tool]]
     if missing:
-        missing_list = ", ".join(missing)
-        hint = ""
-        if "debootstrap" in missing:
-            hint = "\nInstall hint (Debian/Ubuntu): sudo apt-get install -y debootstrap"
-        raise SparkVMSetupError(f"Missing required host tools: {missing_list}.{hint}")
+        raise SparkVMSetupError(f"Missing required host tools: {', '.join(missing)}")
 
 
 def _run_checked(cmd: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -176,8 +165,7 @@ def _run_checked(cmd: list[str], *, cwd: Path | None = None) -> subprocess.Compl
         stderr = (exc.stderr or "").strip()
         stdout = (exc.stdout or "").strip()
         detail = stderr or stdout or "command failed"
-        rendered = " ".join(cmd)
-        raise SparkVMSetupError(f"Command failed: {rendered}\n{detail}") from exc
+        raise SparkVMSetupError(f"Command failed: {' '.join(cmd)}\n{detail}") from exc
 
 
 def _download_with_curl(url: str, out_path: Path) -> None:
@@ -220,7 +208,6 @@ def ensure_firecracker_binary(
         with tempfile.TemporaryDirectory(prefix="sparkvm-firecracker-") as tmp_dir_str:
             tmp_dir = Path(tmp_dir_str)
             archive_path = tmp_dir / "firecracker.tgz"
-            _emit_progress(progress, f"Downloading Firecracker archive from: {archive_url}")
             _download_with_curl(archive_url, archive_path)
             _run_checked(["tar", "-xzf", str(archive_path), "-C", str(tmp_dir)])
             extracted = _extract_firecracker_binary(tmp_dir)
@@ -268,20 +255,6 @@ def ensure_kernel_image(
     return paths.kernel_image
 
 
-def require_root_for_setup(home_dir: Path, owner: str | None) -> None:
-    del owner  # Included for API clarity and future policy extensions.
-    if os.geteuid() == 0:
-        return
-
-    current_user = pwd.getpwuid(os.getuid()).pw_name
-    recommended_home = home_dir if home_dir.as_posix().strip() else Path.home() / ".sparkvm"
-    raise SparkVMSetupError(
-        "Building the Debian rootfs requires root privileges for debootstrap/mount/umount.\n"
-        "Run:\n"
-        f"  sudo sparkvm setup --home-dir {recommended_home} --owner {current_user}"
-    )
-
-
 def chown_tree(path: Path, owner: str) -> None:
     user_info = pwd.getpwnam(owner)
     uid = user_info.pw_uid
@@ -295,18 +268,6 @@ def chown_tree(path: Path, owner: str) -> None:
             os.chown(root_path / dname, uid, gid)
         for fname in files:
             os.chown(root_path / fname, uid, gid)
-
-
-def _assert_rootfs_basics(rootfs_dir: Path) -> None:
-    checks: list[tuple[str, list[Path]]] = [
-        ("/bin/sh", [rootfs_dir / "bin/sh"]),
-        ("/init", [rootfs_dir / "init"]),
-        ("poweroff", [rootfs_dir / "sbin/poweroff", rootfs_dir / "usr/sbin/poweroff", rootfs_dir / "bin/poweroff"]),
-        ("mount", [rootfs_dir / "bin/mount", rootfs_dir / "usr/bin/mount"]),
-    ]
-    for label, candidates in checks:
-        if not any(path.exists() for path in candidates):
-            raise SparkVMSetupError(f"Debian rootfs missing required file/tool: {label}")
 
 
 def _initialize_rollouts_metadata(paths: SparkVMPaths) -> None:
@@ -323,85 +284,6 @@ def _initialize_rollouts_metadata(paths: SparkVMPaths) -> None:
     write_json_atomic(metadata_path, {"version": 1, "rollouts": []}, encoding="utf-8", pretty=True)
 
 
-def build_debian_minbase_rootfs(
-    *,
-    output_path: Path,
-    size_mb: int = 2048,
-    suite: str = "bookworm",
-    mirror: str = "http://deb.debian.org/debian",
-    force: bool = False,
-) -> Path:
-    out = Path(output_path)
-    if out.exists() and not force:
-        return out
-
-    cache_dir = out.parent.parent / "cache"
-    ensure_dir(cache_dir, exist_ok=True)
-    ensure_dir(out.parent, exist_ok=True)
-
-    if os.geteuid() != 0:
-        raise SparkVMSetupError(
-            "Building the Debian rootfs requires root privileges for debootstrap/mount/umount."
-        )
-    mounted = False
-
-    with tempfile.TemporaryDirectory(prefix="build-debian-", dir=str(cache_dir)) as tmp_dir_str:
-        tmp_dir = Path(tmp_dir_str)
-        rootfs_dir = tmp_dir / "rootfs"
-        mount_dir = tmp_dir / "mnt"
-        tmp_image = out.with_suffix(out.suffix + ".tmp")
-
-        ensure_dir(rootfs_dir, exist_ok=True)
-        ensure_dir(mount_dir, exist_ok=True)
-
-        try:
-            _run_checked(
-                [
-                    "debootstrap",
-                    "--variant=minbase",
-                    "--include=ca-certificates,curl,iproute2,procps,coreutils,util-linux",
-                    suite,
-                    str(rootfs_dir),
-                    mirror,
-                ]
-            )
-
-            init_path = rootfs_dir / "init"
-            write_text(init_path, INIT_TEMPLATE, encoding="utf-8")
-            init_path.chmod(0o755)
-            _assert_rootfs_basics(rootfs_dir)
-
-            if tmp_image.exists():
-                tmp_image.unlink()
-            _run_checked(["dd", "if=/dev/zero", f"of={tmp_image}", "bs=1M", f"count={size_mb}", "status=none"])
-            _run_checked(["mkfs.ext4", "-F", str(tmp_image)])
-
-            _run_checked(["mount", "-o", "loop", str(tmp_image), str(mount_dir)])
-            mounted = True
-            _run_checked(["cp", "-a", f"{rootfs_dir}/.", str(mount_dir)])
-            _run_checked(["sync"])
-            _run_checked(["umount", str(mount_dir)])
-            mounted = False
-
-            os.replace(tmp_image, out)
-            return out
-        except Exception as exc:
-            if isinstance(exc, SparkVMSetupError):
-                raise
-            raise SparkVMSetupError(f"Failed to build Debian minbase rootfs at {out}: {exc}") from exc
-        finally:
-            if mounted:
-                try:
-                    _run_checked(["umount", str(mount_dir)])
-                except Exception as unmount_exc:
-                    raise SparkVMSetupError(f"Failed to unmount temporary rootfs mount {mount_dir}: {unmount_exc}")
-            if tmp_image.exists():
-                try:
-                    tmp_image.unlink()
-                except OSError:
-                    pass
-
-
 def run_setup(
     paths: SparkVMPaths,
     *,
@@ -409,17 +291,14 @@ def run_setup(
     owner: str | None = None,
     progress: Callable[[str], None] | None = None,
 ) -> None:
-    require_root_for_setup(paths.home_dir, owner)
     _emit_progress(progress, f"Preparing SparkVM directories under: {paths.home_dir}")
     ensure_directories(paths)
     _emit_progress(progress, "Checking Linux host compatibility")
     check_linux_host()
     arch = normalize_arch()
     _emit_progress(progress, f"Detected architecture: {arch}")
-    _emit_progress(progress, "Checking KVM access")
-    check_kvm_access()
     _emit_progress(progress, "Checking required host tools")
-    require_host_tools()
+    require_setup_tools()
 
     firecracker_bin = ensure_firecracker_binary(paths, force=force, progress=progress)
     _emit_progress(progress, f"Firecracker ready: {firecracker_bin}")
@@ -427,29 +306,15 @@ def run_setup(
     ensure_kernel_image(paths, force=force, progress=progress)
     _emit_progress(progress, f"Kernel ready: {paths.kernel_image}")
 
-    _emit_progress(progress, "Building/verifying Debian minbase rootfs")
-    build_debian_minbase_rootfs(output_path=paths.debian_rootfs, force=force)
-    _emit_progress(progress, f"Debian rootfs ready: {paths.debian_rootfs}")
-
     _initialize_rollouts_metadata(paths)
 
     if owner is not None:
+        if os.geteuid() != 0:
+            raise SparkVMSetupError("--owner can only be used when running as root.")
         _emit_progress(progress, f"Adjusting ownership to user: {owner}")
         chown_tree(paths.home_dir, owner)
 
-    _emit_progress(progress, "Base setup finished")
-
-
-def run_setup_python(
-    paths: SparkVMPaths,
-    *,
-    force: bool = False,
-    owner: str | None = None,
-    progress: Callable[[str], None] | None = None,
-) -> Path:
-    # Compatibility shim for legacy command usage.
-    run_setup(paths, force=force, owner=owner, progress=progress)
-    return paths.debian_rootfs
+    _emit_progress(progress, "Setup finished")
 
 
 def _read_firecracker_version(firecracker_bin: Path) -> str | None:
@@ -486,11 +351,17 @@ def doctor_status(paths: SparkVMPaths) -> DoctorStatus:
         arch_value = platform.machine().strip().lower() or "<unknown>"
         arch_ok = False
 
-    disk_usage = shutil.disk_usage(paths.image_dir)
-    free_mb = int(disk_usage.free / (1024 * 1024))
+    free_mb: int | None
+    if paths.image_dir.exists():
+        disk_usage = shutil.disk_usage(paths.image_dir)
+        free_mb = int(disk_usage.free / (1024 * 1024))
+    else:
+        free_mb = None
 
     return DoctorStatus(
         paths=paths,
+        home_exists=paths.home_dir.exists(),
+        images_dir_exists=paths.image_dir.exists(),
         host_os_ok=platform.system().lower() == "linux",
         arch_ok=arch_ok,
         arch_value=arch_value,
@@ -498,9 +369,8 @@ def doctor_status(paths: SparkVMPaths) -> DoctorStatus:
         firecracker_version=_read_firecracker_version(paths.firecracker_bin),
         kvm_accessible=kvm_ok,
         kernel_found=paths.kernel_image.exists(),
-        debian_rootfs_found=paths.debian_rootfs.exists(),
         host_tools=tools,
-        sudo_required=os.geteuid() != 0,
+        available_runtimes=list_runtime_records(paths.image_dir),
         image_dir_free_mb=free_mb,
     )
 
@@ -512,36 +382,29 @@ def _flag(ok: bool) -> str:
 def format_doctor_report(status: DoctorStatus) -> str:
     lines: list[str] = []
     lines.append(f"SparkVM home: {status.paths.home_dir}")
+    lines.append(f"SparkVM home exists: {_flag(status.home_exists)}")
     lines.append(f"Host OS Linux: {_flag(status.host_os_ok)}")
     lines.append(f"Architecture ({status.arch_value}): {_flag(status.arch_ok)}")
     lines.append(f"KVM accessible: {_flag(status.kvm_accessible)}")
-    lines.append(
-        f"Firecracker binary: {_flag(status.firecracker_found)} ({status.paths.firecracker_bin})"
-    )
+    lines.append(f"Firecracker binary: {_flag(status.firecracker_found)} ({status.paths.firecracker_bin})")
     lines.append(f"Firecracker version: {status.firecracker_version or 'unavailable'}")
     lines.append(f"Kernel image: {_flag(status.kernel_found)} ({status.paths.kernel_image})")
-    lines.append(f"Debian rootfs: {_flag(status.debian_rootfs_found)} ({status.paths.debian_rootfs})")
-    lines.append(f"Free space (images): {status.image_dir_free_mb} MiB")
+    lines.append(f"Images directory: {_flag(status.images_dir_exists)} ({status.paths.image_dir})")
+    if status.image_dir_free_mb is not None:
+        lines.append(f"Free space (images): {status.image_dir_free_mb} MiB")
 
     lines.append("Host tools:")
-    for tool in REQUIRED_HOST_TOOLS:
-        marker = _flag(status.host_tools.get(tool, False))
-        suffix = ""
-        if tool == "debootstrap" and marker != "OK":
-            suffix = " (install: sudo apt-get install -y debootstrap)"
-        lines.append(f"  - {tool}: {marker}{suffix}")
-
-    lines.append("Optional tools:")
-    for tool in OPTIONAL_HOST_TOOLS:
+    for tool in _DOCTOR_TOOLS:
         marker = _flag(status.host_tools.get(tool, False))
         lines.append(f"  - {tool}: {marker}")
 
-    if status.sudo_required and not status.host_tools.get("sudo", False):
-        lines.append("sudo requirement: ERROR (sudo is required when running setup as non-root)")
-    elif status.sudo_required:
-        lines.append("sudo requirement: OK")
+    lines.append("Available runtimes:")
+    if not status.available_runtimes:
+        lines.append("  no runtime images found. Run `sparkvm dockify python:3.12-slim`.")
     else:
-        lines.append("sudo requirement: OK (running as root)")
+        for runtime in status.available_runtimes:
+            source = runtime.source_image or "unknown"
+            lines.append(f"  - {runtime.name}  source={source}")
 
     return "\n".join(lines)
 
@@ -550,8 +413,8 @@ def run_setup_command(home_dir: str | None, runtime: str | None, force: bool, *,
     paths = get_sparkvm_paths(home_dir)
     print(f"Using SparkVM home: {paths.home_dir}", flush=True)
 
-    if runtime is not None and runtime.strip().lower() == "python":
-        print("Language-specific setup is no longer required. Use rollout setup_cmd instead.", flush=True)
+    if runtime is not None and runtime.strip():
+        print("Language-specific setup is no longer required. Use `sparkvm dockify <docker-image>`.", flush=True)
 
     progress = lambda message: print(f"[setup] {message}", flush=True)
     print("Running base setup checks and managed asset install...", flush=True)
@@ -559,7 +422,6 @@ def run_setup_command(home_dir: str | None, runtime: str | None, force: bool, *,
     print("SparkVM setup complete.")
     print(f"Firecracker: {paths.firecracker_bin}")
     print(f"Kernel: {paths.kernel_image}")
-    print(f"Base image ({DEBIAN_MINBASE_IMAGE_ID}): {paths.debian_rootfs}")
     print(
         "Note: VM networking is not implemented yet; internet-dependent setup_cmd commands may fail inside the guest."
     )
@@ -589,7 +451,6 @@ class ManagedSetup:
 
 __all__ = [
     "FIRECRACKER_VERSION",
-    "DEBIAN_MINBASE_IMAGE_ID",
     "SparkVMPaths",
     "DoctorStatus",
     "get_sparkvm_paths",
@@ -599,14 +460,11 @@ __all__ = [
     "normalize_arch",
     "check_kvm_access",
     "host_tool_status",
-    "require_host_tools",
+    "require_setup_tools",
     "ensure_firecracker_binary",
     "ensure_kernel_image",
-    "require_root_for_setup",
     "chown_tree",
-    "build_debian_minbase_rootfs",
     "run_setup",
-    "run_setup_python",
     "run_setup_command",
     "doctor_status",
     "format_doctor_report",

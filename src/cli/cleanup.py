@@ -5,7 +5,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from sparkvm.config import DEFAULT_BASE_IMAGE, DEFAULT_MEMORY, DEFAULT_TIMEOUT_SEC, DEFAULT_VCPU, SparkVMConfig, build_config
+from sparkvm.config import DEFAULT_MEMORY, DEFAULT_RUNTIME, DEFAULT_TIMEOUT_SEC, DEFAULT_VCPU, SparkVMConfig, build_config
 from sparkvm.errors import CleanupError, SparkVMError
 from sparkvm.fsops import (
     ensure_dir,
@@ -156,11 +156,12 @@ def run_cleanup_command(home_dir: str | None, target: str, force: bool) -> int:
         print("Aborted.")
         return 0
 
+    # temp config build for path resolution 
     config = build_config(
         vcpu=DEFAULT_VCPU,
         memory=DEFAULT_MEMORY,
         timeout=DEFAULT_TIMEOUT_SEC,
-        base_image=DEFAULT_BASE_IMAGE,
+        runtime=DEFAULT_RUNTIME,
         home_dir=home_dir,
     )
 
@@ -210,7 +211,7 @@ def run_reset_command(home_dir: str | None, force: bool) -> int:
         vcpu=DEFAULT_VCPU,
         memory=DEFAULT_MEMORY,
         timeout=DEFAULT_TIMEOUT_SEC,
-        base_image=DEFAULT_BASE_IMAGE,
+        runtime=DEFAULT_RUNTIME,
         home_dir=home_dir,
     )
     _reset_home(config, dry_run=False)

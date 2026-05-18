@@ -1,116 +1,89 @@
 # SparkVM Phase 4
 
-## 1. What Changed
+## 1. What changed
 
-Phase 4 replaces language/runtime-specific rootfs management with one managed Debian minbase base image.
+Phase 4 moves SparkVM to an explicit runtime image strategy:
 
-SparkVM now manages:
+- `sparkvm setup` now initializes only base assets.
+- Runtime rootfs images are created explicitly via `sparkvm dockify <docker-image>`.
+- VM execution resolves pre-converted runtime images from `~/.sparkvm/images`.
 
-- `~/.sparkvm/bin/firecracker`
-- `~/.sparkvm/images/vmlinux`
-- `~/.sparkvm/images/debian-rootfs.ext4`
+## 2. Setup behavior
 
-Rollouts now target:
+`sparkvm setup` now:
 
-- `base_image="debian-minbase"`
+1. Creates managed directories under `~/.sparkvm`.
+2. Installs/verifies Firecracker binary.
+3. Installs/verifies kernel image (`vmlinux`).
+4. Initializes rollout metadata.
+5. Runs doctor checks.
 
-instead of runtime identifiers like `python-3.12`.
+It no longer:
 
-## 2. Why Debian Minbase
+- builds Debian minbase rootfs
+- runs `debootstrap`
+- pulls Docker images
 
-Debian minbase was chosen to provide:
+Legacy `sparkvm setup python` now prints a deprecation message that points to `sparkvm dockify`.
 
-- a small, predictable guest filesystem
-- no language lock-in
-- explicit user-controlled dependency installation through rollout `setup_cmd`
-- cleaner path to future networking and package workflows
+## 3. Runtime conversion (`dockify`)
 
-This makes SparkVM execution language-agnostic by default.
+`sparkvm dockify <docker-image>`:
 
-## 3. Why Docker Export Was Removed
+1. Optionally pulls Docker image.
+2. Creates and exports a container filesystem.
+3. Injects SparkVM `/init`.
+4. Validates rootfs basics.
+5. Builds ext4 image under `~/.sparkvm/images/<runtime>.ext4`.
+6. Writes runtime metadata at `~/.sparkvm/images/<runtime>.json`.
 
-Previous rootfs creation depended on exporting Docker images.
+Runtime names are normalized (for example `python:3.12-slim` -> `python-3.12-slim`).
 
-That approach was removed because it:
+## 4. VM execution model
 
-- tightly coupled setup to Docker availability
-- encouraged language-specific base images
-- increased setup complexity and artifact size
+`SparkVM.run(rollout_id)` now:
 
-Phase 4 rootfs build now uses `debootstrap --variant=minbase` directly.
+- loads rollout runtime
+- resolves runtime ext4 + kernel from managed images
+- never auto-pulls Docker images
+- never auto-converts images during execution
+- preserves worker directories only for infrastructure failures
+- cleans workers for setup/run successes and failures
 
-## 4. Why Language-Specific Rootfs Was Removed
+## 5. Runtime management CLI
 
-Language-specific rootfs images (for example Python-only rootfs) were removed to avoid baked-in runtimes and to keep VM images minimal.
+New commands:
 
-Dependency installation is now rollout-driven:
+- `sparkvm runtimes list`
+- `sparkvm runtimes inspect <runtime>`
+- `sparkvm runtimes delete <runtime>`
 
-- `setup_cmd` (optional) installs/configures what the job needs
-- `run_cmd` executes the workload
+## 6. Rollouts model updates
 
-## 5. Setup Flow
+Rollouts now store `runtime` (normalized) rather than `base_image` in rollout metadata.
 
-`sparkvm setup` now performs:
+Defaults:
 
-1. Directory bootstrap under `~/.sparkvm`
-2. Firecracker install/verification
-3. Kernel install/verification
-4. Debian minbase rootfs build/verification (`debian-rootfs.ext4`)
-5. `/init` injection and executable permission
-6. Rollout metadata initialization (`~/.sparkvm/rollouts/metadata.json`)
+- script mode disk: 1024 MB
+- repo mode disk: 4096 MB
 
-`setup python` is now deprecated behavior and prints guidance:
+## 7. Doctor updates
 
-- Language-specific setup is no longer required.
-- Use rollout `setup_cmd` instead.
+`sparkvm doctor` now reports:
 
-## 6. Rollout Model Updates
+- SparkVM home/layout
+- Firecracker presence and version
+- kernel presence
+- KVM access
+- Docker/mount tool availability
+- available runtime images
 
-Rollout schema now uses `base_image`:
+If no runtimes exist, doctor suggests:
 
-- `base_image` defaults to `debian-minbase`
-- `run_cmd` is required for both script and repo modes
-- `setup_cmd` is optional
+```text
+sparkvm dockify python:3.12-slim
+```
 
-Mode behavior:
+## 8. Networking status
 
-- `script` mode runs inside `/job`
-- `repo` mode runs inside `/job/repo`
-
-No `instructions.md` file is created by SparkVM.
-
-## 7. Result Model and Execution
-
-VM result collection remains phase-based:
-
-- setup phase logs/exit code (if `setup.sh` exists)
-- run phase logs/exit code
-- final exit code
-
-`VMResult` now includes base-image context (`base_image`) along with rollout and phase information.
-
-## 8. Current Limitation (No Networking Yet)
-
-Networking is intentionally not implemented in Phase 4.
-
-Implications:
-
-- `apt-get`, `pip`, `npm`, and other internet-dependent commands inside the VM may fail.
-- This is expected behavior for now.
-
-Current workaround:
-
-1. vendor dependencies into repo/rollout
-2. use offline/local artifacts
-3. wait for networking phase
-
-## 9. What Remains for Future Networking Phase
-
-Planned follow-up includes:
-
-- TAP attachment and guest interface configuration
-- host-side NAT/forwarding setup
-- DNS and outbound connectivity in guest VMs
-- clearer network policy controls and diagnostics
-
-Phase 4 intentionally does not fake networking support.
+Networking is still not implemented. `setup_cmd` that requires internet may fail inside guest VMs unless dependencies are pre-baked in the dockified runtime or included in rollout assets.

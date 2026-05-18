@@ -3,18 +3,19 @@
 from __future__ import annotations
 
 import os
+import pwd
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from .errors import BaseImageNotFound, InvalidMemoryError, InvalidResourceError, SparkVMConfigError
+from .errors import InvalidMemoryError, InvalidResourceError, SparkVMConfigError
 
 DEFAULT_VCPU = 1
 DEFAULT_MEMORY = "512M"
 DEFAULT_TIMEOUT_SEC = 30.0
-DEFAULT_BASE_IMAGE = "debian-minbase"
+DEFAULT_RUNTIME = "python-3.12-slim"
 # Backward compatibility alias.
-DEFAULT_RUNTIME = DEFAULT_BASE_IMAGE
+DEFAULT_BASE_IMAGE = DEFAULT_RUNTIME
 DEFAULT_HOME_DIR = Path.home() / ".sparkvm"
 
 _MEMORY_RE = re.compile(r"^(?P<amount>\d+)\s*(?P<unit>m|mb|mib|g|gb|gib)?$", re.IGNORECASE)
@@ -25,12 +26,27 @@ class SparkVMConfig:
     vcpu: int
     memory_mib: int
     timeout_sec: float
-    base_image: str
+    runtime: str
     home_dir: Path
     workers_dir: Path
     bin_dir: Path
     image_dir: Path
     cache_dir: Path
+
+    @property
+    def base_image(self) -> str:
+        """Backward compatibility alias for older callers."""
+        return self.runtime
+
+
+def _resolve_sudo_invoking_user_home() -> Path | None:
+    sudo_user = os.getenv("SUDO_USER", "").strip()
+    if not sudo_user or sudo_user == "root":
+        return None
+    try:
+        return Path(pwd.getpwnam(sudo_user).pw_dir)
+    except KeyError:
+        return None
 
 
 def resolve_home_dir(home_dir: str | Path | None = None) -> Path:
@@ -40,6 +56,12 @@ def resolve_home_dir(home_dir: str | Path | None = None) -> Path:
     env_home = os.getenv("SPARKVM_HOME")
     if env_home and env_home.strip():
         return Path(env_home).expanduser()
+
+    # If running via sudo, prefer the invoking user's home over /root.
+    if os.geteuid() == 0:
+        sudo_home = _resolve_sudo_invoking_user_home()
+        if sudo_home is not None:
+            return sudo_home / ".sparkvm"
 
     return DEFAULT_HOME_DIR
 
@@ -82,13 +104,10 @@ def parse_memory_to_mib(memory: int | str) -> int:
     raise InvalidMemoryError(f"Unsupported memory unit: {unit}")
 
 
-def _validate_base_image(base_image: str) -> str:
-    if not isinstance(base_image, str) or not base_image.strip():
-        raise SparkVMConfigError("base_image must be a non-empty string.")
-    selected = base_image.strip()
-    if selected != DEFAULT_BASE_IMAGE:
-        raise BaseImageNotFound(f"Unsupported base image '{selected}'. Only '{DEFAULT_BASE_IMAGE}' is supported.")
-    return selected
+def _validate_runtime(runtime: str) -> str:
+    if not isinstance(runtime, str) or not runtime.strip():
+        raise SparkVMConfigError("runtime must be a non-empty string.")
+    return runtime.strip()
 
 
 def build_config(
@@ -96,8 +115,8 @@ def build_config(
     vcpu: int,
     memory: int | str,
     timeout: float,
-    base_image: str | None = None,
     runtime: str | None = None,
+    base_image: str | None = None,
     home_dir: str | Path | None,
 ) -> SparkVMConfig:
     if type(vcpu) is not int or vcpu <= 0:
@@ -106,9 +125,9 @@ def build_config(
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
         raise InvalidResourceError("timeout must be a positive number of seconds.")
 
-    selected_base_image = base_image if base_image is not None else runtime
-    if selected_base_image is None:
-        selected_base_image = DEFAULT_BASE_IMAGE
+    selected_runtime = runtime if runtime is not None else base_image
+    if selected_runtime is None:
+        selected_runtime = DEFAULT_RUNTIME
 
     resolved_home = resolve_home_dir(home_dir)
 
@@ -116,7 +135,7 @@ def build_config(
         vcpu=vcpu,
         memory_mib=parse_memory_to_mib(memory),
         timeout_sec=float(timeout),
-        base_image=_validate_base_image(selected_base_image),
+        runtime=_validate_runtime(selected_runtime),
         home_dir=resolved_home,
         workers_dir=resolved_home / "workers",
         bin_dir=resolved_home / "bin",
@@ -130,8 +149,8 @@ __all__ = [
     "DEFAULT_VCPU",
     "DEFAULT_MEMORY",
     "DEFAULT_TIMEOUT_SEC",
-    "DEFAULT_BASE_IMAGE",
     "DEFAULT_RUNTIME",
+    "DEFAULT_BASE_IMAGE",
     "DEFAULT_HOME_DIR",
     "resolve_home_dir",
     "parse_memory_to_mib",

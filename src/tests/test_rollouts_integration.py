@@ -60,7 +60,7 @@ class RolloutIntegrationTest(unittest.TestCase):
                 fetched_rollout = rollout_manager.get_by_id(rollout.id)
                 self.assertEqual(fetched_rollout.id, rollout.id)
                 self.assertEqual(fetched_rollout.name, rollout.name)
-                self.assertEqual(fetched_rollout.base_image, "debian-minbase")
+                self.assertEqual(fetched_rollout.runtime, "python-3.12-slim")
 
                 rollout_manager.delete_by_id(rollout.id)
                 self.assertFalse(rollout_manager.exists(rollout.id))

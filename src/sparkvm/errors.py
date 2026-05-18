@@ -29,6 +29,14 @@ class RuntimeImageNotFound(SparkVMSetupError):
     """Managed runtime image could not be found."""
 
 
+class KernelImageNotFound(SparkVMSetupError):
+    """Managed kernel image could not be found."""
+
+
+class RuntimeImagePermissionError(SparkVMSetupError):
+    """Managed runtime image exists but lacks required read/write permissions."""
+
+
 class BaseImageNotFound(SparkVMSetupError):
     """Managed base image could not be found."""
 
@@ -117,6 +125,8 @@ __all__ = [
     "SparkVMSetupError",
     "FirecrackerBinaryNotInstalled",
     "RuntimeImageNotFound",
+    "KernelImageNotFound",
+    "RuntimeImagePermissionError",
     "BaseImageNotFound",
     "KVMUnavailableError",
     "FirecrackerProcessError",

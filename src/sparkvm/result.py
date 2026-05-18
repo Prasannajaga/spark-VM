@@ -32,6 +32,10 @@ class VMResult:
     execution_disk_path: Path | None = None
 
     @property
+    def runtime(self) -> str:
+        return self.base_image
+
+    @property
     def stdout(self) -> str:
         if self.run is None:
             return ""

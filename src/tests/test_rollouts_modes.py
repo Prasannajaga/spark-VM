@@ -36,7 +36,7 @@ class RolloutsModesTest(unittest.TestCase):
         )
 
         self.assertEqual("script", rollout.mode)
-        self.assertEqual("debian-minbase", rollout.base_image)
+        self.assertEqual("python-3.12-slim", rollout.runtime)
         self.assertEqual("python3 /job/main.py", rollout.command)
         self.assertEqual("python3 /job/main.py", rollout.run_cmd)
         self.assertEqual(1024, rollout.disk_mb)
@@ -52,7 +52,7 @@ class RolloutsModesTest(unittest.TestCase):
 
         payload = self._read_json(rollout_dir / "rollout.json")
         self.assertEqual("script", payload["mode"])
-        self.assertEqual("debian-minbase", payload["base_image"])
+        self.assertEqual("python-3.12-slim", payload["runtime"])
         self.assertEqual("python3 /job/main.py", payload["command"])
         self.assertEqual(1024, payload["disk_mb"])
 
@@ -61,7 +61,7 @@ class RolloutsModesTest(unittest.TestCase):
         entries = metadata["rollouts"]
         self.assertEqual(1, len(entries))
         self.assertEqual("script", entries[0]["mode"])
-        self.assertEqual("debian-minbase", entries[0]["base_image"])
+        self.assertEqual("python-3.12-slim", entries[0]["runtime"])
 
     @unittest.skipUnless(shutil.which("git") is not None, "git is required")
     def test_repo_rollout_local_path_copies_repo_and_writes_scripts(self) -> None:
@@ -105,7 +105,7 @@ class RolloutsModesTest(unittest.TestCase):
 
         rollout_payload = self._read_json(rollout_dir / "rollout.json")
         self.assertEqual("repo", rollout_payload["mode"])
-        self.assertEqual("debian-minbase", rollout_payload["base_image"])
+        self.assertEqual("python-3.12-slim", rollout_payload["runtime"])
         self.assertEqual("local", rollout_payload["source"]["type"])
         self.assertEqual(commit, rollout_payload["source"]["commit"])
         self.assertEqual("pip install -e .", rollout_payload["setup_cmd"])

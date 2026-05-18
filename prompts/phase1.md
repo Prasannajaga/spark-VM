@@ -1,99 +1,40 @@
 # SparkVM Phase 1
 
-## 1. What was implemented
+## 1. SDK foundation
 
-Phase 1 establishes the SDK package structure and public API for one-shot SparkVM execution.
+Phase 1 establishes the package structure and public APIs:
 
-Implemented components:
+- `SparkVM`
+- `Rollouts`
+- `VMResult`
+- exception hierarchy
+- managed config defaults under `~/.sparkvm`
 
-- New `sparkvm/` package with required modules:
-  - `__init__.py`
-  - `vm.py`
-  - `process.py`
-  - `api.py`
-  - `image.py`
-  - `job.py`
-  - `result.py`
-  - `disk.py`
-  - `config.py`
-  - `setup.py`
-  - `errors.py`
-  - `runtimes/__init__.py`
-  - `runtimes/python.py`
-- Public exports in `sparkvm.__init__`:
-  - `SparkVM`
-  - `VMJob`
-  - `VMJobs`
-  - `VMResult`
-  - `SparkVMError`
-- `SparkVM` constructor with product-facing parameters only:
-  - `vcpu`, `memory`, `timeout`, `runtime`, `home_dir`
-- Config system:
-  - `SparkVMConfig` dataclass
-  - memory parsing to MiB with support for `int`, `M/MiB`, and `G/GiB` inputs
-  - managed default directories under `~/.sparkvm`
-- Exception hierarchy for config, setup, process/API, guest execution, and cleanup failures.
-- Job models:
-  - `VMJob` dataclass
-  - `VMJob.python(...)`
-  - file path validation (no absolute paths, no `..`, no empty names)
-  - `VMJobs` container with `add`, `add_python`, iteration, and length helpers.
-- Result model:
-  - `VMResult` dataclass
-  - `passed` property.
-- Phase-appropriate behavior in `SparkVM.run(job)`:
-  - validates `VMJob` input
-  - raises: `NotImplementedError("SparkVM.run execution is implemented in Phase 3.")`
+## 2. One-shot model
 
-## 2. Why the SDK hides kernel/rootfs/binary paths from users
+SparkVM is one-shot by design:
 
-SparkVM intentionally hides `kernel_image`, `rootfs_image`, `socket_path`, and `firecracker_bin` from normal usage to keep the API safe and stable:
+- each run starts with a fresh VM worker directory
+- execution disk is per-run
+- cleanup is automatic for non-infrastructure outcomes
 
-- Reduces user error from low-level VM wiring and host-specific paths.
-- Allows SparkVM to enforce consistent managed assets under `~/.sparkvm`.
-- Keeps runtime upgrades and image rotations backwards-compatible.
-- Makes the user experience match the product goal: submit a job, get a result.
+## 3. Configuration model
 
-## 3. Why SparkVM is one-shot instead of persistent
+Public constructor stays high-level:
 
-SparkVM is one-shot by design in this SDK path:
+- `vcpu`
+- `memory`
+- `timeout`
+- `runtime`
+- `home_dir`
 
-- Better isolation: each job starts from a clean VM state.
-- Predictable cleanup: VM resources are always torn down after completion.
-- Lower operational complexity for users: no VM lifecycle bookkeeping.
-- Easier error containment: crashes or hangs are scoped to a single run.
+Kernel/rootfs host paths are managed internally.
 
-This design matches the intended API:
+## 4. Forward phases
 
-```python
-vm = SparkVM(vcpu=2, memory="4G", timeout=100)
-job = VMJob.python("print('hello from SparkVM')")
-result = vm.run(job)
-```
+Later phases add:
 
-## 4. What remains for Phase 2 and Phase 3
-
-### Phase 2 (artifact/setup and job disk plumbing)
-
-- Implement managed setup workflows in `setup.py`:
-  - install/verify Firecracker binary
-  - install/verify runtime images under `~/.sparkvm/images`
-  - host readiness checks (KVM, disk pressure, permissions)
-- Implement `disk.py` helpers:
-  - create ext4 image
-  - mount/copy job files/env/metadata
-  - unmount and cleanup
-- Define job payload conventions consumed by runtime init scripts.
-
-### Phase 3 (end-to-end execution)
-
-- Implement Firecracker process lifecycle in `process.py`.
-- Implement Firecracker UDS API calls in `api.py`.
-- Implement one-shot orchestration in `SparkVM.run`:
-  - create ephemeral VM workspace
-  - boot microVM
-  - run guest init/job
-  - collect stdout/stderr/exit code/timeout/OOM signals
-  - build `VMResult`
-  - guarantee cleanup and robust error mapping.
-- Add integration tests for one-shot execution behavior and failure modes.
+- base setup (`sparkvm setup`)
+- runtime conversion (`sparkvm dockify`)
+- rollout execution plumbing with Firecracker
+- runtime/worker CLI management

@@ -1,5 +1,5 @@
-"""Built-in SparkVM base-image metadata."""
+"""Built-in SparkVM guest init template."""
 
-from .python import DEBIAN_MINBASE_IMAGE_ID, INIT_TEMPLATE
+from .debian import DEBIAN_MINBASE_IMAGE_ID, INIT_TEMPLATE, SPARKVM_INIT_TEMPLATE
 
-__all__ = ["DEBIAN_MINBASE_IMAGE_ID", "INIT_TEMPLATE"]
+__all__ = ["SPARKVM_INIT_TEMPLATE", "INIT_TEMPLATE", "DEBIAN_MINBASE_IMAGE_ID"]
