@@ -92,6 +92,22 @@ result = SparkVM(runtime="python-3.12-slim").run(rollout.id)
 print(result.exit_code, result.stdout)
 ```
 
+Runtime env + networking:
+
+```python
+import os
+from sparkvm import SparkVM
+
+vm = SparkVM(
+    runtime="python-3.12-slim",
+    vcpu=2,
+    memory="2G",
+    timeout=300,
+    network=True,
+    env={"OPENAI_API_KEY": os.environ["OPENAI_API_KEY"]},
+)
+```
+
 Custom Ubuntu runtime:
 
 ```python
@@ -112,8 +128,15 @@ result = SparkVM(runtime="ubuntu-24.04").run(rollout.id)
 - SparkVM never auto-pulls or auto-converts Docker images during `run()`.
 - Missing runtime image raises a clear error with a `sparkvm dockify ...` hint.
 
-## Networking status
+## Networking and env model
 
-Guest networking is not implemented yet.
-
-If `setup_cmd` needs internet (for example `apt`, `pip`, `npm`), it may fail unless dependencies are already present in the dockified runtime or included in the rollout.
+- `network=False` by default.
+- `network=True` enables TAP/NAT internet access for the guest.
+- This phase requires root or `CAP_NET_ADMIN` for TAP and `iptables`.
+- SparkVM creates one TAP device per VM and removes it after execution.
+- Guest network settings are passed with runtime-only `/job/.sparkvm/network.env`.
+- `env={...}` is runtime-only and passed with `/job/.sparkvm/env.sh`.
+- Env values are never stored in rollout metadata and never written to `failure.json`.
+- On successful/normal execution outcomes, worker directories are deleted.
+- On infrastructure failure, SparkVM scrubs `/job/.sparkvm/env.sh`; if scrub fails, it deletes `rollout.ext4` rather than preserving secrets.
+- If user code prints secrets to stdout/stderr, SparkVM cannot prevent that leak.

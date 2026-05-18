@@ -293,6 +293,7 @@ class Rollouts:
 
         ensure_dir(self.rollouts_dir, exist_ok=True)
         metadata = self._load_metadata()
+        metadata = self._drop_existing_rollouts_with_same_name(metadata=metadata, rollout_name=rollout_name)
 
         rollout_id = self._generate_rollout_id(
             rollout_name=rollout_name,
@@ -336,6 +337,39 @@ class Rollouts:
         except Exception:
             remove_tree(rollout_path, ignore_errors=True)
             raise
+
+    def _drop_existing_rollouts_with_same_name(self, *, metadata: dict[str, Any], rollout_name: str) -> dict[str, Any]:
+        rollouts_raw = metadata.get("rollouts", [])
+        if not isinstance(rollouts_raw, list):
+            return metadata
+
+        kept: list[dict[str, Any]] = []
+        removed_any = False
+
+        for entry in rollouts_raw:
+            entry_name = entry.get("name") if isinstance(entry, dict) else None
+            if entry_name != rollout_name:
+                if isinstance(entry, dict):
+                    kept.append(entry)
+                continue
+
+            removed_any = True
+            rollout_path_raw = entry.get("path") if isinstance(entry, dict) else None
+            if isinstance(rollout_path_raw, str) and rollout_path_raw.strip():
+                rollout_path = Path(rollout_path_raw)
+                if rollout_path.exists():
+                    try:
+                        remove_tree(rollout_path, ignore_errors=False)
+                    except OSError as exc:
+                        raise RolloutError(f"Could not replace existing rollout directory: {rollout_path}") from exc
+
+        if not removed_any:
+            return metadata
+
+        updated = dict(metadata)
+        updated["rollouts"] = kept
+        self._write_metadata(updated)
+        return updated
 
     def _create_script_rollout(
         self,

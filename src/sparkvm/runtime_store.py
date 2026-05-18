@@ -24,6 +24,7 @@ class RuntimeRecord:
     metadata: Path
     size_mb: int | None
     created_at: str | None
+    ip_command_present: bool | None
 
 
 def runtime_paths(images_dir: Path, runtime: str) -> RuntimePaths:
@@ -58,6 +59,12 @@ def list_runtime_records(images_dir: Path) -> list[RuntimeRecord]:
         size_mb = payload.get("size_mb")
         created_at = payload.get("created_at")
         source_image = payload.get("source_image")
+        validation = payload.get("validation")
+        ip_command_present: bool | None = None
+        if isinstance(validation, dict):
+            raw = validation.get("ip_command_present")
+            if isinstance(raw, bool):
+                ip_command_present = raw
 
         records.append(
             RuntimeRecord(
@@ -67,6 +74,7 @@ def list_runtime_records(images_dir: Path) -> list[RuntimeRecord]:
                 metadata=metadata_path,
                 size_mb=size_mb if isinstance(size_mb, int) else None,
                 created_at=created_at if isinstance(created_at, str) else None,
+                ip_command_present=ip_command_present,
             )
         )
     records.sort(key=lambda item: item.name)
