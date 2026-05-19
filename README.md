@@ -86,8 +86,14 @@ vm = SparkVM(
     timeout=300,
     network=True,
     env={"OPENAI_API_KEY": os.environ["OPENAI_API_KEY"]},
+    keep_rootfs_on_failure=False,
+    keep_disk_on_failure=False,
 )
 ```
+
+`env` values are runtime-scoped: SparkVM writes them only to the temporary execution disk for the active run, scrubs them from preserved worker artifacts, and never stores raw values in rollout/result metadata. True in-memory secret delivery requires a future vsock guest-agent path.
+
+Failure preservation defaults are metadata-first and disk-lightweight: SparkVM preserves `firecracker.log`, worker metadata (`result.json` / `failure.json`), and sanitized `results/`, while deleting per-run `rootfs.ext4` and `rollout.ext4` unless explicitly enabled with `keep_rootfs_on_failure=True` and/or `keep_disk_on_failure=True`.
 
 Custom Ubuntu runtime:
 
@@ -134,3 +140,41 @@ ls -l /dev/kvm # firecracker needs KVM so
 
 ```
 
+
+## Kernel workflow
+
+
+This is kernel level code which runs the firecracker VM process 
+
+```text
+Host:
+  creates workers/<vm-id>/rootfs.ext4 as a writable copy of images/<runtime>.ext4
+  creates rollout.ext4
+  copies rollout files
+  writes .sparkvm/env.sh if env provided
+  writes .sparkvm/redact.sed if env provided and redaction rules are available
+  writes .sparkvm/network.env if network enabled
+  attaches rootfs as /dev/vda
+  attaches rollout disk as /dev/vdb
+  starts VM
+
+Guest /init:
+  mounts proc/sys/dev
+  mounts tmpfs dirs
+  mounts /dev/vdb -> /job
+  configures network
+  sources env
+  runs setup.sh
+  runs run.sh
+  writes results
+  powers off
+
+Host:
+  mounts rollout.ext4
+  reads results
+  returns VMResult
+  never copies results back into rollouts/<rollout-id>/
+  deletes worker on normal completion
+
+
+```

@@ -1833,3 +1833,1052 @@ Acceptance criteria
 16. Missing network privileges produces clear NetworkSetupError.
 17. No interactive sudo prompts.
 18. Documentation clearly states the security limits.
+
+
+================================================================================================================================
+
+
+Update SparkVM worker/runtime/result handling with four critical fixes:
+
+1. Treat runtime rootfs images as immutable.
+2. Prevent env secret leakage while still printing phase logs into firecracker.log.
+3. Preserve workers for every failed/non-passed execution.
+4. Never copy results back into persistent rollouts.
+
+Context:
+SparkVM currently uses dockified runtime rootfs images under:
+
+~/.sparkvm/images/<runtime>.ext4
+
+Rollouts live under:
+
+~/.sparkvm/rollouts/<rollout-id>/
+
+Workers live under:
+
+~/.sparkvm/workers/<vm-id>/
+
+Execution currently uses:
+- runtime rootfs
+- rollout execution disk
+- /init inside guest
+- setup.sh and run.sh
+- result files under /job/results
+
+The implementation must clearly separate:
+
+Persistent input:
+  ~/.sparkvm/rollouts/<rollout-id>/
+
+Persistent runtime image:
+  ~/.sparkvm/images/<runtime>.ext4
+
+Per-run mutable state:
+  ~/.sparkvm/workers/<vm-id>/
+
+--------------------------------------------------
+1. Runtime rootfs immutability
+--------------------------------------------------
+
+Problem:
+The dockified runtime image should not be mutated by a VM run.
+If Firecracker attaches ~/.sparkvm/images/<runtime>.ext4 as writable, then:
+- the base image can be corrupted
+- concurrent runs can conflict
+- permission problems happen
+- setup_cmd can permanently modify the runtime image
+
+Required design:
+Runtime image under ~/.sparkvm/images must be treated as immutable.
+
+Implement per-run rootfs copy:
+
+For each SparkVM.run():
+
+1. Resolve base runtime image:
+
+   ~/.sparkvm/images/<runtime>.ext4
+
+2. Create worker dir:
+
+   ~/.sparkvm/workers/<vm-id>/
+
+3. Create per-run rootfs copy:
+
+   ~/.sparkvm/workers/<vm-id>/rootfs.ext4
+
+4. Copy base runtime rootfs into worker rootfs.
+
+Preferred copy command:
+
+   cp --reflink=auto --sparse=always <base-rootfs> <worker-rootfs>
+
+Fallback:
+- if reflink is not supported, normal copy is acceptable.
+
+5. Attach worker rootfs as the VM root device.
+
+Important:
+- Do NOT attach ~/.sparkvm/images/<runtime>.ext4 directly as writable.
+- The base runtime image must remain unchanged after every run.
+
+Firecracker drive behavior:
+- rootfs drive path should be:
+  ~/.sparkvm/workers/<vm-id>/rootfs.ext4
+- rootfs drive may be attached read-write because it is a per-run copy.
+- rollout execution disk remains:
+  ~/.sparkvm/workers/<vm-id>/rollout.ext4
+- rollout execution disk is attached read-write.
+
+Why not attach base rootfs read-only only?
+Because SparkVM supports setup_cmd, and setup_cmd may install dependencies into the rootfs.
+A strictly read-only rootfs would break apt/pip/npm installs.
+So the correct tradeoff is:
+- base runtime image = immutable
+- per-worker rootfs copy = writable
+- worker is deleted on success, preserved on failure
+
+Add helper in disk or image module:
+
+def create_worker_rootfs(
+    *,
+    base_rootfs: Path,
+    worker_rootfs: Path,
+) -> Path:
+    ...
+
+Behavior:
+- check base_rootfs exists
+- check base_rootfs readable
+- copy using cp --reflink=auto --sparse=always
+- chmod worker_rootfs 0600 or 0644
+- ensure current user can read/write worker_rootfs
+- return worker_rootfs
+
+Add preflight:
+- base rootfs only needs readable permission
+- worker rootfs must be readable and writable
+- rollout.ext4 must be readable and writable
+
+Add errors:
+- RuntimeImagePermissionError
+- WorkerRootfsError
+
+Acceptance:
+- Runtime image file is never modified during run.
+- Firecracker uses workers/<vm-id>/rootfs.ext4, not images/<runtime>.ext4.
+- setup_cmd can modify the per-run rootfs.
+- success deletes worker rootfs.
+- failure preserves worker rootfs for debugging.
+
+--------------------------------------------------
+2. Read-only base image permission fix
+--------------------------------------------------
+
+Dockified images can be owned by nobody:nogroup or root if created through sudo/mount/copy.
+
+Fix dockify ownership:
+
+After dockify creates:
+
+~/.sparkvm/images/<runtime>.ext4
+~/.sparkvm/images/<runtime>.json
+
+Set:
+- chmod 0644 on both files
+- if --owner USER is provided, chown both files to USER:USER
+- if running as normal user, ensure current user owns them
+
+Doctor should warn if runtime image is unreadable by current user.
+
+Message:
+"Runtime image is not readable by current user: <path>.
+Fix:
+  sudo chown $USER:$USER <path>
+  chmod 0644 <path>"
+
+--------------------------------------------------
+3. Env secret handling
+--------------------------------------------------
+
+Public API:
+
+SparkVM(
+    runtime="python-3.12-slim",
+    vcpu=2,
+    memory="2G",
+    timeout=300,
+    network=True,
+    env={
+        "OPENAI_API_KEY": os.environ["OPENAI_API_KEY"],
+    },
+)
+
+Rules:
+- env values must never be stored in rollouts.
+- env values must never be stored in rollout.json.
+- env values must never be stored in metadata.json.
+- env values must never be stored in failure.json or result.json.
+- env values must not remain in preserved worker artifacts.
+- env values may exist only during the active VM run.
+- env keys may be stored for debugging.
+- env values must be redacted from preserved logs.
+
+Important:
+With the current disk-based runner, env cannot be truly memory-only.
+For now:
+- write env to temporary execution disk
+- source it in guest
+- scrub/delete it before preserving worker
+- redact logs using env values on the host before keeping artifacts
+
+Add explicit documentation saying:
+"SparkVM env is runtime-scoped and scrubbed from preserved artifacts. True in-memory secret delivery requires a future vsock guest agent."
+
+Env file:
+During execution disk creation, write:
+
+/job/.sparkvm/env.sh
+
+Example:
+export OPENAI_API_KEY='<quoted-value>'
+
+Also write redaction metadata only into temporary execution disk:
+
+/job/.sparkvm/redact.sed
+
+This file may contain secret values for redaction, so it is also sensitive and must be scrubbed/deleted before preserving workers.
+
+Use shlex.quote for env.sh.
+Use safe sed escaping for redact.sed.
+
+Env validation:
+- keys must match ^[A-Za-z_][A-Za-z0-9_]*$
+- values must be strings
+
+Never include env values in:
+- __repr__
+- config serialization
+- result.json
+- failure.json
+- rollout.json
+- metadata.json
+
+--------------------------------------------------
+4. Print logs to firecracker.log, but redact secrets
+--------------------------------------------------
+
+Requirement:
+We still want setup/run logs in firecracker.log for debugging.
+
+Problem:
+If the guest prints phase stdout/stderr to /dev/console, secrets can leak into firecracker.log.
+
+Fix:
+Update /init print_phase_logs to redact before printing.
+
+Current behavior likely does:
+cat "$out_file" > /dev/console
+
+Replace with:
+
+redact_to_console() {
+  file="$1"
+
+  if [ ! -s "$file" ]; then
+    return 0
+  fi
+
+  if [ -f /job/.sparkvm/redact.sed ] && command -v sed >/dev/null 2>&1; then
+    sed -f /job/.sparkvm/redact.sed "$file" > /dev/console
+    return 0
+  fi
+
+  if [ -f /job/.sparkvm/env.sh ]; then
+    echo "SparkVM: log redaction unavailable; not printing raw logs because runtime env is present" > /dev/console
+    return 0
+  fi
+
+  cat "$file" > /dev/console
+}
+
+Then print_phase_logs should use redact_to_console.
+
+Behavior:
+- If env is empty, raw logs may be printed to console.
+- If env exists and redaction file exists, print redacted logs.
+- If env exists but redaction is unavailable, do not print raw logs.
+- Always keep phase logs in /job/results.
+- Host will read results from execution disk.
+
+Also host-side redact firecracker.log before preserving a failed worker:
+- replace each env value with "[REDACTED]"
+- do not alter logs on successful runs because worker is deleted
+
+Add helper:
+
+def redact_text(text: str, secrets: Sequence[str]) -> str:
+    ...
+
+def redact_file_in_place(path: Path, secrets: Sequence[str]) -> None:
+    ...
+
+Use longest secrets first to avoid partial replacement issues.
+Ignore empty secret values.
+
+--------------------------------------------------
+5. /init robustness fixes
+--------------------------------------------------
+
+Update SPARKVM_INIT_TEMPLATE.
+
+Must include:
+1. shutdown_vm fallback
+2. tmpfs mounts for:
+   - /tmp
+   - /run
+   - /var/tmp
+3. explicit /dev/vdb mount failure handling
+4. network.env support
+5. env.sh support
+6. redacted console log printing
+7. setup/run phase logging
+
+Important fix:
+Do not continue if /dev/vdb cannot mount.
+
+Use:
+
+mkdir -p /job
+if ! mount /dev/vdb /job; then
+  echo "SparkVM: failed to mount /dev/vdb at /job" > /dev/console
+  shutdown_vm
+fi
+
+Also:
+- If /job/run.sh is missing, write error files:
+  /job/results/run.stderr.log
+  /job/results/run.exit_code
+  /job/results/final_exit_code
+  then shutdown.
+
+Add:
+
+if [ ! -f /job/run.sh ]; then
+  echo "missing /job/run.sh" > /job/results/run.stderr.log
+  echo 127 > /job/results/run.exit_code
+  echo 127 > /job/results/final_exit_code
+  shutdown_vm
+fi
+
+Keep setup optional. 
+
+--------------------------------------------------
+7. Secret-safe worker preservation
+--------------------------------------------------
+
+If env is empty:
+- preserve rollout.ext4 on failures
+- preserve result logs
+- preserve firecracker.log
+
+If env is non-empty:
+- before preserving worker:
+  1. redact firecracker.log in place
+  2. mount rollout.ext4 if possible
+  3. copy result logs out into workers/<vm-id>/results/ with env values redacted
+  4. remove /job/.sparkvm/env.sh
+  5. remove /job/.sparkvm/redact.sed
+  6. redact result logs inside rollout.ext4 if preserving disk
+  7. unmount
+
+If scrubbing rollout.ext4 fails:
+- delete rollout.ext4
+- preserve firecracker.log after redaction
+- preserve copied sanitized results if available
+- mark in failure.json/result.json:
+  "execution_disk_preserved": false,
+  "secret_scrub_failed": true,
+  "execution_disk_removed_reason": "runtime env secrets could not be scrubbed safely"
+
+Policy:
+Never preserve an execution disk that may still contain env values.
+
+Add helper:
+
+def preserve_worker_after_failure(
+    *,
+    worker_dir: Path,
+    env: Mapping[str, str],
+    vm_id: str,
+    rollout: Rollout,
+    result: VMResult | None,
+    error: BaseException | None,
+) -> None:
+    ...
+
+This helper handles:
+- redaction
+- result/failure metadata
+- optional execution disk deletion
+- copying sanitized logs
+
+--------------------------------------------------
+8. Results must not be written back into rollouts
+--------------------------------------------------
+
+Rollouts are immutable input bundles.
+
+Persistent rollout path:
+
+~/.sparkvm/rollouts/<rollout-id>/
+
+Must contain only:
+- original user files/repo
+- setup.sh
+- run.sh
+- rollout.json
+
+Do NOT write:
+- output.log
+- error.log
+- setup stdout/stderr
+- run stdout/stderr
+- final_exit_code
+- result.json
+- failure.json
+- env.sh
+- network.env
+
+SparkVM.run must:
+1. copy rollout directory into execution disk
+2. VM writes results into execution disk
+3. host reads results from execution disk
+4. host returns VMResult
+5. host optionally copies sanitized results into worker dir if preserving worker
+6. host never copies anything back to ~/.sparkvm/rollouts/<rollout-id>/
+
+Add test:
+- after SparkVM.run(), rollout directory has no results/ directory
+- rollout directory has no output/error/exit_code/result/failure files
+- rollout metadata unchanged
+
+--------------------------------------------------
+9. VMResult and worker metadata
+--------------------------------------------------
+
+For passed/user-failed completed executions, VMResult should include:
+
+@dataclass(frozen=True)
+class PhaseResult:
+    name: str
+    stdout: str
+    stderr: str
+    exit_code: int
+
+@dataclass(frozen=True)
+class VMResult:
+    rollout_id: str
+    rollout_name: str
+    rollout_mode: str
+    runtime: str
+    vm_id: str
+    status: str
+    exit_code: int
+    duration_ms: int
+    setup: PhaseResult | None = None
+    run: PhaseResult | None = None
+    timed_out: bool = False
+    oom_killed: bool = False
+    worker_path: Path | None = None
+    firecracker_log_path: Path | None = None
+    execution_disk_path: Path | None = None
+
+Properties:
+- stdout returns run.stdout if available else ""
+- stderr returns run.stderr if available else ""
+- passed returns status == "passed" and exit_code == 0 and not timed_out and not oom_killed
+
+Status:
+- passed
+- setup_failed
+- run_failed
+- timeout
+- guest_panic
+- boot_failed
+- infrastructure_failed
+- oom
+
+For user failures:
+- return VMResult
+- do not raise
+- preserve worker
+- worker_path should point to preserved worker dir
+
+For passed:
+- return VMResult
+- worker_path may be None because worker is deleted
+
+For infra failures:
+- raise error
+- preserve worker
+- failure.json should include worker path
+
+result.json for user failures:
+
+{
+  "vm_id": "...",
+  "rollout_id": "...",
+  "rollout_name": "...",
+  "runtime": "python-3.12-slim",
+  "status": "run_failed",
+  "exit_code": 1,
+  "duration_ms": 1234,
+  "env_keys": ["OPENAI_API_KEY"],
+  "env_values_stored": false,
+  "firecracker_log_path": "...",
+  "execution_disk_path": "...",
+  "execution_disk_preserved": true,
+  "secret_scrubbed": true,
+  "created_at": "..."
+}
+
+failure.json for infra/panic:
+
+{
+  "vm_id": "...",
+  "rollout_id": "...",
+  "rollout_name": "...",
+  "runtime": "python-3.12-slim",
+  "status": "boot_failed",
+  "error_type": "FirecrackerBootError",
+  "error_message": "...",
+  "duration_ms": 1234,
+  "env_keys": ["OPENAI_API_KEY"],
+  "env_values_stored": false,
+  "firecracker_log_path": "...",
+  "execution_disk_path": null,
+  "execution_disk_preserved": false,
+  "secret_scrubbed": true,
+  "created_at": "..."
+}
+
+Never store env values.
+
+--------------------------------------------------
+10. Workers CLI updates
+--------------------------------------------------
+
+Workers now include:
+- user setup failures
+- user run failures
+- infra failures
+- panic/timeout failures
+
+Update:
+
+sparkvm workers list
+
+Should show:
+VM ID | Rollout ID | Status | Exit Code | Error Type | Duration | Created At
+
+It should read:
+- result.json for user failures
+- failure.json for infra failures
+- unknown status if neither exists
+
+Update:
+
+sparkvm workers view <vm-id>
+
+Default:
+- print firecracker.log
+
+Options:
+- --tail N
+- --result
+- --failure
+- --path
+- --results
+
+Behavior:
+- --result prints result.json if exists
+- --failure prints failure.json if exists
+- --results lists/cats sanitized files under workers/<vm-id>/results/
+
+Update:
+
+sparkvm workers delete <vm-id> --force
+
+Deletes preserved worker.
+
+--------------------------------------------------
+11. SparkVM.run control flow
+--------------------------------------------------
+
+Implement clear run control flow:
+
+try:
+  create worker dir
+  create worker rootfs copy
+  create rollout execution disk
+  write env/network runtime files
+  start Firecracker
+  configure boot source
+  attach worker rootfs
+  attach rollout disk
+  attach network if enabled
+  start VM
+  wait for exit
+  read result from rollout disk
+
+  if result.passed:
+      cleanup worker dir
+      return result
+
+  else:
+      preserve worker with sanitized artifacts
+      return result
+
+except infrastructure_error as exc:
+  preserve worker with sanitized artifacts
+  raise
+
+finally:
+  cleanup network
+  cleanup process/socket
+  ensure mounts are unmounted
+
+Important:
+- do not delete worker before result is classified
+- cleanup process/socket/network should happen even when preserving worker
+- preserving worker does not mean leaving running processes or mounts behind
+- preserved worker should contain files, not active resources
+
+--------------------------------------------------
+12. Panic detection
+--------------------------------------------------
+
+Guest panic / boot failure cases:
+- Firecracker exits
+- no /job/results/final_exit_code
+- firecracker.log contains "Kernel panic"
+- firecracker.log contains "not syncing"
+- firecracker.log contains "Attempted to kill init"
+- /dev/vdb mount failed
+- /init failed before writing result files
+
+Add best-effort detection:
+- scan firecracker.log after abnormal exit
+- if panic strings found, status="guest_panic"
+- else status="boot_failed" or infrastructure_failed
+
+Add GuestPanicError if not present.
+
+--------------------------------------------------
+13. Tests
+--------------------------------------------------
+
+Add unit tests:
+
+Rootfs:
+1. create_worker_rootfs copies base image to worker.
+2. Firecracker rootfs attach uses worker rootfs path, not base image path.
+3. base runtime image is not opened/required writable.
+4. worker rootfs must be writable.
+
+Env:
+5. env values are not in rollout.json.
+6. env values are not in metadata.json.
+7. env values are not in result.json.
+8. env values are not in failure.json.
+9. env.sh is written only to execution disk.
+10. redaction replaces env values in firecracker.log.
+11. if env scrub fails, rollout.ext4 is deleted.
+
+Init:
+12. /init handles /dev/vdb mount failure.
+13. /init has redacted log printing.
+14. /init does not cat raw logs when env exists and sed/redaction is unavailable.
+15. /init writes missing run.sh error.
+
+Worker preservation:
+16. passed result deletes worker.
+17. setup_failed preserves worker and writes result.json.
+18. run_failed preserves worker and writes result.json.
+19. timeout preserves worker and writes failure.json.
+20. Firecracker API failure preserves worker and writes failure.json.
+21. guest panic preserves worker and writes failure.json.
+22. preserved worker has firecracker.log.
+23. preserved worker has sanitized results directory when available.
+
+Rollout immutability:
+24. SparkVM.run never writes results into ~/.sparkvm/rollouts/<rollout-id>.
+25. rollout.json unchanged after run.
+26. no env/network runtime files appear in rollout directory.
+
+CLI:
+27. workers list shows result.json workers.
+28. workers list shows failure.json workers.
+29. workers view --result works.
+30. workers view --failure works.
+31. workers delete removes preserved worker.
+
+Integration tests:
+Skip unless SPARKVM_RUN_INTEGRATION=1.
+
+1. Passed script:
+- worker deleted after success.
+
+2. User code failure:
+- script exits 7.
+- VMResult.status == "run_failed".
+- worker preserved.
+- result.json exists.
+- firecracker.log exists.
+- rollout directory has no results.
+
+3. Setup failure:
+- setup.sh exits 5.
+- VMResult.status == "setup_failed".
+- worker preserved.
+
+4. Env redaction:
+- env SECRET_TOKEN="super-secret-value"
+- run script prints "$SECRET_TOKEN"
+- result stdout may contain raw value in returned VMResult.
+- preserved firecracker.log must not contain raw value.
+- result.json/failure.json must not contain raw value.
+- if worker is preserved, rollout.ext4 must either be scrubbed or deleted according to policy.
+
+--------------------------------------------------
+14. Documentation
+--------------------------------------------------
+
+Update README and phase docs.
+
+Explain:
+
+Rootfs:
+- dockified runtime image is immutable
+- each run gets a writable worker rootfs copy
+- setup_cmd can modify the worker rootfs
+- base runtime image remains clean
+
+Workers:
+- passed runs are cleaned
+- every non-passed run preserves worker
+- workers are debugging artifacts
+- preserved workers are not active VMs
+
+Env:
+- env is runtime-scoped
+- env is not stored in rollouts
+- env values are redacted from preserved metadata/logs
+- if user code prints secrets, SparkVM attempts to redact preserved logs
+- returned VMResult may contain stdout/stderr from user code, so callers must handle it carefully
+- true memory-only secrets require future vsock guest agent
+
+Results:
+- results are read from execution disk
+- results are never written back into rollouts
+- rollouts remain reusable immutable inputs
+
+Acceptance criteria:
+1. Base runtime image is never attached writable.
+2. Each run uses workers/<vm-id>/rootfs.ext4.
+3. setup_cmd can still install into the per-run rootfs.
+4. firecracker.log still receives phase logs.
+5. phase logs printed to firecracker.log are redacted when env is present.
+6. Env values are never stored in rollouts/result.json/failure.json.
+7. Passed run deletes worker.
+8. Setup failure preserves worker.
+9. Run failure preserves worker.
+10. Timeout preserves worker.
+11. Boot/panic/infra failure preserves worker.
+12. Results never get copied back into rollouts.
+13. Rollout directory remains unchanged after run.
+
+
+===================================================================================================
+===================================================================================================
+
+
+Update SparkVM worker preservation policy.
+
+Goal:
+Workers should be preserved for debugging on every non-passed execution, but large disk artifacts should be removed by default.
+
+Important default:
+Do NOT preserve rootfs.ext4 by default.
+Do NOT preserve rollout.ext4 by default.
+
+Reason:
+- rootfs.ext4 is only a per-run mutable copy of the runtime image.
+- rollout.ext4 is only a per-run execution disk.
+- Both can be large.
+- Default worker preservation should keep useful debug metadata/logs, not huge disk images.
+
+--------------------------------------------------
+1. Add SparkVM debug preservation flags
+--------------------------------------------------
+
+Update SparkVM constructor:
+
+class SparkVM:
+    def __init__(
+        self,
+        *,
+        runtime: str = "python-3.12-slim",
+        vcpu: int = 1,
+        memory: int | str = "512M",
+        timeout: float = 30,
+        network: bool = False,
+        env: dict[str, str] | None = None,
+        keep_rootfs_on_failure: bool = False,
+        keep_disk_on_failure: bool = False,
+        home_dir: str | Path | None = None,
+    ) -> None:
+        ...
+
+Defaults:
+- keep_rootfs_on_failure=False
+- keep_disk_on_failure=False
+
+Do not preserve these disk images unless explicitly requested.
+
+--------------------------------------------------
+2. Worker preservation policy
+--------------------------------------------------
+
+Passed run:
+- final_exit_code == 0
+- return VMResult(status="passed")
+- delete entire worker directory
+
+Setup failure:
+- setup.sh ran and exited non-zero
+- return VMResult(status="setup_failed", passed=False)
+- preserve worker directory
+- keep:
+  - firecracker.log
+  - result.json
+  - sanitized results/
+- delete:
+  - rootfs.ext4 unless keep_rootfs_on_failure=True
+  - rollout.ext4 unless keep_disk_on_failure=True
+
+Run failure:
+- run.sh ran and exited non-zero
+- return VMResult(status="run_failed", passed=False)
+- preserve worker directory
+- keep:
+  - firecracker.log
+  - result.json
+  - sanitized results/
+- delete:
+  - rootfs.ext4 unless keep_rootfs_on_failure=True
+  - rollout.ext4 unless keep_disk_on_failure=True
+
+Infrastructure failure:
+- Firecracker API/process error
+- boot failure
+- guest panic
+- timeout
+- disk creation/mount/read failure
+- network setup/cleanup failure
+- result collection failure
+
+Behavior:
+- preserve worker directory
+- keep:
+  - firecracker.log if available
+  - failure.json
+  - sanitized partial results/ if available
+- delete:
+  - rootfs.ext4 unless keep_rootfs_on_failure=True
+  - rollout.ext4 unless keep_disk_on_failure=True and it is secret-safe
+
+--------------------------------------------------
+3. Secret-safe disk preservation
+--------------------------------------------------
+
+If env is empty:
+- rollout.ext4 may be preserved only when keep_disk_on_failure=True.
+
+If env is non-empty:
+- before preserving rollout.ext4:
+  1. mount rollout.ext4 if possible
+  2. remove /job/.sparkvm/env.sh
+  3. remove /job/.sparkvm/redact.sed
+  4. redact result logs inside disk if possible
+  5. unmount
+
+If scrubbing fails:
+- delete rollout.ext4 even if keep_disk_on_failure=True
+- set metadata:
+  "execution_disk_preserved": false
+  "secret_scrub_failed": true
+  "execution_disk_removed_reason": "runtime env secrets could not be scrubbed safely"
+
+Never preserve rollout.ext4 if it may still contain env secret values.
+
+rootfs.ext4 should not contain env by design, but still default delete it.
+
+--------------------------------------------------
+4. Preserved worker layout by default
+--------------------------------------------------
+
+For setup/run failure:
+
+~/.sparkvm/workers/<vm-id>/
+├── firecracker.log
+├── result.json
+└── results/
+    ├── setup.stdout.log
+    ├── setup.stderr.log
+    ├── setup.exit_code
+    ├── run.stdout.log
+    ├── run.stderr.log
+    ├── run.exit_code
+    └── final_exit_code
+
+For infra/boot/panic/timeout failure:
+
+~/.sparkvm/workers/<vm-id>/
+├── firecracker.log
+├── failure.json
+└── results/                 # only if partial results are available
+
+Only when explicitly enabled:
+
+~/.sparkvm/workers/<vm-id>/
+├── rootfs.ext4              # only if keep_rootfs_on_failure=True
+└── rollout.ext4             # only if keep_disk_on_failure=True and secret-safe
+
+--------------------------------------------------
+5. Metadata updates
+--------------------------------------------------
+
+result.json and failure.json must include:
+
+{
+  "vm_id": "...",
+  "rollout_id": "...",
+  "rollout_name": "...",
+  "runtime": "...",
+  "status": "run_failed",
+  "exit_code": 1,
+  "duration_ms": 1234,
+
+  "worker_preserved": true,
+
+  "rootfs_preserved": false,
+  "rootfs_removed_reason": "keep_rootfs_on_failure is false",
+
+  "execution_disk_preserved": false,
+  "execution_disk_removed_reason": "keep_disk_on_failure is false",
+
+  "env_keys": ["OPENAI_API_KEY"],
+  "env_values_stored": false,
+  "secret_scrubbed": true,
+
+  "firecracker_log_path": "...",
+  "results_path": "...",
+  "created_at": "..."
+}
+
+Never store env values.
+
+--------------------------------------------------
+6. Cleanup helper
+--------------------------------------------------
+
+Add helper:
+
+def prune_worker_artifacts(
+    *,
+    worker_dir: Path,
+    keep_rootfs: bool,
+    keep_execution_disk: bool,
+    env: Mapping[str, str],
+) -> dict[str, Any]:
+    ...
+
+Behavior:
+- remove rootfs.ext4 if keep_rootfs is False
+- remove rollout.ext4 if keep_execution_disk is False
+- if keep_execution_disk is True and env is non-empty:
+  - scrub secrets first
+  - if scrub fails, delete rollout.ext4
+- return metadata fields:
+  - rootfs_preserved
+  - rootfs_removed_reason
+  - execution_disk_preserved
+  - execution_disk_removed_reason
+  - secret_scrubbed
+  - secret_scrub_failed
+
+Call this helper before writing final result.json/failure.json, so metadata reflects actual state.
+
+--------------------------------------------------
+7. SparkVM.run behavior
+--------------------------------------------------
+
+Execution still creates:
+- workers/<vm-id>/rootfs.ext4
+- workers/<vm-id>/rollout.ext4
+
+But after VM exits:
+
+if result.passed:
+    delete entire worker directory
+    return result
+
+if result is setup_failed or run_failed:
+    copy sanitized results out of rollout.ext4 into workers/<vm-id>/results/
+    redact firecracker.log if env exists
+    prune_worker_artifacts(...)
+    write result.json
+    return result
+
+if infrastructure error:
+    redact firecracker.log if env exists
+    copy partial sanitized results if available
+    prune_worker_artifacts(...)
+    write failure.json
+    raise error
+
+--------------------------------------------------
+8. Tests
+--------------------------------------------------
+
+Add tests:
+
+1. setup_failed preserves worker but deletes rootfs.ext4 by default.
+2. setup_failed preserves worker but deletes rollout.ext4 by default.
+3. run_failed preserves worker but deletes rootfs.ext4 by default.
+4. run_failed preserves worker but deletes rollout.ext4 by default.
+5. infra failure preserves worker but deletes rootfs.ext4 by default.
+6. infra failure preserves worker but deletes rollout.ext4 by default.
+7. keep_rootfs_on_failure=True preserves rootfs.ext4.
+8. keep_disk_on_failure=True preserves rollout.ext4 when env is empty.
+9. keep_disk_on_failure=True with env scrubs env.sh before preserving.
+10. if env scrub fails, rollout.ext4 is deleted.
+11. passed run deletes entire worker directory.
+12. result.json includes rootfs_preserved and execution_disk_preserved.
+13. failure.json includes rootfs_preserved and execution_disk_preserved.
+14. env values never appear in result.json or failure.json.
+15. env values never appear in preserved firecracker.log after redaction.
+
+--------------------------------------------------
+Acceptance criteria
+--------------------------------------------------
+
+1. Default failed worker preservation does not keep rootfs.ext4.
+2. Default failed worker preservation does not keep rollout.ext4.
+3. Failed workers still keep firecracker.log, metadata, and sanitized results.
+4. rootfs.ext4 is preserved only with keep_rootfs_on_failure=True.
+5. rollout.ext4 is preserved only with keep_disk_on_failure=True and secret-safe.
+6. Passed runs delete the entire worker directory.
+7. Env secrets are never preserved in metadata or logs.
