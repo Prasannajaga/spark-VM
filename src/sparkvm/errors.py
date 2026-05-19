@@ -34,7 +34,11 @@ class KernelImageNotFound(SparkVMSetupError):
 
 
 class RuntimeImagePermissionError(SparkVMSetupError):
-    """Managed runtime image exists but lacks required read/write permissions."""
+    """Managed runtime image exists but lacks required permissions."""
+
+
+class WorkerRootfsError(SparkVMSetupError):
+    """Per-worker runtime rootfs copy creation/permission failure."""
 
 
 class BaseImageNotFound(SparkVMSetupError):
@@ -71,6 +75,10 @@ class GuestExecutionError(SparkVMError):
 
 class GuestOOMError(GuestExecutionError):
     """Guest process was OOM-killed."""
+
+
+class GuestPanicError(GuestExecutionError):
+    """Guest kernel/init panic detected from VM logs."""
 
 
 class HostDiskPressureError(SparkVMError):
@@ -131,6 +139,7 @@ __all__ = [
     "RuntimeImageNotFound",
     "KernelImageNotFound",
     "RuntimeImagePermissionError",
+    "WorkerRootfsError",
     "BaseImageNotFound",
     "KVMUnavailableError",
     "FirecrackerProcessError",
@@ -140,6 +149,7 @@ __all__ = [
     "JobTimeoutError",
     "GuestExecutionError",
     "GuestOOMError",
+    "GuestPanicError",
     "HostDiskPressureError",
     "CleanupError",
     "NetworkSetupError",

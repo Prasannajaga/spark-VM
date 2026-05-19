@@ -35,6 +35,25 @@ class CLIWorkersTest(unittest.TestCase):
         }
         (self.worker_dir / "failure.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
+        self.result_worker_dir = self.home / "workers" / "vm-def456"
+        self.result_worker_dir.mkdir(parents=True, exist_ok=True)
+        (self.result_worker_dir / "firecracker.log").write_text("rc-log\n", encoding="utf-8")
+        (self.result_worker_dir / "results").mkdir(parents=True, exist_ok=True)
+        (self.result_worker_dir / "results" / "run.stdout.log").write_text("hello\n", encoding="utf-8")
+        result_payload = {
+            "vm_id": "vm-def456",
+            "rollout_id": "rollout-r1",
+            "rollout_name": "demo-result",
+            "runtime": "python-3.12",
+            "status": "run_failed",
+            "exit_code": 1,
+            "duration_ms": 12,
+            "firecracker_log_path": str(self.result_worker_dir / "firecracker.log"),
+            "execution_disk_path": str(self.result_worker_dir / "rollout.ext4"),
+            "created_at": "2026-05-18T12:00:00Z",
+        }
+        (self.result_worker_dir / "result.json").write_text(json.dumps(result_payload, indent=2) + "\n", encoding="utf-8")
+
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
@@ -48,6 +67,7 @@ class CLIWorkersTest(unittest.TestCase):
         code, out = self._run_cli(["--home-dir", str(self.home), "workers", "list"])
         self.assertEqual(0, code)
         self.assertIn("vm-abc123", out)
+        self.assertIn("vm-def456", out)
         self.assertIn("FirecrackerBootError", out)
 
     def test_workers_view_default_log(self) -> None:
@@ -72,6 +92,18 @@ class CLIWorkersTest(unittest.TestCase):
         code, out = self._run_cli(["--home-dir", str(self.home), "workers", "view", "vm-abc123", "--path"])
         self.assertEqual(0, code)
         self.assertIn(str(self.worker_dir), out)
+
+    def test_workers_view_result(self) -> None:
+        code, out = self._run_cli(["--home-dir", str(self.home), "workers", "view", "vm-def456", "--result"])
+        self.assertEqual(0, code)
+        self.assertIn('"vm_id": "vm-def456"', out)
+        self.assertIn('"status": "run_failed"', out)
+
+    def test_workers_view_results(self) -> None:
+        code, out = self._run_cli(["--home-dir", str(self.home), "workers", "view", "vm-def456", "--results"])
+        self.assertEqual(0, code)
+        self.assertIn("run.stdout.log", out)
+        self.assertIn("hello", out)
 
     def test_workers_delete_force(self) -> None:
         code, _ = self._run_cli(["--home-dir", str(self.home), "workers", "delete", "vm-abc123", "--force"])

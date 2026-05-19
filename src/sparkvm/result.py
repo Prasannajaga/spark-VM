@@ -19,7 +19,7 @@ class VMResult:
     rollout_id: str
     rollout_name: str
     rollout_mode: str
-    base_image: str
+    runtime: str
     vm_id: str
     status: str
     exit_code: int
@@ -28,12 +28,13 @@ class VMResult:
     run: PhaseResult | None = None
     timed_out: bool = False
     oom_killed: bool = False
+    worker_path: Path | None = None
     firecracker_log_path: Path | None = None
     execution_disk_path: Path | None = None
 
     @property
-    def runtime(self) -> str:
-        return self.base_image
+    def base_image(self) -> str:
+        return self.runtime
 
     @property
     def stdout(self) -> str:
@@ -49,7 +50,7 @@ class VMResult:
 
     @property
     def passed(self) -> bool:
-        return self.exit_code == 0 and not self.timed_out and not self.oom_killed
+        return self.status == "passed" and self.exit_code == 0 and not self.timed_out and not self.oom_killed
 
 
 __all__ = ["PhaseResult", "VMResult"]

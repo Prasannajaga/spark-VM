@@ -449,6 +449,11 @@ def format_doctor_report(status: DoctorStatus) -> str:
             if runtime.ip_command_present is False:
                 runtime_line += "  warning=missing ip command (network=True may fail)"
             lines.append(runtime_line)
+            if not os.access(runtime.rootfs, os.R_OK):
+                lines.append(f"    Runtime image is not readable by current user: {runtime.rootfs}.")
+                lines.append("    Fix:")
+                lines.append(f"      sudo chown $USER:$USER {runtime.rootfs}")
+                lines.append(f"      chmod 0644 {runtime.rootfs}")
 
     return "\n".join(lines)
 

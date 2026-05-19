@@ -71,7 +71,7 @@ class _FakeExecutionDisk:
             rollout_id=self.rollout.id,
             rollout_name=self.rollout.name,
             rollout_mode=self.rollout.mode,
-            base_image=self.rollout.base_image,
+            runtime=self.rollout.base_image,
             vm_id=vm_id,
             status="passed",
             exit_code=0,
@@ -165,16 +165,18 @@ class ExecutionDiskAndVMRunTest(unittest.TestCase):
             lambda _self, _runtime=None: BaseImage(
                 name="debian-minbase",
                 kernel_image=Path("/fake/vmlinux"),
-                rootfs_image=Path("/fake/rootfs.ext4"),
+                rootfs_image=(self.home / "images" / "fake-rootfs.ext4"),
                 boot_args="console=ttyS0",
             ),
             vm._images,
         )
+        (self.home / "images").mkdir(parents=True, exist_ok=True)
+        (self.home / "images" / "fake-rootfs.ext4").write_bytes(b"rootfs")
         vm.wait_for_firecracker_socket = MethodType(
             lambda self, api, process, timeout_sec: None, vm
         )
         vm.configure_microvm = MethodType(
-            lambda self, api, runtime_image, execution_disk_path: None, vm
+            lambda self, api, runtime_image, worker_rootfs_path, execution_disk_path: None, vm
         )
 
         _FakeExecutionDisk.last_size_mb = None
@@ -186,6 +188,74 @@ class ExecutionDiskAndVMRunTest(unittest.TestCase):
 
         self.assertEqual(3072, _FakeExecutionDisk.last_size_mb)
         self.assertEqual(0, result.exit_code)
+
+    def test_vm_run_does_not_write_results_into_persistent_rollout(self) -> None:
+        rollout_dir = self.home / "rollout-immutable"
+        rollout_dir.mkdir(parents=True, exist_ok=True)
+        (rollout_dir / "main.py").write_text("print('ok')\n", encoding="utf-8")
+        (rollout_dir / "run.sh").write_text("#!/bin/sh\npython3 /job/main.py\n", encoding="utf-8")
+        rollout_json_path = rollout_dir / "rollout.json"
+        rollout_json_path.write_text('{"id":"rollout-immutable"}\n', encoding="utf-8")
+        original_rollout_json = rollout_json_path.read_text(encoding="utf-8")
+
+        rollout = Rollout(
+            id="rollout-immutable",
+            name="immutable",
+            mode="script",
+            base_image="debian-minbase",
+            path=rollout_dir,
+            command="python3 /job/main.py",
+            setup_cmd=None,
+            run_cmd="python3 /job/main.py",
+            disk_mb=1024,
+            files=["main.py", "run.sh"],
+            created_at="2026-01-01T00:00:00Z",
+        )
+
+        vm = SparkVM(home_dir=self.home)
+        vm._setup.ensure_layout()
+        vm._setup.firecracker_binary_path = MethodType(lambda _self: Path("/fake/firecracker"), vm._setup)
+        vm._setup.assert_kvm_available = MethodType(lambda _self: None, vm._setup)
+        (self.home / "images").mkdir(parents=True, exist_ok=True)
+        (self.home / "images" / "fake-rootfs.ext4").write_bytes(b"rootfs")
+        vm._images.resolve = MethodType(
+            lambda _self, _runtime=None: BaseImage(
+                name="debian-minbase",
+                kernel_image=Path("/fake/vmlinux"),
+                rootfs_image=(self.home / "images" / "fake-rootfs.ext4"),
+                boot_args="console=ttyS0",
+            ),
+            vm._images,
+        )
+        vm.wait_for_firecracker_socket = MethodType(lambda self, api, process, timeout_sec: None, vm)
+        vm.configure_microvm = MethodType(
+            lambda self, api, runtime_image, worker_rootfs_path, execution_disk_path: None,
+            vm,
+        )
+
+        with patch("sparkvm.vm.FirecrackerAPIClient", _FakeAPI), patch(
+            "sparkvm.vm.FirecrackerProcess",
+            _FakeFirecrackerProcess,
+        ), patch("sparkvm.vm.ExecutionDisk", _FakeExecutionDisk):
+            vm.run(rollout)
+
+        disallowed = [
+            "results",
+            "output.log",
+            "error.log",
+            "setup.stdout.log",
+            "setup.stderr.log",
+            "run.stdout.log",
+            "run.stderr.log",
+            "final_exit_code",
+            "result.json",
+            "failure.json",
+            "env.sh",
+            "network.env",
+        ]
+        for name in disallowed:
+            self.assertFalse((rollout_dir / name).exists(), f"rollout unexpectedly mutated: {name}")
+        self.assertEqual(original_rollout_json, rollout_json_path.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

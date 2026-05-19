@@ -99,7 +99,9 @@ def build_parser() -> argparse.ArgumentParser:
     workers_view = workers_subparsers.add_parser("view", help="View worker details/log")
     workers_view.add_argument("vm_id", help="Worker vm id (e.g. vm-02e67edfc7a0)")
     workers_view.add_argument("--tail", type=int, default=None, help="Show only last N log lines")
+    workers_view.add_argument("--result", action="store_true", help="Print result.json for the worker")
     workers_view.add_argument("--failure", action="store_true", help="Print failure.json for the worker")
+    workers_view.add_argument("--results", action="store_true", help="Print sanitized worker result logs")
     workers_view.add_argument("--path", action="store_true", help="Print worker directory path")
 
     workers_delete = workers_subparsers.add_parser("delete", help="Delete one preserved worker")
@@ -123,7 +125,7 @@ def run_workers_list(home_dir: str | None) -> int:
         print("No preserved workers found.")
         return 0
 
-    headers = ["VM ID", "Rollout ID", "Status", "Error Type", "Duration", "Created At"]
+    headers = ["VM ID", "Rollout ID", "Status", "Exit Code", "Error Type", "Duration", "Created At"]
     rows: list[list[str]] = []
     for item in items:
         rows.append(
@@ -131,6 +133,7 @@ def run_workers_list(home_dir: str | None) -> int:
                 item.vm_id,
                 item.rollout_id or "-",
                 item.status,
+                str(item.exit_code) if item.exit_code is not None else "-",
                 item.error_type or "-",
                 str(item.duration_ms) if item.duration_ms is not None else "-",
                 item.created_at or "-",
@@ -156,7 +159,9 @@ def run_workers_view(
     vm_id: str,
     *,
     tail: int | None,
+    show_result: bool,
     show_failure: bool,
+    show_results: bool,
     show_path: bool,
 ) -> int:
     workers = Workers(home_dir=home_dir)
@@ -164,9 +169,18 @@ def run_workers_view(
         print(workers.path(vm_id))
         return 0
 
+    if show_result:
+        payload = workers.result_json(vm_id)
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
     if show_failure:
         payload = workers.failure_json(vm_id)
         print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    if show_results:
+        print(workers.results_text(vm_id))
         return 0
 
     print(workers.log_text(vm_id, tail=tail))
@@ -238,7 +252,9 @@ def main(argv: list[str] | None = None) -> int:
                     args.home_dir,
                     args.vm_id,
                     tail=args.tail,
+                    show_result=args.result,
                     show_failure=args.failure,
+                    show_results=args.results,
                     show_path=args.path,
                 )
             if args.workers_command == "delete":

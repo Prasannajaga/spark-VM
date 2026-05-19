@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
 from pathlib import Path, PurePosixPath
 
 from .commands import run_checked
-from .errors import CleanupError, ExecutionDiskError
+from .errors import CleanupError, ExecutionDiskError, RuntimeImagePermissionError, WorkerRootfsError
 from .fsops import ensure_dir, read_text, remove_file, remove_tree, write_bytes, write_text
 from .result import PhaseResult, VMResult
 from .rollouts import Rollout
@@ -67,6 +68,54 @@ def create_ext4_image(path: Path, size_mib: int, *, source_dir: Path | None = No
             ) from exc
         raise
     return image_path
+
+
+def create_worker_rootfs(*, base_rootfs: Path, worker_rootfs: Path) -> Path:
+    base = Path(base_rootfs)
+    target = Path(worker_rootfs)
+
+    if not base.exists():
+        raise WorkerRootfsError(f"Base runtime rootfs not found: {base}")
+    if not os.access(base, os.R_OK):
+        raise RuntimeImagePermissionError(
+            "Runtime image is not readable by current user: "
+            f"{base}.\nFix:\n"
+            f"  sudo chown $USER:$USER {base}\n"
+            f"  chmod 0644 {base}"
+        )
+
+    ensure_dir(target.parent, exist_ok=True)
+    try:
+        run_checked(
+            ["cp", "--reflink=auto", "--sparse=always", str(base), str(target)],
+            error_factory=WorkerRootfsError,
+        )
+    except WorkerRootfsError as exc:
+        detail = str(exc).lower()
+        unsupported = (
+            "unrecognized option" in detail
+            or "invalid option" in detail
+            or "unknown option" in detail
+            or "illegal option" in detail
+        )
+        if unsupported and ("--reflink" in detail or "--sparse" in detail):
+            try:
+                shutil.copyfile(base, target)
+            except OSError as copy_exc:
+                raise WorkerRootfsError(f"Failed to copy worker rootfs from {base} to {target}: {copy_exc}") from copy_exc
+        else:
+            raise
+
+    try:
+        target.chmod(0o600)
+    except OSError as exc:
+        raise WorkerRootfsError(f"Failed to set worker rootfs permissions on {target}: {exc}") from exc
+
+    if not os.access(target, os.R_OK | os.W_OK):
+        raise WorkerRootfsError(
+            f"Worker rootfs is not readable/writable by current user after copy: {target}"
+        )
+    return target
 
 
 def mount_ext4(path: Path, mount_dir: Path) -> None:
@@ -244,7 +293,7 @@ class ExecutionDisk:
                 rollout_id=self.rollout.id,
                 rollout_name=self.rollout.name,
                 rollout_mode=self.rollout.mode,
-                base_image=self.rollout.base_image,
+                runtime=self.rollout.base_image,
                 vm_id=vm_id,
                 status=status,
                 exit_code=final_exit_code,
@@ -312,6 +361,7 @@ def scrub_files_from_ext4_image(
 
 __all__ = [
     "create_ext4_image",
+    "create_worker_rootfs",
     "mount_ext4",
     "copy_files_into_mount",
     "unmount_ext4",

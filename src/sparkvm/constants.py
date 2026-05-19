@@ -80,9 +80,32 @@ mount -t tmpfs tmpfs /run || true
 mount -t tmpfs tmpfs /var/tmp || true
 
 mkdir -p /job
-mount /dev/vdb /job
+if ! mount /dev/vdb /job; then
+  echo "SparkVM: failed to mount /dev/vdb at /job" > /dev/console
+  shutdown_vm
+fi
 
 mkdir -p /job/results
+
+redact_to_console() {
+  file="$1"
+
+  if [ ! -s "$file" ]; then
+    return 0
+  fi
+
+  if [ -f /job/.sparkvm/redact.sed ] && command -v sed >/dev/null 2>&1; then
+    sed -f /job/.sparkvm/redact.sed "$file" > /dev/console
+    return 0
+  fi
+
+  if [ -f /job/.sparkvm/env.sh ]; then
+    echo "SparkVM: log redaction unavailable; not printing raw logs because runtime env is present" > /dev/console
+    return 0
+  fi
+
+  cat "$file" > /dev/console
+}
 
 print_phase_logs() {
   phase="$1"
@@ -91,13 +114,13 @@ print_phase_logs() {
 
   if [ -s "$out_file" ]; then
     echo "SparkVM: ${phase} stdout begin" > /dev/console
-    cat "$out_file" > /dev/console
+    redact_to_console "$out_file"
     echo "SparkVM: ${phase} stdout end" > /dev/console
   fi
 
   if [ -s "$err_file" ]; then
     echo "SparkVM: ${phase} stderr begin" > /dev/console
-    cat "$err_file" > /dev/console
+    redact_to_console "$err_file"
     echo "SparkVM: ${phase} stderr end" > /dev/console
   fi
 }
@@ -105,11 +128,15 @@ print_phase_logs() {
 if [ -f /job/.sparkvm/network.env ]; then
   . /job/.sparkvm/network.env
 
-  if [ "$SPARKVM_NET_ENABLED" = "1" ]; then
-    ip link set eth0 up
-    ip addr add "$SPARKVM_GUEST_CIDR" dev eth0
-    ip route add default via "$SPARKVM_HOST_IP" dev eth0
-    echo "nameserver ${SPARKVM_DNS:-1.1.1.1}" > /etc/resolv.conf
+  if [ "${SPARKVM_NET_ENABLED:-0}" = "1" ]; then
+    if ! command -v ip >/dev/null 2>&1; then
+      echo "SparkVM: ip command missing; network unavailable" > /dev/console
+    else
+      ip link set eth0 up
+      ip addr add "$SPARKVM_GUEST_CIDR" dev eth0
+      ip route add default via "$SPARKVM_HOST_IP" dev eth0
+      echo "nameserver ${SPARKVM_DNS:-1.1.1.1}" > /etc/resolv.conf
+    fi
   fi
 fi
 
@@ -135,6 +162,13 @@ echo "$setup_code" > /job/results/setup.exit_code
 
 if [ "$setup_code" -ne 0 ]; then
   echo "$setup_code" > /job/results/final_exit_code
+  shutdown_vm
+fi
+
+if [ ! -f /job/run.sh ]; then
+  echo "missing /job/run.sh" > /job/results/run.stderr.log
+  echo 127 > /job/results/run.exit_code
+  echo 127 > /job/results/final_exit_code
   shutdown_vm
 fi
 

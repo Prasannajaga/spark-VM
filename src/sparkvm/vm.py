@@ -9,25 +9,33 @@ import pwd
 import re
 import shlex
 import subprocess
+import tempfile
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Mapping
+from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
 from .firecracker.api import FirecrackerAPIClient
-from .commands import run_checked
 from .config import DEFAULT_MEMORY, DEFAULT_TIMEOUT_SEC, DEFAULT_VCPU, SparkVMConfig, build_config
-from .disk import ExecutionDisk, scrub_files_from_ext4_image
+from .disk import (
+    ExecutionDisk,
+    create_worker_rootfs,
+    debugfs_dump_file,
+    mount_ext4,
+    scrub_files_from_ext4_image,
+    unmount_ext4,
+)
 from .errors import (
     CleanupError,
     FirecrackerAPIError,
     FirecrackerBootError,
     FirecrackerProcessError,
+    GuestPanicError,
     RuntimeImagePermissionError,
     RolloutNotFoundError,
-    SparkVMSetupError,
     SparkVMError,
+    WorkerRootfsError,
 )
 from .firecracker.process import FirecrackerProcess
 from .fsops import ensure_dir, read_text, remove_file, remove_tree, write_text
@@ -47,6 +55,49 @@ def shell_quote(value: str) -> str:
 def render_env_file(env: Mapping[str, str]) -> str:
     lines = [f"export {key}={shell_quote(value)}" for key, value in env.items()]
     return "\n".join(lines) + "\n"
+
+
+def escape_sed_pattern(value: str) -> str:
+    escaped = re.escape(value)
+    return escaped.replace("/", r"\/")
+
+
+def render_redact_sed_file(secrets: Sequence[str]) -> str | None:
+    rules: list[str] = []
+    for secret in secrets:
+        if not secret or "\n" in secret or "\x00" in secret:
+            continue
+        rules.append(f"s/{escape_sed_pattern(secret)}/[REDACTED]/g")
+
+    if not rules:
+        return None
+    return "\n".join(rules) + "\n"
+
+
+def redact_text(text: str, secrets: Sequence[str]) -> str:
+    redacted = text
+    unique_secrets = sorted({secret for secret in secrets if secret}, key=len, reverse=True)
+    for secret in unique_secrets:
+        redacted = redacted.replace(secret, "[REDACTED]")
+    return redacted
+
+
+def redact_file_in_place(path: Path, secrets: Sequence[str]) -> None:
+    if not path.exists():
+        return
+    if not any(secret for secret in secrets):
+        return
+    try:
+        raw = read_text(path, encoding="utf-8", errors="replace")
+    except OSError:
+        return
+    redacted = redact_text(raw, secrets)
+    if redacted == raw:
+        return
+    try:
+        write_text(path, redacted, encoding="utf-8")
+    except OSError:
+        return
 
 
 def validate_env_mapping(env: Mapping[str, str] | None) -> dict[str, str]:
@@ -75,8 +126,22 @@ def scrub_sensitive_execution_files(worker_dir: Path) -> None:
     scrub_files_from_ext4_image(
         image_path=execution_disk_path,
         mount_base=worker_dir / "mnt",
-        rel_paths=[".sparkvm/env.sh"],
+        rel_paths=[".sparkvm/env.sh", ".sparkvm/redact.sed"],
     )
+
+
+RESULT_FS_PATHS = (
+    "/results/setup.stdout.log",
+    "/results/setup.stderr.log",
+    "/results/setup.exit_code",
+    "/results/run.stdout.log",
+    "/results/run.stderr.log",
+    "/results/run.exit_code",
+    "/results/final_exit_code",
+    "/output.log",
+    "/error.log",
+    "/exit_code",
+)
 
 
 class SparkVM:
@@ -89,6 +154,8 @@ class SparkVM:
         timeout: float = DEFAULT_TIMEOUT_SEC,
         network: bool = False,
         env: Mapping[str, str] | None = None,
+        keep_rootfs_on_failure: bool = False,
+        keep_disk_on_failure: bool = False,
         home_dir: str | Path | None = None,
         base_image: str | None = None,
     ) -> None:
@@ -107,6 +174,8 @@ class SparkVM:
             home_dir=home_dir,
         )
         self._env = validate_env_mapping(env)
+        self._keep_rootfs_on_failure = bool(keep_rootfs_on_failure)
+        self._keep_disk_on_failure = bool(keep_disk_on_failure)
         self._setup = ManagedSetup(self.config)
         self._images = ManagedImageResolver(self.config)
         self._rollouts = Rollouts(home_dir=self.config.home_dir)
@@ -124,6 +193,7 @@ class SparkVM:
 
         socket_path = worker_dir / "firecracker.sock"
         firecracker_log_path = worker_dir / "firecracker.log"
+        worker_rootfs_path = worker_dir / "rootfs.ext4"
         execution_disk_path = worker_dir / "rollout.ext4"
         mount_base = worker_dir / "mnt"
 
@@ -146,13 +216,17 @@ class SparkVM:
             self._setup.assert_kvm_available()
             runtime_image = self._images.resolve(selected_runtime)
             self.assert_runtime_image_permissions(runtime_image)
-            self.ensure_rootfs_readonly_mountable(runtime_image)
+            create_worker_rootfs(base_rootfs=runtime_image.rootfs_image, worker_rootfs=worker_rootfs_path)
 
             if self.config.network_enabled:
                 network_config = self._network.setup(vm_id)
 
             runtime_files = self.runtime_execution_files(network_config)
             execution_disk.copy_rollout(runtime_files=runtime_files if runtime_files else None)
+            self.assert_worker_image_permissions(
+                worker_rootfs=worker_rootfs_path,
+                execution_disk_path=execution_disk_path,
+            )
 
             firecracker = FirecrackerProcess(
                 firecracker_bin=firecracker_bin,
@@ -166,6 +240,7 @@ class SparkVM:
             self.configure_microvm(
                 api=api,
                 runtime_image=runtime_image,
+                worker_rootfs_path=worker_rootfs_path,
                 execution_disk_path=execution_disk_path,
             )
             if network_config is not None:
@@ -180,7 +255,7 @@ class SparkVM:
                     rollout_id=rollout_obj.id,
                     rollout_name=rollout_obj.name,
                     rollout_mode=rollout_obj.mode,
-                    base_image=selected_runtime,
+                    runtime=selected_runtime,
                     vm_id=vm_id,
                     status="timeout",
                     exit_code=124,
@@ -189,16 +264,20 @@ class SparkVM:
                     firecracker_log_path=firecracker_log_path,
                     execution_disk_path=execution_disk_path,
                 )
-                self.preserve_worker_for_failed_result(
-                    worker_dir=worker_dir,
-                    socket_path=socket_path,
+                self.cleanup_process_socket(
                     firecracker=firecracker,
+                    socket_path=socket_path,
+                )
+                final_result = self.preserve_worker_after_failure(
+                    worker_dir=worker_dir,
+                    env=self._env,
+                    vm_id=vm_id,
                     rollout=rollout_obj,
                     runtime=selected_runtime,
-                    vm_id=vm_id,
                     result=timeout_result,
+                    error=None,
+                    duration_ms=duration_ms,
                 )
-                final_result = timeout_result
             else:
                 duration_ms = int((time.monotonic() - started_at) * 1000)
                 result = execution_disk.read_result(
@@ -206,6 +285,7 @@ class SparkVM:
                     duration_ms=duration_ms,
                     firecracker_log_path=firecracker_log_path,
                 )
+                result = replace(result, runtime=selected_runtime)
                 result = self.annotate_oom(result=result, firecracker_log_path=firecracker_log_path)
                 if result.passed:
                     self.cleanup_worker_on_completion(
@@ -214,31 +294,51 @@ class SparkVM:
                         firecracker=firecracker,
                         execution_disk=execution_disk,
                     )
+                    final_result = result
                 else:
-                    self.preserve_worker_for_failed_result(
-                        worker_dir=worker_dir,
-                        socket_path=socket_path,
+                    self.cleanup_process_socket(
                         firecracker=firecracker,
+                        socket_path=socket_path,
+                    )
+                    final_result = self.preserve_worker_after_failure(
+                        worker_dir=worker_dir,
+                        env=self._env,
+                        vm_id=vm_id,
                         rollout=rollout_obj,
                         runtime=selected_runtime,
-                        vm_id=vm_id,
                         result=result,
+                        error=None,
+                        duration_ms=duration_ms,
                     )
-                final_result = result
         except (FirecrackerAPIError, FirecrackerProcessError) as exc:
-            failure = FirecrackerBootError(
-                self.format_boot_failure(
-                    vm_id=vm_id,
-                    worker_dir=worker_dir,
-                    socket_path=socket_path,
-                    firecracker_log_path=firecracker_log_path,
-                    reason=str(exc),
-                )
+            failure = self.classify_infrastructure_error(
+                error=exc,
+                vm_id=vm_id,
+                worker_dir=worker_dir,
+                socket_path=socket_path,
+                firecracker_log_path=firecracker_log_path,
             )
         except SparkVMError as exc:
-            failure = exc
+            if self.detect_guest_panic(firecracker_log_path):
+                failure = GuestPanicError(
+                    self.format_boot_failure(
+                        vm_id=vm_id,
+                        worker_dir=worker_dir,
+                        socket_path=socket_path,
+                        firecracker_log_path=firecracker_log_path,
+                        reason=str(exc),
+                    )
+                )
+            else:
+                failure = exc
         except Exception as exc:
-            failure = FirecrackerBootError(str(exc))
+            failure = self.classify_infrastructure_error(
+                error=exc,
+                vm_id=vm_id,
+                worker_dir=worker_dir,
+                socket_path=socket_path,
+                firecracker_log_path=firecracker_log_path,
+            )
         if network_config is not None:
             try:
                 self._network.cleanup(network_config)
@@ -249,29 +349,28 @@ class SparkVM:
                     cleanup_failure_message = str(exc)
 
         if failure is not None:
-            if firecracker is not None:
-                firecracker.stop()
+            self.cleanup_process_socket(
+                firecracker=firecracker,
+                socket_path=socket_path,
+            )
 
-            duration_ms = int((time.monotonic() - started_at) * 1000)
-            scrub = self.scrub_or_remove_execution_disk(worker_dir=worker_dir, env_present=bool(self._env))
-            note_parts: list[str] = []
-            if scrub.note is not None:
-                note_parts.append(scrub.note)
-            if cleanup_failure_message is not None:
-                note_parts.append(f"network_cleanup_error={cleanup_failure_message}")
-            self.write_failure_record(
+            preserved = self.preserve_worker_after_failure(
                 worker_dir=worker_dir,
+                env=self._env,
                 vm_id=vm_id,
                 rollout=rollout_obj,
                 runtime=selected_runtime,
+                result=None,
                 error=failure,
-                duration_ms=duration_ms,
-                firecracker_log_path=firecracker_log_path,
-                execution_disk_path=execution_disk_path,
-                execution_disk_preserved=scrub.execution_disk_preserved,
-                secret_scrubbed=scrub.secret_scrubbed,
-                note="; ".join(note_parts) if note_parts else None,
+                duration_ms=int((time.monotonic() - started_at) * 1000),
             )
+            if cleanup_failure_message is not None:
+                self.append_worker_note(
+                    worker_dir=worker_dir,
+                    filename="failure.json",
+                    note=f"network_cleanup_error={cleanup_failure_message}",
+                )
+            del preserved
             raise failure
 
         assert final_result is not None
@@ -281,6 +380,9 @@ class SparkVM:
         files: dict[str, str] = {}
         if self._env:
             files[".sparkvm/env.sh"] = render_env_file(self._env)
+            redact_file = render_redact_sed_file(self._env.values())
+            if redact_file is not None:
+                files[".sparkvm/redact.sed"] = redact_file
         if network_config is not None:
             files[".sparkvm/network.env"] = render_network_env_file(network_config)
         return files
@@ -359,6 +461,31 @@ class SparkVM:
             parts.append(tail)
         return "\n".join(parts)
 
+    def detect_guest_panic(self, firecracker_log_path: Path) -> bool:
+        text = self.read_log_tail(firecracker_log_path, max_lines=400).lower()
+        markers = ("kernel panic", "not syncing", "attempted to kill init")
+        return any(marker in text for marker in markers)
+
+    def classify_infrastructure_error(
+        self,
+        *,
+        error: Exception,
+        vm_id: str,
+        worker_dir: Path,
+        socket_path: Path,
+        firecracker_log_path: Path,
+    ) -> SparkVMError:
+        message = self.format_boot_failure(
+            vm_id=vm_id,
+            worker_dir=worker_dir,
+            socket_path=socket_path,
+            firecracker_log_path=firecracker_log_path,
+            reason=str(error),
+        )
+        if self.detect_guest_panic(firecracker_log_path):
+            return GuestPanicError(message)
+        return FirecrackerBootError(message)
+
     def cleanup_worker_on_completion(
         self,
         *,
@@ -394,6 +521,77 @@ class SparkVM:
         if errors:
             raise CleanupError(f"Worker cleanup failed for {worker_dir}: {errors[0]}")
 
+    def cleanup_process_socket(self, *, firecracker: FirecrackerProcess | None, socket_path: Path) -> None:
+        if firecracker is not None:
+            try:
+                firecracker.stop()
+            except Exception:
+                pass
+        if socket_path.exists():
+            try:
+                remove_file(socket_path, missing_ok=True)
+            except OSError:
+                pass
+
+    def write_worker_json(self, *, path: Path, payload: dict[str, object]) -> None:
+        try:
+            write_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        except OSError:
+            pass
+
+    def append_worker_note(self, *, worker_dir: Path, filename: str, note: str) -> None:
+        record_path = worker_dir / filename
+        if not record_path.exists():
+            return
+        try:
+            payload = json.loads(read_text(record_path, encoding="utf-8"))
+        except Exception:
+            return
+        if not isinstance(payload, dict):
+            return
+        existing = payload.get("note")
+        if isinstance(existing, str) and existing.strip():
+            payload["note"] = f"{existing}; {note}"
+        else:
+            payload["note"] = note
+        self.write_worker_json(path=record_path, payload=payload)
+
+    def write_result_record(
+        self,
+        *,
+        worker_dir: Path,
+        vm_id: str,
+        rollout: Rollout,
+        result: VMResult,
+        prune: Mapping[str, Any],
+        results_path: Path | None,
+    ) -> None:
+        payload: dict[str, object] = {
+            "vm_id": vm_id,
+            "rollout_id": rollout.id,
+            "rollout_name": rollout.name,
+            "rollout_mode": rollout.mode,
+            "runtime": result.runtime,
+            "status": result.status,
+            "exit_code": result.exit_code,
+            "duration_ms": result.duration_ms,
+            "worker_preserved": True,
+            "env_keys": sorted(self._env.keys()),
+            "env_values_stored": False,
+            "worker_path": str(worker_dir),
+            "firecracker_log_path": str(result.firecracker_log_path or (worker_dir / "firecracker.log")),
+            "results_path": str(results_path) if results_path is not None else None,
+            "rootfs_preserved": bool(prune.get("rootfs_preserved", False)),
+            "rootfs_removed_reason": prune.get("rootfs_removed_reason"),
+            "execution_disk_path": str(worker_dir / "rollout.ext4") if bool(prune.get("execution_disk_preserved", False)) else None,
+            "execution_disk_preserved": bool(prune.get("execution_disk_preserved", False)),
+            "execution_disk_removed_reason": prune.get("execution_disk_removed_reason"),
+            "secret_scrubbed": bool(prune.get("secret_scrubbed", True)),
+            "secret_scrub_failed": bool(prune.get("secret_scrub_failed", False)),
+            "created_at": datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        }
+        self.write_worker_json(path=worker_dir / "result.json", payload=payload)
+
     def write_failure_record(
         self,
         *,
@@ -401,44 +599,46 @@ class SparkVM:
         vm_id: str,
         rollout: Rollout,
         runtime: str,
-        error: Exception,
+        error: BaseException,
         duration_ms: int,
         firecracker_log_path: Path,
-        execution_disk_path: Path,
-        execution_disk_preserved: bool,
-        secret_scrubbed: bool,
-        note: str | None,
-        result_status: str | None = None,
+        prune: Mapping[str, Any],
+        results_path: Path | None,
     ) -> None:
-        payload = {
+        if isinstance(error, GuestPanicError):
+            status = "guest_panic"
+        elif isinstance(error, FirecrackerBootError):
+            status = "boot_failed"
+        else:
+            status = "infrastructure_failed"
+
+        payload: dict[str, object] = {
             "vm_id": vm_id,
             "rollout_id": rollout.id,
             "rollout_name": rollout.name,
             "rollout_mode": rollout.mode,
             "runtime": runtime,
-            "network_enabled": self.config.network_enabled,
-            "env_keys": sorted(self._env.keys()),
-            "env_values_stored": False,
-            "status": "failed",
+            "status": status,
+            "exit_code": None,
             "error_type": type(error).__name__,
             "error_message": str(error),
             "duration_ms": duration_ms,
+            "worker_preserved": True,
+            "env_keys": sorted(self._env.keys()),
+            "env_values_stored": False,
+            "worker_path": str(worker_dir),
             "firecracker_log_path": str(firecracker_log_path),
-            "execution_disk_path": str(execution_disk_path) if execution_disk_preserved else None,
-            "execution_disk_preserved": execution_disk_preserved,
-            "secret_scrubbed": secret_scrubbed,
+            "results_path": str(results_path) if results_path is not None else None,
+            "rootfs_preserved": bool(prune.get("rootfs_preserved", False)),
+            "rootfs_removed_reason": prune.get("rootfs_removed_reason"),
+            "execution_disk_path": str(worker_dir / "rollout.ext4") if bool(prune.get("execution_disk_preserved", False)) else None,
+            "execution_disk_preserved": bool(prune.get("execution_disk_preserved", False)),
+            "execution_disk_removed_reason": prune.get("execution_disk_removed_reason"),
+            "secret_scrubbed": bool(prune.get("secret_scrubbed", True)),
+            "secret_scrub_failed": bool(prune.get("secret_scrub_failed", False)),
             "created_at": datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         }
-        if result_status is not None:
-            payload["result_status"] = result_status
-        if note is not None:
-            payload["note"] = note
-
-        failure_path = worker_dir / "failure.json"
-        try:
-            write_text(failure_path, json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        except OSError:
-            pass
+        self.write_worker_json(path=worker_dir / "failure.json", payload=payload)
 
     def read_log_tail(self, log_path: Path, *, max_lines: int = 40) -> str:
         if not log_path.exists():
@@ -465,11 +665,144 @@ class SparkVM:
             return replace(result, status="oom", oom_killed=True)
         return result
 
+    def copy_sanitized_results_from_execution_disk(
+        self,
+        *,
+        execution_disk_path: Path,
+        worker_dir: Path,
+        secrets: Sequence[str],
+    ) -> None:
+        if not execution_disk_path.exists():
+            return
+
+        results_dir = worker_dir / "results"
+        ensure_dir(results_dir, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="sparkvm-results-copy-") as tmp_dir_str:
+            tmp_dir = Path(tmp_dir_str)
+            for fs_path in RESULT_FS_PATHS:
+                stripped = fs_path.strip("/")
+                local_name = stripped[len("results/") :] if stripped.startswith("results/") else stripped
+                output_path = tmp_dir / local_name
+                if not debugfs_dump_file(execution_disk_path, fs_path, output_path):
+                    continue
+                try:
+                    raw = read_text(output_path, encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                sanitized = redact_text(raw, secrets)
+                write_text(results_dir / local_name, sanitized, encoding="utf-8")
+
+    def scrub_and_redact_execution_disk(
+        self,
+        *,
+        execution_disk_path: Path,
+        worker_dir: Path,
+        secrets: Sequence[str],
+    ) -> None:
+        mount_base = worker_dir / "mnt"
+        ensure_dir(mount_base, exist_ok=True)
+        mount_dir = mount_base / "rollout-preserve-scrub-mount"
+        mounted = False
+        try:
+            mount_ext4(execution_disk_path, mount_dir)
+            mounted = True
+
+            for rel in (".sparkvm/env.sh", ".sparkvm/redact.sed"):
+                try:
+                    remove_file(mount_dir / rel, missing_ok=True)
+                except OSError:
+                    pass
+
+            for rel in ("results/setup.stdout.log", "results/setup.stderr.log", "results/run.stdout.log", "results/run.stderr.log", "output.log", "error.log"):
+                file_path = mount_dir / rel
+                if not file_path.exists():
+                    continue
+                raw = read_text(file_path, encoding="utf-8", errors="replace")
+                sanitized = redact_text(raw, secrets)
+                write_text(file_path, sanitized, encoding="utf-8")
+        finally:
+            if mounted:
+                unmount_ext4(mount_dir)
+            if mount_dir.exists():
+                try:
+                    mount_dir.rmdir()
+                except OSError:
+                    remove_tree(mount_dir, ignore_errors=True)
+
+    def prune_worker_artifacts(
+        self,
+        *,
+        worker_dir: Path,
+        keep_rootfs: bool,
+        keep_execution_disk: bool,
+        env: Mapping[str, str],
+    ) -> dict[str, Any]:
+        rootfs_path = worker_dir / "rootfs.ext4"
+        execution_disk_path = worker_dir / "rollout.ext4"
+        secrets = list(env.values())
+
+        rootfs_preserved = rootfs_path.exists()
+        rootfs_removed_reason: str | None = None
+        if rootfs_preserved and not keep_rootfs:
+            try:
+                remove_file(rootfs_path, missing_ok=True)
+            except OSError:
+                rootfs_preserved = rootfs_path.exists()
+                rootfs_removed_reason = "failed to remove rootfs.ext4"
+            else:
+                rootfs_preserved = False
+                rootfs_removed_reason = "keep_rootfs_on_failure is false"
+        elif not rootfs_preserved:
+            rootfs_removed_reason = "rootfs.ext4 not present"
+
+        execution_disk_preserved = execution_disk_path.exists()
+        execution_disk_removed_reason: str | None = None
+        secret_scrubbed = True
+        secret_scrub_failed = False
+
+        if execution_disk_preserved and not keep_execution_disk:
+            try:
+                remove_file(execution_disk_path, missing_ok=True)
+            except OSError:
+                execution_disk_preserved = execution_disk_path.exists()
+                execution_disk_removed_reason = "failed to remove rollout.ext4"
+            else:
+                execution_disk_preserved = False
+                execution_disk_removed_reason = "keep_disk_on_failure is false"
+        elif execution_disk_preserved and keep_execution_disk and secrets:
+            try:
+                self.scrub_and_redact_execution_disk(
+                    execution_disk_path=execution_disk_path,
+                    worker_dir=worker_dir,
+                    secrets=secrets,
+                )
+            except Exception:
+                try:
+                    remove_file(execution_disk_path, missing_ok=True)
+                except OSError:
+                    pass
+                execution_disk_preserved = False
+                secret_scrubbed = False
+                secret_scrub_failed = True
+                execution_disk_removed_reason = "runtime env secrets could not be scrubbed safely"
+        elif not execution_disk_preserved:
+            execution_disk_removed_reason = "rollout.ext4 not present"
+
+        return {
+            "rootfs_preserved": rootfs_preserved,
+            "rootfs_removed_reason": rootfs_removed_reason,
+            "execution_disk_preserved": execution_disk_preserved,
+            "execution_disk_removed_reason": execution_disk_removed_reason,
+            "secret_scrubbed": secret_scrubbed,
+            "secret_scrub_failed": secret_scrub_failed,
+        }
+
     def configure_microvm(
         self,
         *,
         api: FirecrackerAPIClient,
         runtime_image: RuntimeImage,
+        worker_rootfs_path: Path,
         execution_disk_path: Path,
     ) -> None:
         api.put(
@@ -492,9 +825,9 @@ class SparkVM:
             "/drives/rootfs",
             {
                 "drive_id": "rootfs",
-                "path_on_host": str(runtime_image.rootfs_image),
+                "path_on_host": str(worker_rootfs_path),
                 "is_root_device": True,
-                "is_read_only": True,
+                "is_read_only": False,
             },
         )
         api.put(
@@ -511,113 +844,105 @@ class SparkVM:
         rootfs = runtime_image.rootfs_image
         if not rootfs.exists():
             return
-        if not os.access(rootfs, os.R_OK | os.W_OK):
+        if not os.access(rootfs, os.R_OK):
             raise RuntimeImagePermissionError(
-                "Runtime image exists but is not readable/writable by the current user: "
-                f"{rootfs}\n"
-                "Fix ownership/permissions or recreate with ownership set:\n"
+                "Runtime image is not readable by current user: "
+                f"{rootfs}.\nFix:\n"
                 f"  sudo chown {pwd.getpwuid(os.getuid()).pw_name}:{pwd.getpwuid(os.getuid()).pw_name} {rootfs}\n"
-                f"  sparkvm dockify {runtime_image.name.replace('-', ':', 1)} --name {runtime_image.name} --force"
+                f"  chmod 0644 {rootfs}"
             )
 
-    def ensure_rootfs_readonly_mountable(self, runtime_image: RuntimeImage) -> None:
-        rootfs = runtime_image.rootfs_image
-        if not rootfs.exists():
-            return
-
-        try:
-            completed = run_checked(
-                ["e2fsck", "-p", str(rootfs)],
-                error_factory=SparkVMSetupError,
-                check=False,
+    def assert_worker_image_permissions(self, *, worker_rootfs: Path, execution_disk_path: Path) -> None:
+        if not worker_rootfs.exists():
+            raise WorkerRootfsError(f"Worker rootfs missing after copy: {worker_rootfs}")
+        if not os.access(worker_rootfs, os.R_OK | os.W_OK):
+            raise WorkerRootfsError(
+                "Worker rootfs is not readable/writable by current user: "
+                f"{worker_rootfs}"
             )
-        except SparkVMSetupError as exc:
-            if "Required command not found: e2fsck" in str(exc):
-                raise SparkVMSetupError(
-                    "e2fsck is required to verify runtime ext4 images for read-only VM boot. "
-                    "Install e2fsprogs on the host."
-                ) from exc
-            raise
-
-        if completed.returncode in {0, 1}:
-            return
-
-        stderr = (completed.stderr or "").strip()
-        stdout = (completed.stdout or "").strip()
-        detail = stderr or stdout or "unknown e2fsck failure"
-        raise SparkVMSetupError(
-            f"Runtime image filesystem check failed for {rootfs}: {detail}. "
-            "Try rebuilding the runtime with `sparkvm dockify ... --force`."
-        )
-
-    def scrub_or_remove_execution_disk(self, *, worker_dir: Path, env_present: bool) -> SecretScrubResult:
-        execution_disk_path = worker_dir / "rollout.ext4"
         if not execution_disk_path.exists():
-            return SecretScrubResult(execution_disk_preserved=False, secret_scrubbed=not env_present, note=None)
-
-        if not env_present:
-            return SecretScrubResult(execution_disk_preserved=True, secret_scrubbed=True, note=None)
-
-        try:
-            scrub_sensitive_execution_files(worker_dir)
-            return SecretScrubResult(execution_disk_preserved=True, secret_scrubbed=True, note=None)
-        except Exception:
-            try:
-                remove_file(execution_disk_path, missing_ok=True)
-            except OSError:
-                pass
-            return SecretScrubResult(
-                execution_disk_preserved=False,
-                secret_scrubbed=False,
-                note="Execution disk removed to avoid preserving runtime secrets.",
+            raise CleanupError(f"Execution disk missing after build: {execution_disk_path}")
+        if not os.access(execution_disk_path, os.R_OK | os.W_OK):
+            raise CleanupError(
+                "Execution disk is not readable/writable by current user: "
+                f"{execution_disk_path}"
             )
 
-    def preserve_worker_for_failed_result(
+    def preserve_worker_after_failure(
         self,
         *,
         worker_dir: Path,
-        socket_path: Path,
-        firecracker: FirecrackerProcess | None,
+        env: Mapping[str, str],
         rollout: Rollout,
         runtime: str,
         vm_id: str,
-        result: VMResult,
-    ) -> None:
-        if firecracker is not None:
-            try:
-                firecracker.stop()
-            except Exception:
-                pass
-        if socket_path.exists():
-            try:
-                remove_file(socket_path, missing_ok=True)
-            except OSError:
-                pass
+        result: VMResult | None,
+        error: BaseException | None,
+        duration_ms: int,
+    ) -> VMResult | None:
+        secrets = list(env.values())
+        firecracker_log_path = worker_dir / "firecracker.log"
 
-        error = SparkVMError(
-            f"Guest execution failed with status={result.status}, exit_code={result.exit_code}"
+        redact_file_in_place(firecracker_log_path, secrets)
+        try:
+            self.copy_sanitized_results_from_execution_disk(
+                execution_disk_path=worker_dir / "rollout.ext4",
+                worker_dir=worker_dir,
+                secrets=secrets,
+            )
+        except Exception:
+            pass
+
+        prune = self.prune_worker_artifacts(
+            worker_dir=worker_dir,
+            keep_rootfs=self._keep_rootfs_on_failure,
+            keep_execution_disk=self._keep_disk_on_failure,
+            env=env,
         )
+        results_dir = worker_dir / "results"
+        has_results = results_dir.exists() and any(results_dir.iterdir())
+        results_path = results_dir if has_results else None
+
+        if result is not None:
+            sanitized_result = replace(
+                result,
+                worker_path=worker_dir,
+                firecracker_log_path=firecracker_log_path,
+                execution_disk_path=(worker_dir / "rollout.ext4") if bool(prune.get("execution_disk_preserved")) else None,
+            )
+            self.write_result_record(
+                worker_dir=worker_dir,
+                vm_id=vm_id,
+                rollout=rollout,
+                result=sanitized_result,
+                prune=prune,
+                results_path=results_path,
+            )
+            return sanitized_result
+
+        if error is None:
+            return None
+
         self.write_failure_record(
             worker_dir=worker_dir,
             vm_id=vm_id,
             rollout=rollout,
             runtime=runtime,
             error=error,
-            duration_ms=result.duration_ms,
-            firecracker_log_path=result.firecracker_log_path or (worker_dir / "firecracker.log"),
-            execution_disk_path=result.execution_disk_path or (worker_dir / "rollout.ext4"),
-            execution_disk_preserved=True,
-            secret_scrubbed=True,
-            note=None,
-            result_status=result.status,
+            duration_ms=duration_ms,
+            firecracker_log_path=firecracker_log_path,
+            prune=prune,
+            results_path=results_path,
         )
+        return None
 
 
-class SecretScrubResult:
-    def __init__(self, *, execution_disk_preserved: bool, secret_scrubbed: bool, note: str | None) -> None:
-        self.execution_disk_preserved = execution_disk_preserved
-        self.secret_scrubbed = secret_scrubbed
-        self.note = note
-
-
-__all__ = ["SparkVM", "shell_quote", "render_env_file", "scrub_sensitive_execution_files"]
+__all__ = [
+    "SparkVM",
+    "shell_quote",
+    "render_env_file",
+    "render_redact_sed_file",
+    "redact_text",
+    "redact_file_in_place",
+    "scrub_sensitive_execution_files",
+]

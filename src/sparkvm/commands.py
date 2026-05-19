@@ -11,6 +11,7 @@ from typing import Callable, IO
 ALLOWED_COMMANDS = frozenset(
     {
         "curl",
+        "cp",
         "dd",
         "debugfs",
         "docker",

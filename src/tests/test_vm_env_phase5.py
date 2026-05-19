@@ -13,8 +13,47 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from sparkvm.disk import ExecutionDisk
 from sparkvm.errors import FirecrackerBinaryNotInstalled
 from sparkvm.image import BaseImage
+from sparkvm.result import VMResult
 from sparkvm.rollouts import Rollout
 from sparkvm.vm import SparkVM, render_env_file, shell_quote
+
+
+class _FakeAPI:
+    def __init__(self, socket_path: Path, timeout_sec: float = 10.0) -> None:
+        self.socket_path = socket_path
+        self.timeout_sec = timeout_sec
+
+    def put(self, _path: str, _payload: dict[str, object]) -> None:
+        return None
+
+    def get(self, _path: str) -> None:
+        return None
+
+
+class _FakeFirecrackerProcess:
+    def __init__(self, *, firecracker_bin: Path, socket_path: Path, log_path: Path | None = None) -> None:
+        self.firecracker_bin = firecracker_bin
+        self.socket_path = socket_path
+        self.log_path = log_path
+        self._running = False
+
+    def start(self, startup_timeout_sec: float = 5.0) -> None:
+        del startup_timeout_sec
+        self.socket_path.parent.mkdir(parents=True, exist_ok=True)
+        self.socket_path.write_text("", encoding="utf-8")
+        if self.log_path is not None:
+            self.log_path.write_text("fake-firecracker-log\n", encoding="utf-8")
+        self._running = True
+
+    def wait(self, timeout_sec: float | None = None) -> int:
+        del timeout_sec
+        return 0
+
+    def stop(self) -> None:
+        self._running = False
+
+    def poll(self) -> int | None:
+        return None if self._running else 0
 
 
 class EnvValidationAndRenderingTest(unittest.TestCase):
@@ -117,15 +156,17 @@ class RuntimeFileAndFailureScrubTest(unittest.TestCase):
         self.assertNotIn("super-secret-token", text)
 
     def test_scrub_failure_removes_execution_disk_on_infrastructure_failure(self) -> None:
-        vm = SparkVM(home_dir=self.home, env={"OPENAI_API_KEY": "top-secret"})
+        vm = SparkVM(home_dir=self.home, env={"OPENAI_API_KEY": "top-secret"}, keep_disk_on_failure=True)
         vm._setup.ensure_layout()
+        (self.home / "images").mkdir(parents=True, exist_ok=True)
+        (self.home / "images" / "fake-rootfs.ext4").write_bytes(b"rootfs")
         vm._setup.firecracker_binary_path = MethodType(lambda _self: Path("/fake/firecracker"), vm._setup)
         vm._setup.assert_kvm_available = MethodType(lambda _self: None, vm._setup)
         vm._images.resolve = MethodType(
             lambda _self, runtime=None: BaseImage(
                 name="python-3.12-slim",
                 kernel_image=Path("/fake/vmlinux"),
-                rootfs_image=Path("/fake/rootfs.ext4"),
+                rootfs_image=(self.home / "images" / "fake-rootfs.ext4"),
                 boot_args="console=ttyS0",
             ),
             vm._images,
@@ -142,7 +183,7 @@ class RuntimeFileAndFailureScrubTest(unittest.TestCase):
 
         with patch("sparkvm.vm.ExecutionDisk.copy_rollout", _fake_copy_rollout), patch(
             "sparkvm.vm.FirecrackerProcess.start", _fake_start
-        ), patch("sparkvm.vm.scrub_sensitive_execution_files", side_effect=RuntimeError("scrub failed")):
+        ), patch("sparkvm.vm.SparkVM.scrub_and_redact_execution_disk", side_effect=RuntimeError("scrub failed")):
             with self.assertRaises(Exception):
                 vm.run(self.rollout)
 
@@ -151,6 +192,230 @@ class RuntimeFileAndFailureScrubTest(unittest.TestCase):
         self.assertFalse(payload["execution_disk_preserved"])
         self.assertFalse(payload["secret_scrubbed"])
         self.assertFalse((worker / "rollout.ext4").exists())
+
+    def test_keep_disk_with_env_scrubs_before_preserving(self) -> None:
+        vm = SparkVM(
+            home_dir=self.home,
+            env={"OPENAI_API_KEY": "top-secret"},
+            keep_disk_on_failure=True,
+        )
+        vm._setup.ensure_layout()
+        (self.home / "images").mkdir(parents=True, exist_ok=True)
+        (self.home / "images" / "fake-rootfs.ext4").write_bytes(b"rootfs")
+        vm._setup.firecracker_binary_path = MethodType(lambda _self: Path("/fake/firecracker"), vm._setup)
+        vm._setup.assert_kvm_available = MethodType(lambda _self: None, vm._setup)
+        vm._images.resolve = MethodType(
+            lambda _self, runtime=None: BaseImage(
+                name="python-3.12-slim",
+                kernel_image=Path("/fake/vmlinux"),
+                rootfs_image=(self.home / "images" / "fake-rootfs.ext4"),
+                boot_args="console=ttyS0",
+            ),
+            vm._images,
+        )
+        vm.wait_for_firecracker_socket = MethodType(lambda self, api, process, timeout_sec: None, vm)
+        vm.configure_microvm = MethodType(
+            lambda self, api, runtime_image, worker_rootfs_path, execution_disk_path: None,
+            vm,
+        )
+
+        def _fake_copy_rollout(self_obj, runtime_files=None):  # noqa: ANN001
+            del runtime_files
+            self_obj.path.parent.mkdir(parents=True, exist_ok=True)
+            self_obj.path.write_bytes(b"fake-ext4")
+
+        def _fake_read_result(self_obj, vm_id: str, duration_ms: int, firecracker_log_path: Path | None) -> VMResult:  # noqa: ANN001
+            return VMResult(
+                rollout_id=self.rollout.id,
+                rollout_name=self.rollout.name,
+                rollout_mode=self.rollout.mode,
+                runtime=self.rollout.base_image,
+                vm_id=vm_id,
+                status="run_failed",
+                exit_code=1,
+                duration_ms=duration_ms,
+                firecracker_log_path=firecracker_log_path,
+                execution_disk_path=self_obj.path,
+            )
+
+        with patch("sparkvm.vm.FirecrackerAPIClient", _FakeAPI), patch(
+            "sparkvm.vm.FirecrackerProcess", _FakeFirecrackerProcess
+        ), patch("sparkvm.vm.ExecutionDisk.copy_rollout", _fake_copy_rollout), patch(
+            "sparkvm.vm.ExecutionDisk.read_result", _fake_read_result
+        ), patch("sparkvm.vm.SparkVM.scrub_and_redact_execution_disk", return_value=None) as scrub_mock:
+            vm.run(self.rollout)
+
+        worker = next((self.home / "workers").glob("vm-*"))
+        self.assertTrue((worker / "rollout.ext4").exists())
+        scrub_mock.assert_called_once()
+        payload = json.loads((worker / "result.json").read_text(encoding="utf-8"))
+        self.assertTrue(payload["execution_disk_preserved"])
+
+    def test_keep_disk_with_env_and_scrub_failure_deletes_execution_disk(self) -> None:
+        vm = SparkVM(
+            home_dir=self.home,
+            env={"OPENAI_API_KEY": "top-secret"},
+            keep_disk_on_failure=True,
+        )
+        vm._setup.ensure_layout()
+        (self.home / "images").mkdir(parents=True, exist_ok=True)
+        (self.home / "images" / "fake-rootfs.ext4").write_bytes(b"rootfs")
+        vm._setup.firecracker_binary_path = MethodType(lambda _self: Path("/fake/firecracker"), vm._setup)
+        vm._setup.assert_kvm_available = MethodType(lambda _self: None, vm._setup)
+        vm._images.resolve = MethodType(
+            lambda _self, runtime=None: BaseImage(
+                name="python-3.12-slim",
+                kernel_image=Path("/fake/vmlinux"),
+                rootfs_image=(self.home / "images" / "fake-rootfs.ext4"),
+                boot_args="console=ttyS0",
+            ),
+            vm._images,
+        )
+        vm.wait_for_firecracker_socket = MethodType(lambda self, api, process, timeout_sec: None, vm)
+        vm.configure_microvm = MethodType(
+            lambda self, api, runtime_image, worker_rootfs_path, execution_disk_path: None,
+            vm,
+        )
+
+        def _fake_copy_rollout(self_obj, runtime_files=None):  # noqa: ANN001
+            del runtime_files
+            self_obj.path.parent.mkdir(parents=True, exist_ok=True)
+            self_obj.path.write_bytes(b"fake-ext4")
+
+        def _fake_read_result(self_obj, vm_id: str, duration_ms: int, firecracker_log_path: Path | None) -> VMResult:  # noqa: ANN001
+            return VMResult(
+                rollout_id=self.rollout.id,
+                rollout_name=self.rollout.name,
+                rollout_mode=self.rollout.mode,
+                runtime=self.rollout.base_image,
+                vm_id=vm_id,
+                status="run_failed",
+                exit_code=1,
+                duration_ms=duration_ms,
+                firecracker_log_path=firecracker_log_path,
+                execution_disk_path=self_obj.path,
+            )
+
+        with patch("sparkvm.vm.FirecrackerAPIClient", _FakeAPI), patch(
+            "sparkvm.vm.FirecrackerProcess", _FakeFirecrackerProcess
+        ), patch("sparkvm.vm.ExecutionDisk.copy_rollout", _fake_copy_rollout), patch(
+            "sparkvm.vm.ExecutionDisk.read_result", _fake_read_result
+        ), patch("sparkvm.vm.SparkVM.scrub_and_redact_execution_disk", side_effect=RuntimeError("scrub failed")):
+            vm.run(self.rollout)
+
+        worker = next((self.home / "workers").glob("vm-*"))
+        self.assertFalse((worker / "rollout.ext4").exists())
+        payload = json.loads((worker / "result.json").read_text(encoding="utf-8"))
+        self.assertFalse(payload["execution_disk_preserved"])
+        self.assertTrue(payload["secret_scrub_failed"])
+
+    def test_env_value_redacted_from_preserved_firecracker_log(self) -> None:
+        secret = "sk-super-secret"
+        vm = SparkVM(home_dir=self.home, env={"OPENAI_API_KEY": secret})
+        vm._setup.ensure_layout()
+        (self.home / "images").mkdir(parents=True, exist_ok=True)
+        (self.home / "images" / "fake-rootfs.ext4").write_bytes(b"rootfs")
+        vm._setup.firecracker_binary_path = MethodType(lambda _self: Path("/fake/firecracker"), vm._setup)
+        vm._setup.assert_kvm_available = MethodType(lambda _self: None, vm._setup)
+        vm._images.resolve = MethodType(
+            lambda _self, runtime=None: BaseImage(
+                name="python-3.12-slim",
+                kernel_image=Path("/fake/vmlinux"),
+                rootfs_image=(self.home / "images" / "fake-rootfs.ext4"),
+                boot_args="console=ttyS0",
+            ),
+            vm._images,
+        )
+        vm.wait_for_firecracker_socket = MethodType(lambda self, api, process, timeout_sec: None, vm)
+        vm.configure_microvm = MethodType(
+            lambda self, api, runtime_image, worker_rootfs_path, execution_disk_path: None,
+            vm,
+        )
+
+        def _fake_copy_rollout(self_obj, runtime_files=None):  # noqa: ANN001
+            del runtime_files
+            self_obj.path.parent.mkdir(parents=True, exist_ok=True)
+            self_obj.path.write_bytes(b"fake-ext4")
+
+        def _fake_read_result(self_obj, vm_id: str, duration_ms: int, firecracker_log_path: Path | None) -> VMResult:  # noqa: ANN001
+            assert firecracker_log_path is not None
+            firecracker_log_path.write_text(f"token={secret}\n", encoding="utf-8")
+            return VMResult(
+                rollout_id=self.rollout.id,
+                rollout_name=self.rollout.name,
+                rollout_mode=self.rollout.mode,
+                runtime=self.rollout.base_image,
+                vm_id=vm_id,
+                status="run_failed",
+                exit_code=1,
+                duration_ms=duration_ms,
+                firecracker_log_path=firecracker_log_path,
+                execution_disk_path=self_obj.path,
+            )
+
+        with patch("sparkvm.vm.FirecrackerAPIClient", _FakeAPI), patch(
+            "sparkvm.vm.FirecrackerProcess", _FakeFirecrackerProcess
+        ), patch("sparkvm.vm.ExecutionDisk.copy_rollout", _fake_copy_rollout), patch(
+            "sparkvm.vm.ExecutionDisk.read_result", _fake_read_result
+        ):
+            vm.run(self.rollout)
+
+        worker = next((self.home / "workers").glob("vm-*"))
+        log_text = (worker / "firecracker.log").read_text(encoding="utf-8")
+        self.assertNotIn(secret, log_text)
+
+    def test_env_values_never_appear_in_result_json(self) -> None:
+        secret = "sk-never-store"
+        vm = SparkVM(home_dir=self.home, env={"OPENAI_API_KEY": secret})
+        vm._setup.ensure_layout()
+        (self.home / "images").mkdir(parents=True, exist_ok=True)
+        (self.home / "images" / "fake-rootfs.ext4").write_bytes(b"rootfs")
+        vm._setup.firecracker_binary_path = MethodType(lambda _self: Path("/fake/firecracker"), vm._setup)
+        vm._setup.assert_kvm_available = MethodType(lambda _self: None, vm._setup)
+        vm._images.resolve = MethodType(
+            lambda _self, runtime=None: BaseImage(
+                name="python-3.12-slim",
+                kernel_image=Path("/fake/vmlinux"),
+                rootfs_image=(self.home / "images" / "fake-rootfs.ext4"),
+                boot_args="console=ttyS0",
+            ),
+            vm._images,
+        )
+        vm.wait_for_firecracker_socket = MethodType(lambda self, api, process, timeout_sec: None, vm)
+        vm.configure_microvm = MethodType(
+            lambda self, api, runtime_image, worker_rootfs_path, execution_disk_path: None,
+            vm,
+        )
+
+        def _fake_copy_rollout(self_obj, runtime_files=None):  # noqa: ANN001
+            del runtime_files
+            self_obj.path.parent.mkdir(parents=True, exist_ok=True)
+            self_obj.path.write_bytes(b"fake-ext4")
+
+        def _fake_read_result(self_obj, vm_id: str, duration_ms: int, firecracker_log_path: Path | None) -> VMResult:  # noqa: ANN001
+            return VMResult(
+                rollout_id=self.rollout.id,
+                rollout_name=self.rollout.name,
+                rollout_mode=self.rollout.mode,
+                runtime=self.rollout.base_image,
+                vm_id=vm_id,
+                status="run_failed",
+                exit_code=1,
+                duration_ms=duration_ms,
+                firecracker_log_path=firecracker_log_path,
+                execution_disk_path=self_obj.path,
+            )
+
+        with patch("sparkvm.vm.FirecrackerAPIClient", _FakeAPI), patch(
+            "sparkvm.vm.FirecrackerProcess", _FakeFirecrackerProcess
+        ), patch("sparkvm.vm.ExecutionDisk.copy_rollout", _fake_copy_rollout), patch(
+            "sparkvm.vm.ExecutionDisk.read_result", _fake_read_result
+        ):
+            vm.run(self.rollout)
+
+        worker = next((self.home / "workers").glob("vm-*"))
+        result_text = (worker / "result.json").read_text(encoding="utf-8")
+        self.assertNotIn(secret, result_text)
 
 
 if __name__ == "__main__":

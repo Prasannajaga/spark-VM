@@ -80,11 +80,13 @@ class Worker:
     rollout_id: str | None
     rollout_name: str | None
     status: str
+    exit_code: int | None
     error_type: str | None
     error_message: str | None
     duration_ms: int | None
     created_at: str | None
     firecracker_log_path: Path
+    result_path: Path | None
     failure_path: Path | None
 
 
@@ -144,28 +146,76 @@ class Workers:
 
         return read_failure_json(failure_path)
 
+    def result_json(self, vm_id: str) -> dict[str, Any]:
+        worker_path = self.path(vm_id)
+        if not worker_path.is_dir():
+            raise WorkerNotFoundError(f"Worker not found: {validate_worker_id(vm_id)}")
+        result_path = worker_path / "result.json"
+        if not result_path.exists():
+            raise WorkerMetadataError(f"Worker result metadata missing: {result_path}")
+        return read_worker_json(result_path)
+
+    def results_text(self, vm_id: str) -> str:
+        worker_path = self.path(vm_id)
+        if not worker_path.is_dir():
+            raise WorkerNotFoundError(f"Worker not found: {validate_worker_id(vm_id)}")
+        results_dir = worker_path / "results"
+        if not results_dir.exists() or not results_dir.is_dir():
+            return ""
+
+        lines: list[str] = []
+        for path in sorted(results_dir.glob("*")):
+            if not path.is_file():
+                continue
+            lines.append(f"== {path.name} ==")
+            try:
+                lines.append(read_text(path, encoding="utf-8", errors="replace"))
+            except OSError:
+                lines.append("<unreadable>")
+            lines.append("")
+        return "\n".join(lines).rstrip()
+
     def build_worker(self, worker_path: Path) -> Worker:
         vm_id = worker_path.name
+        result_path = worker_path / "result.json"
         failure_path = worker_path / "failure.json"
         firecracker_log_path = worker_path / "firecracker.log"
 
         status = "unknown"
         rollout_id: str | None = None
         rollout_name: str | None = None
+        exit_code: int | None = None
         error_type: str | None = None
         error_message: str | None = None
         duration_ms: int | None = None
         created_at: str | None = None
+        result_path_value: Path | None = None
         failure_path_value: Path | None = None
 
-        if failure_path.exists():
+        if result_path.exists():
+            result_path_value = result_path
+            try:
+                data = read_worker_json(result_path)
+            except WorkerMetadataError:
+                status = "unknown"
+            else:
+                status = optional_str(data.get("status")) or "failed"
+                rollout_id = optional_str(data.get("rollout_id"))
+                rollout_name = optional_str(data.get("rollout_name"))
+                exit_code = optional_int(data.get("exit_code"))
+                duration_ms = optional_int(data.get("duration_ms"))
+                created_at = optional_str(data.get("created_at"))
+                log_from_json = optional_str(data.get("firecracker_log_path"))
+                if log_from_json:
+                    firecracker_log_path = Path(log_from_json)
+        elif failure_path.exists():
             failure_path_value = failure_path
             try:
                 data = read_failure_json(failure_path)
             except WorkerMetadataError:
                 status = "unknown"
             else:
-                status = str(data.get("status") or "failed")
+                status = optional_str(data.get("status")) or "failed"
                 rollout_id = optional_str(data.get("rollout_id"))
                 rollout_name = optional_str(data.get("rollout_name"))
                 error_type = optional_str(data.get("error_type"))
@@ -182,25 +232,31 @@ class Workers:
             rollout_id=rollout_id,
             rollout_name=rollout_name,
             status=status,
+            exit_code=exit_code,
             error_type=error_type,
             error_message=error_message,
             duration_ms=duration_ms,
             created_at=created_at,
             firecracker_log_path=firecracker_log_path,
+            result_path=result_path_value,
             failure_path=failure_path_value,
         )
 
 
 def read_failure_json(failure_path: Path) -> dict[str, Any]:
+    return read_worker_json(failure_path)
+
+
+def read_worker_json(path: Path) -> dict[str, Any]:
     try:
-        data = json.loads(read_text(failure_path, encoding="utf-8"))
+        data = json.loads(read_text(path, encoding="utf-8"))
     except json.JSONDecodeError as exc:
-        raise WorkerMetadataError(f"Corrupt worker failure metadata: {failure_path}") from exc
+        raise WorkerMetadataError(f"Corrupt worker metadata: {path}") from exc
     except OSError as exc:
-        raise WorkerMetadataError(f"Could not read worker failure metadata: {failure_path}") from exc
+        raise WorkerMetadataError(f"Could not read worker metadata: {path}") from exc
 
     if not isinstance(data, dict):
-        raise WorkerMetadataError(f"Worker failure metadata must be a JSON object: {failure_path}")
+        raise WorkerMetadataError(f"Worker metadata must be a JSON object: {path}")
     return data
 
 

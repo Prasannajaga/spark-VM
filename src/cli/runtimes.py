@@ -117,6 +117,30 @@ def chown_path(path: Path, owner: str) -> None:
     os.chown(path, uid, gid)
 
 
+def ensure_runtime_artifact_permissions(*, rootfs: Path, metadata: Path, owner: str | None) -> None:
+    targets = (rootfs, metadata)
+
+    for target in targets:
+        target.chmod(0o644)
+
+    if owner is not None:
+        for target in targets:
+            chown_path(target, owner)
+            target.chmod(0o644)
+        return
+
+    if os.geteuid() != 0:
+        uid = os.getuid()
+        gid = os.getgid()
+        for target in targets:
+            st = target.stat()
+            if st.st_uid != uid or st.st_gid != gid:
+                raise SparkVMSetupError(
+                    "Runtime artifact ownership mismatch. Re-run dockify without sudo or pass --owner.\n"
+                    f"Path: {target}"
+                )
+
+
 def default_owner_for_root() -> str | None:
     sudo_user = os.getenv("SUDO_USER", "").strip()
     if sudo_user and sudo_user != "root":
@@ -230,10 +254,11 @@ def run_dockify_command(
             remove_file(final_metadata, missing_ok=True)
             temp_ext4.replace(final_rootfs)
             write_json_atomic(final_metadata, metadata, encoding="utf-8", pretty=True)
-
-            if effective_owner is not None:
-                chown_path(final_rootfs, effective_owner)
-                chown_path(final_metadata, effective_owner)
+            ensure_runtime_artifact_permissions(
+                rootfs=final_rootfs,
+                metadata=final_metadata,
+                owner=effective_owner,
+            )
 
         except Exception:
             remove_file(temp_ext4, missing_ok=True)
