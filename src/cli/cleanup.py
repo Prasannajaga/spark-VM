@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
+from sparkvm.commands import run_checked
 from sparkvm.config import DEFAULT_MEMORY, DEFAULT_RUNTIME, DEFAULT_TIMEOUT_SEC, DEFAULT_VCPU, SparkVMConfig, build_config
 from sparkvm.errors import CleanupError, SparkVMError
 from sparkvm.fsops import (
@@ -17,18 +17,6 @@ from sparkvm.fsops import (
 )
 
 from sparkvm.constants import ROLLOUT_METADATA_VERSION
-
-
-def run_checked(cmd: list[str]) -> None:
-    try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
-    except FileNotFoundError as exc:
-        raise CleanupError(f"Required command not found: {cmd[0]}") from exc
-    except subprocess.CalledProcessError as exc:
-        stderr = (exc.stderr or "").strip()
-        stdout = (exc.stdout or "").strip()
-        detail = stderr or stdout or "command failed"
-        raise CleanupError(f"Command failed: {' '.join(cmd)}\n{detail}") from exc
 
 
 def rollouts_dir(config: SparkVMConfig) -> Path:
@@ -93,7 +81,7 @@ def mount_points_under(base_dir: Path) -> list[Path]:
 def unmount_under(base_dir: Path) -> None:
     for mount_path in mount_points_under(base_dir):
         try:
-            run_checked(["umount", str(mount_path)])
+            run_checked(["umount", str(mount_path)], error_factory=CleanupError)
         except CleanupError as exc:
             raise CleanupError(
                 f"Could not unmount active mount '{mount_path}' while cleaning '{base_dir}'. "
@@ -123,7 +111,6 @@ def cleanup_workers(config: SparkVMConfig, *, force: bool = False, dry_run: bool
     for vm_dir in list_dirs_with_prefix(workers_dir_path, "vm-"):
         if dry_run:
             continue
-        unmount_under(vm_dir)
         remove_tree(vm_dir, ignore_errors=False)
 
     if dry_run:

@@ -16,6 +16,7 @@ from typing import Mapping
 from uuid import uuid4
 
 from .firecracker.api import FirecrackerAPIClient
+from .commands import run_checked
 from .config import DEFAULT_MEMORY, DEFAULT_TIMEOUT_SEC, DEFAULT_VCPU, SparkVMConfig, build_config
 from .disk import ExecutionDisk, scrub_files_from_ext4_image
 from .errors import (
@@ -525,17 +526,18 @@ class SparkVM:
             return
 
         try:
-            completed = subprocess.run(
+            completed = run_checked(
                 ["e2fsck", "-p", str(rootfs)],
+                error_factory=SparkVMSetupError,
                 check=False,
-                capture_output=True,
-                text=True,
             )
-        except FileNotFoundError as exc:
-            raise SparkVMSetupError(
-                "e2fsck is required to verify runtime ext4 images for read-only VM boot. "
-                "Install e2fsprogs on the host."
-            ) from exc
+        except SparkVMSetupError as exc:
+            if "Required command not found: e2fsck" in str(exc):
+                raise SparkVMSetupError(
+                    "e2fsck is required to verify runtime ext4 images for read-only VM boot. "
+                    "Install e2fsprogs on the host."
+                ) from exc
+            raise
 
         if completed.returncode in {0, 1}:
             return

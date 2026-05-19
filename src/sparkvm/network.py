@@ -6,9 +6,9 @@ from dataclasses import dataclass
 import hashlib
 import os
 import re
-import subprocess
 from pathlib import Path
 
+from .commands import run_checked
 from .errors import CleanupError, NetworkSetupError
 
 from .constants import NET_SETUP_PRIVILEGE_MESSAGE
@@ -166,18 +166,14 @@ class NetworkManager:
         completed = self.run_raw(["ip", "route", "get", "1.1.1.1"])
         return detect_default_iface(completed.stdout)
 
-    def run_raw(self, cmd: list[str]) -> subprocess.CompletedProcess[str]:
+    def run_raw(self, cmd: list[str]):
         try:
-            return subprocess.run(cmd, check=True, capture_output=True, text=True)
-        except FileNotFoundError as exc:
-            raise NetworkSetupError(f"Required command not found: {cmd[0]}") from exc
-        except subprocess.CalledProcessError as exc:
-            stderr = (exc.stderr or "").strip()
-            stdout = (exc.stdout or "").strip()
-            detail = stderr or stdout or "command failed"
+            return run_checked(cmd, error_factory=NetworkSetupError)
+        except NetworkSetupError as exc:
+            detail = str(exc)
             if looks_like_privilege_error(detail):
                 raise NetworkSetupError(NET_SETUP_PRIVILEGE_MESSAGE) from exc
-            raise NetworkSetupError(f"Command failed: {' '.join(cmd)}\\n{detail}") from exc
+            raise
 
     def run_checked(self, cmd: list[str]) -> None:
         self.run_raw(cmd)

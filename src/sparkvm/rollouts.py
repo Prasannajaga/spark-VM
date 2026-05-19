@@ -6,14 +6,14 @@ import json
 import os
 import re
 import secrets
-import shutil
-import subprocess
+import shutil 
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .config import DEFAULT_RUNTIME, resolve_home_dir
+from .commands import run_checked
 from .errors import (
     InvalidRepoError,
     InvalidRolloutModeError,
@@ -242,16 +242,8 @@ def is_git_url(source: str) -> bool:
 
 
 def run_git_checked(cmd: list[str], *, cwd: Path | None = None, error_cls: type[RolloutError] = RolloutError) -> str:
-    try:
-        completed = subprocess.run(cmd, cwd=str(cwd) if cwd is not None else None, check=True, capture_output=True, text=True)
-        return completed.stdout.strip()
-    except FileNotFoundError as exc:
-        raise error_cls(f"Required command not found: {cmd[0]}") from exc
-    except subprocess.CalledProcessError as exc:
-        stderr = (exc.stderr or "").strip()
-        stdout = (exc.stdout or "").strip()
-        detail = stderr or stdout or "command failed"
-        raise error_cls(f"Command failed: {' '.join(cmd)}\n{detail}") from exc
+    completed = run_checked(cmd, error_factory=error_cls, cwd=cwd)
+    return completed.stdout.strip()
 
 
 class Rollouts:

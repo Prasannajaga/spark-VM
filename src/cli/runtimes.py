@@ -7,12 +7,12 @@ import os
 import pwd
 import shutil
 import subprocess
-import sys
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
 from cli.setup import ensure_directories, get_sparkvm_paths
+from sparkvm.commands import popen_checked, run_checked as _run_checked
 from sparkvm.errors import SparkVMSetupError
 from sparkvm.fsops import ensure_dir, read_json, remove_file, write_json_atomic, write_text
 from sparkvm.image import normalize_runtime_name
@@ -26,37 +26,24 @@ def utc_now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def run_checked(cmd: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
-    try:
-        return subprocess.run(
-            cmd,
-            cwd=str(cwd) if cwd is not None else None,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except FileNotFoundError as exc:
-        raise SparkVMSetupError(f"Required command not found: {cmd[0]}") from exc
-    except subprocess.CalledProcessError as exc:
-        stderr = (exc.stderr or "").strip()
-        stdout = (exc.stdout or "").strip()
-        detail = stderr or stdout or "command failed"
-        raise SparkVMSetupError(f"Command failed: {' '.join(cmd)}\n{detail}") from exc
+def run_checked(cmd: list[str], *, cwd: Path | None = None):
+    return _run_checked(cmd, error_factory=SparkVMSetupError, cwd=cwd)
 
 
 def run_docker_export(container_id: str, rootfs_dir: Path) -> None:
-    try:
-        export_proc = subprocess.Popen(["docker", "export", container_id], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    except FileNotFoundError as exc:
-        raise SparkVMSetupError("Required command not found: docker") from exc
+    export_proc = popen_checked(
+        ["docker", "export", container_id],
+        error_factory=SparkVMSetupError,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
 
     try:
-        untar = subprocess.run(
+        untar = _run_checked(
             ["tar", "-xf", "-", "-C", str(rootfs_dir)],
+            error_factory=SparkVMSetupError,
             stdin=export_proc.stdout,
             check=False,
-            capture_output=True,
-            text=True,
         )
     finally:
         if export_proc.stdout is not None:
@@ -130,17 +117,6 @@ def chown_path(path: Path, owner: str) -> None:
     os.chown(path, uid, gid)
 
 
-def dockify_requires_root_message(image: str, home_dir: Path, owner: str | None) -> str:
-    sparkvm_exe = shutil.which("sparkvm") or str(Path(sys.argv[0]).resolve())
-    if owner is None:
-        owner = pwd.getpwuid(os.getuid()).pw_name
-    return (
-        "Dockify requires root privileges for mounting ext4 images.\n"
-        "Run:\n"
-        f"  sudo {sparkvm_exe} dockify {image} --home-dir {home_dir} --owner {owner}"
-    )
-
-
 def default_owner_for_root() -> str | None:
     sudo_user = os.getenv("SUDO_USER", "").strip()
     if sudo_user and sudo_user != "root":
@@ -149,40 +125,22 @@ def default_owner_for_root() -> str | None:
 
 
 def build_ext4_from_rootfs(*, temp_ext4: Path, rootfs_dir: Path, size_mb: int) -> None:
-    run_checked(["dd", "if=/dev/zero", f"of={temp_ext4}", "bs=1M", f"count={size_mb}", "status=none"])
+    run_checked(
+        ["dd", "if=/dev/zero", f"of={temp_ext4}", "bs=1M", f"count={size_mb}", "status=none"],
+    )
     try:
         run_checked(["mkfs.ext4", "-d", str(rootfs_dir), "-F", str(temp_ext4)])
-        return
     except SparkVMSetupError as exc:
         detail = str(exc).lower()
-        mkfs_d_unsupported = ("invalid option" in detail and "-d" in detail) or ("unrecognized option" in detail and "-d" in detail)
-        if not mkfs_d_unsupported:
-            raise
-
-    if os.geteuid() != 0:
-        raise SparkVMSetupError(
-            "mkfs.ext4 on this host does not support '-d', which is required for non-root dockify.\n"
-            "Options:\n"
-            "  1) Install e2fsprogs/mkfs.ext4 with '-d' support\n"
-            "  2) Run dockify with sudo to allow mount-based fallback"
+        mkfs_d_unsupported = ("invalid option" in detail and "-d" in detail) or (
+            "unrecognized option" in detail and "-d" in detail
         )
-
-    with tempfile.TemporaryDirectory(prefix="sparkvm-dockify-mnt-") as tmp_mount_dir_str:
-        mount_dir = Path(tmp_mount_dir_str)
-        run_checked(["mkfs.ext4", "-F", str(temp_ext4)])
-        run_checked(["mount", "-o", "loop", str(temp_ext4), str(mount_dir)])
-        mounted = True
-        try:
-            run_checked(["cp", "-a", f"{rootfs_dir}/.", str(mount_dir)])
-            run_checked(["sync"])
-            run_checked(["umount", str(mount_dir)])
-            mounted = False
-        finally:
-            if mounted:
-                try:
-                    run_checked(["umount", str(mount_dir)])
-                except Exception:
-                    pass
+        if mkfs_d_unsupported:
+            raise SparkVMSetupError(
+                "mkfs.ext4 on this host does not support '-d'. "
+                "Install e2fsprogs/mkfs.ext4 with '-d' support and retry."
+            ) from exc
+        raise
 
 
 def run_dockify_command(

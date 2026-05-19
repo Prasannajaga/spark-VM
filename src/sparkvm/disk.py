@@ -3,26 +3,14 @@
 from __future__ import annotations
 
 import shutil
-import subprocess
 import tempfile
 from pathlib import Path, PurePosixPath
 
+from .commands import run_checked
 from .errors import CleanupError, ExecutionDiskError
 from .fsops import ensure_dir, read_text, remove_file, remove_tree, write_bytes, write_text
 from .result import PhaseResult, VMResult
 from .rollouts import Rollout
-
-
-def run_checked(cmd: list[str]) -> None:
-    try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
-    except FileNotFoundError as exc:
-        raise ExecutionDiskError(f"Required command not found: {cmd[0]}") from exc
-    except subprocess.CalledProcessError as exc:
-        stderr = (exc.stderr or "").strip()
-        stdout = (exc.stdout or "").strip()
-        detail = stderr or stdout or "command failed"
-        raise ExecutionDiskError(f"Command failed: {' '.join(cmd)}\n{detail}") from exc
 
 
 def validate_relative_path(path: str) -> PurePosixPath:
@@ -61,14 +49,15 @@ def create_ext4_image(path: Path, size_mib: int, *, source_dir: Path | None = No
             "bs=1M",
             f"count={size_mib}",
             "status=none",
-        ]
+        ],
+        error_factory=ExecutionDiskError,
     )
     mkfs_cmd = ["mkfs.ext4", "-F"]
     if source_dir is not None:
         mkfs_cmd.extend(["-d", str(source_dir)])
     mkfs_cmd.append(str(image_path))
     try:
-        run_checked(mkfs_cmd)
+        run_checked(mkfs_cmd, error_factory=ExecutionDiskError)
     except ExecutionDiskError as exc:
         detail = str(exc).lower()
         if source_dir is not None and "invalid option" in detail and "-d" in detail:
@@ -83,7 +72,7 @@ def create_ext4_image(path: Path, size_mib: int, *, source_dir: Path | None = No
 def mount_ext4(path: Path, mount_dir: Path) -> None:
     mount_path = Path(mount_dir)
     ensure_dir(mount_path, exist_ok=True)
-    run_checked(["mount", "-o", "loop", str(path), str(mount_path)])
+    run_checked(["mount", "-o", "loop", str(path), str(mount_path)], error_factory=ExecutionDiskError)
 
 
 def copy_files_into_mount(files: dict[str, str | bytes], mount_dir: Path) -> None:
@@ -101,12 +90,12 @@ def copy_files_into_mount(files: dict[str, str | bytes], mount_dir: Path) -> Non
 
 
 def unmount_ext4(mount_dir: Path) -> None:
-    run_checked(["umount", str(mount_dir)])
+    run_checked(["umount", str(mount_dir)], error_factory=ExecutionDiskError)
 
 
 def debugfs_dump_file(image_path: Path, fs_path: str, output_path: Path) -> bool:
     try:
-        run_checked(["debugfs", "-R", f"dump -p {fs_path} {output_path}", str(image_path)])
+        run_checked(["debugfs", "-R", f"dump -p {fs_path} {output_path}", str(image_path)], error_factory=ExecutionDiskError)
         # Some debugfs versions can exit successfully even when no output file is produced.
         # Treat that as a missing file so callers can apply fallback behavior.
         return output_path.exists()

@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO
 
+from sparkvm.commands import popen_checked
 from sparkvm.errors import FirecrackerProcessError
 from sparkvm.fsops import ensure_dir, open_text_append, read_text, remove_file
 
@@ -42,14 +43,16 @@ class FirecrackerProcess:
         self._log_handle = open_text_append(log_path, encoding="utf-8")
 
         try:
-            self._proc = subprocess.Popen(
+            self._proc = popen_checked(
                 [str(self.firecracker_bin), "--api-sock", str(self.socket_path)],
+                error_factory=FirecrackerProcessError,
                 stdin=subprocess.DEVNULL,
                 stdout=self._log_handle,
                 stderr=self._log_handle,
                 text=True,
+                allow_unlisted=True,
             )
-        except OSError as exc:
+        except FirecrackerProcessError as exc:
             self._close_log_handle()
             raise FirecrackerProcessError(
                 f"Could not start Firecracker process with binary {self.firecracker_bin}"

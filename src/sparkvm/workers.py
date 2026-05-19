@@ -4,28 +4,16 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .commands import run_checked
 from .config import resolve_home_dir
 from .errors import CleanupError, WorkerMetadataError, WorkerNotFoundError
 from .fsops import list_dirs_with_prefix, read_text, remove_tree
 
 from .constants import WORKER_ID_RE
-
-
-def run_checked(cmd: list[str]) -> None:
-    try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
-    except FileNotFoundError as exc:
-        raise CleanupError(f"Required command not found: {cmd[0]}") from exc
-    except subprocess.CalledProcessError as exc:
-        stderr = (exc.stderr or "").strip()
-        stdout = (exc.stdout or "").strip()
-        detail = stderr or stdout or "command failed"
-        raise CleanupError(f"Command failed: {' '.join(cmd)}\n{detail}") from exc
 
 
 def validate_worker_id(vm_id: str) -> str:
@@ -78,7 +66,7 @@ def mount_points_under(base_dir: Path) -> list[Path]:
 def unmount_under(base_dir: Path) -> None:
     for mount_path in mount_points_under(base_dir):
         try:
-            run_checked(["umount", str(mount_path)])
+            run_checked(["umount", str(mount_path)], error_factory=CleanupError)
         except CleanupError as exc:
             raise CleanupError(
                 f"Could not unmount active mount '{mount_path}' while deleting worker '{base_dir.name}'."

@@ -6,13 +6,13 @@ import os
 import platform
 import pwd
 import shutil
-import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
 from sparkvm.config import SparkVMConfig, resolve_home_dir
+from sparkvm.commands import run_checked
 from sparkvm.errors import FirecrackerBinaryNotInstalled, KVMUnavailableError, SparkVMSetupError
 from sparkvm.fsops import ensure_dir, read_json, write_json_atomic
 from sparkvm.runtime_store import RuntimeRecord, list_runtime_records
@@ -38,6 +38,7 @@ class SparkVMPaths:
     cache_dir: Path
     rollouts_dir: Path
     firecracker_bin: Path
+    kvm_link: Path
     kernel_image: Path
 
 
@@ -81,6 +82,7 @@ def get_sparkvm_paths(home_dir: str | Path | None = None) -> SparkVMPaths:
         cache_dir=cache_dir,
         rollouts_dir=rollouts_dir,
         firecracker_bin=bin_dir / "firecracker",
+        kvm_link=bin_dir / "kvm",
         kernel_image=image_dir / KERNEL_FILENAME,
     )
 
@@ -94,6 +96,7 @@ def paths_from_config(config: SparkVMConfig) -> SparkVMPaths:
         cache_dir=config.cache_dir,
         rollouts_dir=config.home_dir / "rollouts",
         firecracker_bin=config.bin_dir / "firecracker",
+        kvm_link=config.bin_dir / "kvm",
         kernel_image=config.image_dir / KERNEL_FILENAME,
     )
 
@@ -125,14 +128,28 @@ def normalize_arch(machine: str | None = None) -> str:
     return normalized
 
 
-def check_kvm_access() -> None:
-    kvm = Path("/dev/kvm")
+def check_kvm_access(kvm_path: Path | None = None) -> None:
+    kvm = kvm_path if kvm_path is not None else Path("/dev/kvm")
     if not kvm.exists():
-        raise KVMUnavailableError("/dev/kvm was not found. KVM is required for SparkVM.")
+        raise KVMUnavailableError(f"{kvm} was not found. KVM is required for SparkVM.")
     if not os.access(kvm, os.R_OK | os.W_OK):
         raise KVMUnavailableError(
-            "Current user cannot access /dev/kvm. Add the user to the kvm group or run with proper permissions."
+            f"Current user cannot access {kvm}. Add the user to the kvm group or run with proper permissions."
         )
+
+
+def ensure_kvm_link(paths: SparkVMPaths) -> Path:
+    ensure_directories(paths)
+    host_kvm = Path("/dev/kvm")
+    kvm_link = paths.kvm_link
+
+    if kvm_link.exists() or kvm_link.is_symlink():
+        if kvm_link.is_symlink() and kvm_link.resolve() == host_kvm:
+            return kvm_link
+        kvm_link.unlink()
+
+    os.symlink(host_kvm, kvm_link)
+    return kvm_link
 
 
 def host_tool_status() -> dict[str, bool]:
@@ -180,26 +197,8 @@ def require_setup_tools() -> None:
         raise SparkVMSetupError(f"Missing required host tools: {', '.join(missing)}")
 
 
-def run_checked(cmd: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
-    try:
-        return subprocess.run(
-            cmd,
-            cwd=str(cwd) if cwd is not None else None,
-            check=True,
-            text=True,
-            capture_output=True,
-        )
-    except FileNotFoundError as exc:
-        raise SparkVMSetupError(f"Required command not found: {cmd[0]}") from exc
-    except subprocess.CalledProcessError as exc:
-        stderr = (exc.stderr or "").strip()
-        stdout = (exc.stdout or "").strip()
-        detail = stderr or stdout or "command failed"
-        raise SparkVMSetupError(f"Command failed: {' '.join(cmd)}\n{detail}") from exc
-
-
 def download_with_curl(url: str, out_path: Path) -> None:
-    run_checked(["curl", "-fL", url, "-o", str(out_path)])
+    run_checked(["curl", "-fL", url, "-o", str(out_path)], error_factory=SparkVMSetupError)
 
 
 def firecracker_release_url(arch: str) -> str:
@@ -239,7 +238,7 @@ def ensure_firecracker_binary(
             tmp_dir = Path(tmp_dir_str)
             archive_path = tmp_dir / "firecracker.tgz"
             download_with_curl(archive_url, archive_path)
-            run_checked(["tar", "-xzf", str(archive_path), "-C", str(tmp_dir)])
+            run_checked(["tar", "-xzf", str(archive_path), "-C", str(tmp_dir)], error_factory=SparkVMSetupError)
             extracted = extract_firecracker_binary(tmp_dir)
             shutil.copy2(extracted, existing)
             existing.chmod(0o755)
@@ -333,6 +332,9 @@ def run_setup(
     firecracker_bin = ensure_firecracker_binary(paths, force=force, progress=progress)
     emit_progress(progress, f"Firecracker ready: {firecracker_bin}")
 
+    ensure_kvm_link(paths)
+    emit_progress(progress, f"KVM link ready: {paths.kvm_link}")
+
     ensure_kernel_image(paths, force=force, progress=progress)
     emit_progress(progress, f"Kernel ready: {paths.kernel_image}")
 
@@ -351,11 +353,10 @@ def read_firecracker_version(firecracker_bin: Path) -> str | None:
     if not firecracker_bin.exists() or not os.access(firecracker_bin, os.X_OK):
         return None
     try:
-        result = subprocess.run(
+        result = run_checked(
             [str(firecracker_bin), "--version"],
-            check=True,
-            capture_output=True,
-            text=True,
+            error_factory=SparkVMSetupError,
+            allow_unlisted=True,
         )
     except Exception:
         return None
@@ -369,7 +370,8 @@ def doctor_status(paths: SparkVMPaths) -> DoctorStatus:
     firecracker_found = paths.firecracker_bin.exists() and os.access(paths.firecracker_bin, os.X_OK)
 
     try:
-        check_kvm_access()
+        kvm_probe = paths.kvm_link if paths.kvm_link.exists() else Path("/dev/kvm")
+        check_kvm_access(kvm_probe)
         kvm_ok = True
     except KVMUnavailableError:
         kvm_ok = False
@@ -420,7 +422,7 @@ def format_doctor_report(status: DoctorStatus) -> str:
     lines.append(f"SparkVM home exists: {flag(status.home_exists)}")
     lines.append(f"Host OS Linux: {flag(status.host_os_ok)}")
     lines.append(f"Architecture ({status.arch_value}): {flag(status.arch_ok)}")
-    lines.append(f"KVM accessible: {flag(status.kvm_accessible)}")
+    lines.append(f"KVM accessible: {flag(status.kvm_accessible)} ({status.paths.kvm_link} -> /dev/kvm)")
     lines.append(f"Firecracker binary: {flag(status.firecracker_found)} ({status.paths.firecracker_bin})")
     lines.append(f"Firecracker version: {status.firecracker_version or 'unavailable'}")
     lines.append(f"Kernel image: {flag(status.kernel_found)} ({status.paths.kernel_image})")
@@ -463,6 +465,7 @@ def run_setup_command(home_dir: str | None, runtime: str | None, force: bool, *,
     run_setup(paths, force=force, owner=owner, progress=progress)
     print("SparkVM setup complete.")
     print(f"Firecracker: {paths.firecracker_bin}")
+    print(f"KVM link: {paths.kvm_link}")
     print(f"Kernel: {paths.kernel_image}")
     return 0
 
@@ -485,7 +488,8 @@ class ManagedSetup:
         )
 
     def assert_kvm_available(self) -> None:
-        check_kvm_access()
+        probe = self.paths.kvm_link if self.paths.kvm_link.exists() else Path("/dev/kvm")
+        check_kvm_access(probe)
 
 
 __all__ = [
