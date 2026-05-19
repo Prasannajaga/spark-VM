@@ -7,24 +7,7 @@ It provides a complete single-agent rollout lifecycle: isolated playgrounds, net
 it is inspired by composer-2 technical report this is where it all started: 
 [composer-2 article on X](https://x.com/jaga_prasanna/status/2054872261166080226?s=20)
 
-## root folder design 
 
-```text
-~/.sparkvm/
-├── bin/
-│   └── firecracker
-├── images/
-│   ├── vmlinux
-│   ├── python-3.12-slim.ext4
-│   ├── python-3.12-slim.json
-│   ├── ubuntu-24.04.ext4
-│   └── ubuntu-24.04.json
-├── rollouts/
-│   ├── metadata.json
-│   └── rollout-*/
-├── workers/
-└── cache/
-```
 
 ## Cli usage 
 
@@ -52,7 +35,24 @@ sparkvm recycle
 ```
  
 
+## root folder design 
 
+```text
+~/.sparkvm/
+├── bin/
+│   └── firecracker
+├── images/
+│   ├── vmlinux
+│   ├── python-3.12-slim.ext4
+│   ├── python-3.12-slim.json
+│   ├── ubuntu-24.04.ext4
+│   └── ubuntu-24.04.json
+├── rollouts/
+│   ├── metadata.json
+│   └── rollout-*/
+├── workers/
+└── cache/
+```
 
 
 ## Python usage
