@@ -7,7 +7,7 @@ It provides a complete single-agent rollout lifecycle: isolated playgrounds, net
 it is inspired by composer-2 technical report this is where it all started: 
 [composer-2 article on X](https://x.com/jaga_prasanna/status/2054872261166080226?s=20)
 
-## Project architecture 
+## root folder design 
 
 ```text
 ~/.sparkvm/
