@@ -64,7 +64,8 @@ def resolve_runtime_image(runtime: str, config: SparkVMConfig) -> RuntimeImage:
     if not rootfs.exists():
         suggestion = suggest_docker_image(raw_runtime, normalized_runtime)
         raise RuntimeImageNotFound(
-            f"Runtime image '{normalized_runtime}' not found. Run `sparkvm dockify {suggestion}`."
+            f"Runtime image '{normalized_runtime}' not found. "
+            f"Create a repo rollout with dockerfile/image support that produces runtime '{suggestion}'."
         )
 
     return RuntimeImage(

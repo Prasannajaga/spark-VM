@@ -71,7 +71,7 @@ class RuntimeImageResolverTest(unittest.TestCase):
             image = resolve_runtime_image("python:3.12-slim", config)
             self.assertEqual("python-3.12-slim", image.name)
 
-    def test_resolve_runtime_image_missing_runtime_raises_with_dockify_hint(self) -> None:
+    def test_resolve_runtime_image_missing_runtime_raises_with_rollout_hint(self) -> None:
         with tempfile.TemporaryDirectory(prefix="sparkvm-runtime-image-") as tmp:
             home = Path(tmp)
             image_dir = home / "images"
@@ -88,7 +88,7 @@ class RuntimeImageResolverTest(unittest.TestCase):
 
             with self.assertRaises(RuntimeImageNotFound) as ctx:
                 resolve_runtime_image("python:3.12-slim", config)
-            self.assertIn("sparkvm dockify python:3.12-slim", str(ctx.exception))
+            self.assertIn("Create a repo rollout with dockerfile/image support", str(ctx.exception))
 
     def test_resolve_runtime_image_missing_kernel_raises(self) -> None:
         with tempfile.TemporaryDirectory(prefix="sparkvm-runtime-image-") as tmp:
@@ -140,17 +140,14 @@ class SetupCommandTest(unittest.TestCase):
             self.assertEqual([], payload["rollouts"])
             self.assertFalse((home / "images" / "debian-rootfs.ext4").exists())
 
-    def test_setup_command_runtime_argument_is_deprecated_message(self) -> None:
+    def test_setup_command_runs_without_runtime_argument(self) -> None:
         with tempfile.TemporaryDirectory(prefix="sparkvm-setup-cmd-") as tmp_home:
             home = Path(tmp_home)
             buffer = io.StringIO()
             with patch("cli.setup.run_setup"), contextlib.redirect_stdout(buffer):
-                setup_mod.run_setup_command(str(home), runtime="python", force=False, owner=None)
+                setup_mod.run_setup_command(str(home), force=False, owner=None)
             out = buffer.getvalue()
-            self.assertIn(
-                "Language-specific setup is no longer required. Use `sparkvm dockify <docker-image>`.",
-                out,
-            )
+            self.assertIn("Using SparkVM home:", out)
 
 
 if __name__ == "__main__":

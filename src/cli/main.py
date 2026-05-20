@@ -7,12 +7,6 @@ import json
 import sys
 
 from cli.cleanup import run_cleanup_command, run_reset_command
-from cli.runtimes import (
-    run_dockify_command,
-    run_runtimes_delete_command,
-    run_runtimes_inspect_command,
-    run_runtimes_list_command,
-)
 from sparkvm.errors import SparkVMError
 from cli.setup import (
     doctor_status,
@@ -34,12 +28,8 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("doctor", help="Show SparkVM host and asset diagnostics")
-    network_parser = subparsers.add_parser("network", help="Network diagnostics")
-    network_subparsers = network_parser.add_subparsers(dest="network_command", required=True)
-    network_subparsers.add_parser("doctor", help="Show SparkVM network diagnostics")
 
     setup_parser = subparsers.add_parser("setup", help="Install/verify managed SparkVM assets")
-    setup_parser.add_argument("runtime", nargs="?", help="Deprecated setup target")
     setup_parser.add_argument(
         "--force",
         action="store_true",
@@ -50,31 +40,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="User that should own files under SparkVM home after setup (useful with sudo).",
     )
-
-    dockify_parser = subparsers.add_parser("dockify", help="Convert a Docker image into a SparkVM runtime ext4 image")
-    dockify_parser.add_argument("docker_image", help="Docker image reference (e.g. python:3.12-slim)")
-    dockify_parser.add_argument("--name", default=None, help="Optional runtime name override")
-    dockify_parser.add_argument("--size-mb", type=int, default=2048, help="Runtime ext4 size in MiB (default: 2048)")
-    dockify_parser.add_argument("--force", action="store_true", help="Overwrite existing runtime image if present")
-    dockify_parser.add_argument("--pull", dest="pull", action="store_true", help="Pull image before conversion")
-    dockify_parser.add_argument("--no-pull", dest="pull", action="store_false", help="Skip image pull")
-    dockify_parser.set_defaults(pull=True)
-    dockify_parser.add_argument(
-        "--owner",
-        default=None,
-        help="User that should own generated runtime files (useful with sudo).",
-    )
-
-    runtimes_parser = subparsers.add_parser("runtimes", help="List, inspect, and delete runtime images")
-    runtimes_subparsers = runtimes_parser.add_subparsers(dest="runtimes_command", required=True)
-    runtimes_subparsers.add_parser("list", help="List available runtime images")
-
-    runtimes_inspect = runtimes_subparsers.add_parser("inspect", help="Show runtime metadata JSON")
-    runtimes_inspect.add_argument("runtime", help="Runtime name or docker image name")
-
-    runtimes_delete = runtimes_subparsers.add_parser("delete", help="Delete runtime image and metadata")
-    runtimes_delete.add_argument("runtime", help="Runtime name or docker image name")
-    runtimes_delete.add_argument("--force", action="store_true", help="Skip confirmation prompt")
 
     cleanup_parser = subparsers.add_parser("cleanup", help="Cleanup rollouts and/or preserved failed worker folders")
     cleanup_parser.add_argument("target", choices=["rollouts", "workers", "all"], help="Cleanup target")
@@ -225,35 +190,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "doctor":
             return run_doctor(args.home_dir)
 
-        if args.command == "network":
-            if args.network_command == "doctor":
-                return run_doctor(args.home_dir)
-            parser.error(f"Unknown network command: {args.network_command}")
-            return 2
-
         if args.command == "setup":
-            return run_setup_command(args.home_dir, args.runtime, args.force, owner=args.owner)
-
-        if args.command == "dockify":
-            return run_dockify_command(
-                args.home_dir,
-                args.docker_image,
-                name=args.name,
-                size_mb=args.size_mb,
-                force=args.force,
-                pull=args.pull,
-                owner=args.owner,
-            )
-
-        if args.command == "runtimes":
-            if args.runtimes_command == "list":
-                return run_runtimes_list_command(args.home_dir)
-            if args.runtimes_command == "inspect":
-                return run_runtimes_inspect_command(args.home_dir, args.runtime)
-            if args.runtimes_command == "delete":
-                return run_runtimes_delete_command(args.home_dir, args.runtime, force=args.force)
-            parser.error(f"Unknown runtimes command: {args.runtimes_command}")
-            return 2
+            return run_setup_command(args.home_dir, args.force, owner=args.owner)
 
         if args.command == "cleanup":
             return run_cleanup_command(args.home_dir, args.target, args.force)

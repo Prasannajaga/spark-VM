@@ -14,12 +14,6 @@ it is inspired by composer-2 technical report this is where it all started:
 `sparkvm setup` it creates SparkVM directories under `~/.sparkvm`. firecracker bin at `~/.sparkvm/bin/firecracker`.kernel image at `~/.sparkvm/images/vmlinux`.
 
 ```bash
-sparkvm dockify <image-name>
-# Convert a Docker image into a SparkVM runtime ext4 image
-
-sparkvm runtimes 
-# List, inspect, and delete runtime images
-
 sparkvm cleanup all | rollouts | workers 
 # Cleanup rollouts and/or preserved failed worker folders
 

@@ -441,7 +441,7 @@ def format_doctor_report(status: DoctorStatus) -> str:
 
     lines.append("Available runtimes:")
     if not status.available_runtimes:
-        lines.append("  no runtime images found. Run `sparkvm dockify python:3.12-slim`.")
+        lines.append("  no runtime images found. Create a repo rollout with `dockerfile=` or `image=` first.")
     else:
         for runtime in status.available_runtimes:
             source = runtime.source_image or "unknown"
@@ -458,12 +458,9 @@ def format_doctor_report(status: DoctorStatus) -> str:
     return "\n".join(lines)
 
 
-def run_setup_command(home_dir: str | None, runtime: str | None, force: bool, *, owner: str | None = None) -> int:
+def run_setup_command(home_dir: str | None, force: bool, *, owner: str | None = None) -> int:
     paths = get_sparkvm_paths(home_dir)
     print(f"Using SparkVM home: {paths.home_dir}", flush=True)
-
-    if runtime is not None and runtime.strip():
-        print("Language-specific setup is no longer required. Use `sparkvm dockify <docker-image>`.", flush=True)
 
     progress = lambda message: print(f"[setup] {message}", flush=True)
     print("Running base setup checks and managed asset install...", flush=True)
