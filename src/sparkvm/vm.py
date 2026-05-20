@@ -35,6 +35,7 @@ from .errors import (
     FirecrackerProcessError,
     GuestPanicError,
     JobTimeoutError,
+    KernelImageNotFound,
     RuntimeImagePermissionError,
     RolloutNotFoundError,
     SparkVMError,
@@ -48,7 +49,7 @@ from .result import VMResult
 from .rollouts import Rollout, Rollouts
 from cli.setup import ManagedSetup
 
-from .constants import DEFAULT_RUN_TIMEOUT_SEC, DEFAULT_SETUP_TIMEOUT_SEC, ENV_KEY_RE
+from .constants import BOOT_ARGS, DEFAULT_RUN_TIMEOUT_SEC, DEFAULT_SETUP_TIMEOUT_SEC, ENV_KEY_RE
 
 
 def shell_quote(value: str) -> str:
@@ -240,7 +241,8 @@ class SparkVM:
         try:
             firecracker_bin = self._setup.firecracker_binary_path()
             self._setup.assert_kvm_available()
-            runtime_image = self._images.resolve(selected_runtime)
+            runtime_image = self.resolve_runtime_image_for_rollout(rollout_obj, selected_runtime)
+            selected_runtime = runtime_image.name
             self.assert_runtime_image_permissions(runtime_image)
             create_worker_rootfs(base_rootfs=runtime_image.rootfs_image, worker_rootfs=worker_rootfs_path)
 
@@ -410,6 +412,40 @@ class SparkVM:
             return self._rollouts.get_by_id(rollout)
 
         raise TypeError("SparkVM.run expects a rollout id (str) or an object returned by Rollouts.create().")
+
+    def resolve_runtime_image_for_rollout(self, rollout: Rollout, selected_runtime: str) -> RuntimeImage:
+        runtime_image_path: Path | None = None
+        runtime_image_id = rollout.runtime
+        if isinstance(rollout.runtime_image, dict):
+            path_raw = rollout.runtime_image.get("path")
+            if isinstance(path_raw, str) and path_raw.strip():
+                runtime_image_path = Path(path_raw).expanduser()
+            id_raw = rollout.runtime_image.get("id")
+            if isinstance(id_raw, str) and id_raw.strip():
+                runtime_image_id = id_raw.strip()
+        elif isinstance(rollout.rootfs_path, str) and rollout.rootfs_path.strip():
+            runtime_image_path = Path(rollout.rootfs_path).expanduser()
+
+        if runtime_image_path is None:
+            return self._images.resolve(selected_runtime)
+
+        kernel_image = self.config.image_dir / "vmlinux"
+        if not kernel_image.exists():
+            raise KernelImageNotFound("Kernel image not found. Run `sparkvm setup`.")
+
+        metadata_path: Path | None = None
+        if isinstance(rollout.runtime_image, dict):
+            metadata_raw = rollout.runtime_image.get("metadata_path")
+            if isinstance(metadata_raw, str) and metadata_raw.strip():
+                metadata_path = Path(metadata_raw).expanduser()
+
+        return RuntimeImage(
+            name=runtime_image_id,
+            kernel_image=kernel_image,
+            rootfs_image=runtime_image_path,
+            boot_args=BOOT_ARGS,
+            metadata_path=metadata_path,
+        )
 
     def wait_for_firecracker_socket(
         self,

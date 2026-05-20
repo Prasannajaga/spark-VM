@@ -51,7 +51,7 @@ RUN_CMD_OVERRIDE = None
 def main() -> int:
     manager = Rollouts()
     rollout = manager.create(
-        name="version-3",
+        name="version-4",
         mode="repo",
         source=REPO_URL,
         ref=REF,
@@ -77,7 +77,7 @@ def main() -> int:
         timeout=60.0,
         runtime="sparkvm-ubuntu-base-24.04",
         network=True,
-        # Optional: pass runtime-only env vars for setup.sh/run.sh.
+        # Optional: pass runtime-only env vars for run.sh.
         env=runtime_env,
     )
     result = vm.run(rollout.id)

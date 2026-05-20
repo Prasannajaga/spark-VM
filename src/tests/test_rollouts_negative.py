@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sparkvm.errors import InvalidRolloutModeError, RolloutError, RolloutMetadataError, RolloutNotFoundError
+from sparkvm.errors import InvalidRolloutModeError, RolloutConfigError, RolloutError, RolloutMetadataError, RolloutNotFoundError
 from sparkvm.rollouts import Rollouts
 
 
@@ -33,6 +33,7 @@ class RolloutNegativeTest(unittest.TestCase):
         with self.assertRaises(RolloutError):
             self.rollout.create(
                 name="bad-empty-files",
+                mode="script",
                 files={},
                 run_cmd="python3 /job/main.py",
             )
@@ -41,6 +42,7 @@ class RolloutNegativeTest(unittest.TestCase):
         with self.assertRaises(RolloutError):
             self.rollout.create(
                 name="bad-image",
+                mode="script",
                 runtime="   ",
                 files={"main.py": "print('x')"},
                 run_cmd="python3 /job/main.py",
@@ -59,6 +61,7 @@ class RolloutNegativeTest(unittest.TestCase):
         with self.assertRaises(RolloutError):
             self.rollout.create(
                 name="",
+                mode="script",
                 files={"main.py": "print('x')"},
                 run_cmd="python3 /job/main.py",
             )
@@ -66,12 +69,13 @@ class RolloutNegativeTest(unittest.TestCase):
         with self.assertRaises(RolloutError):
             self.rollout.create(
                 name="bad-command",
+                mode="script",
                 files={"main.py": "print('x')"},
                 run_cmd="  ",
             )
 
-    def test_create_rejects_both_image_and_dockerfile(self) -> None:
-        with self.assertRaises(RolloutError):
+    def test_create_rejects_image_parameter(self) -> None:
+        with self.assertRaises(RolloutConfigError) as ctx:
             self.rollout.create(
                 name="bad-container-config",
                 mode="repo",
@@ -80,6 +84,7 @@ class RolloutNegativeTest(unittest.TestCase):
                 dockerfile="Dockerfile",
                 run_cmd="python3 main.py",
             )
+        self.assertIn("image= is not supported", str(ctx.exception))
 
     def test_create_rejects_invalid_rollout_paths(self) -> None:
         invalid_paths = [
@@ -97,6 +102,7 @@ class RolloutNegativeTest(unittest.TestCase):
                 with self.assertRaises(RolloutError):
                     self.rollout.create(
                         name="bad-path",
+                        mode="script",
                         files={path: "print('x')"},
                         run_cmd="python3 /job/main.py",
                     )
@@ -105,6 +111,7 @@ class RolloutNegativeTest(unittest.TestCase):
         with self.assertRaises(RolloutError):
             self.rollout.create(
                 name="bad-content",
+                mode="script",
                 files={"main.py": 123},  # type: ignore[arg-type]
                 run_cmd="python3 /job/main.py",
             )

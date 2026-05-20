@@ -260,6 +260,57 @@ class ExecutionDiskAndVMRunTest(unittest.TestCase):
             self.assertFalse((rollout_dir / name).exists(), f"rollout unexpectedly mutated: {name}")
         self.assertEqual(original_rollout_json, rollout_json_path.read_text(encoding="utf-8"))
 
+    def test_vm_run_uses_prepared_rollout_runtime_image_without_image_resolver(self) -> None:
+        rollout_dir = self.home / "rollout-prepared"
+        rollout_dir.mkdir(parents=True, exist_ok=True)
+        (rollout_dir / "run.sh").write_text("#!/bin/sh\necho prepared\n", encoding="utf-8")
+        (rollout_dir / "rollout.json").write_text("{}", encoding="utf-8")
+        images_dir = self.home / "images"
+        images_dir.mkdir(parents=True, exist_ok=True)
+        (images_dir / "vmlinux").write_bytes(b"kernel")
+        prepared_image = images_dir / "image-rollout-prepared.ext4"
+        prepared_image.write_bytes(b"rootfs")
+        rollout = Rollout(
+            id="rollout-prepared",
+            name="prepared",
+            mode="repo",
+            base_image="python-3.12-slim",
+            path=rollout_dir,
+            command=None,
+            setup_cmd=None,
+            run_cmd="echo prepared",
+            disk_mb=4096,
+            files=["run.sh", "rollout.json"],
+            created_at="2026-01-01T00:00:00Z",
+            rootfs_path=str(prepared_image),
+            runtime_image={"id": "image-rollout-prepared", "path": str(prepared_image), "metadata_path": str(images_dir / "image-rollout-prepared.json")},
+        )
+
+        vm = SparkVM(home_dir=self.home)
+        vm._setup.ensure_layout()
+        vm._setup.firecracker_binary_path = MethodType(lambda _self: Path("/fake/firecracker"), vm._setup)
+        vm._setup.assert_kvm_available = MethodType(lambda _self: None, vm._setup)
+        vm._images.resolve = MethodType(lambda _self, _runtime=None: (_ for _ in ()).throw(AssertionError("image resolver should not be used")), vm._images)
+        vm.wait_for_firecracker_socket = MethodType(lambda self, api, process, timeout_sec: None, vm)
+        vm.configure_microvm = MethodType(lambda self, api, runtime_image, worker_rootfs_path, execution_disk_path: None, vm)
+
+        copied_from: list[Path] = []
+
+        def fake_create_worker_rootfs(*, base_rootfs: Path, worker_rootfs: Path) -> Path:
+            copied_from.append(base_rootfs)
+            worker_rootfs.parent.mkdir(parents=True, exist_ok=True)
+            worker_rootfs.write_bytes(base_rootfs.read_bytes())
+            return worker_rootfs
+
+        with patch("sparkvm.vm.create_worker_rootfs", side_effect=fake_create_worker_rootfs), patch(
+            "sparkvm.vm.FirecrackerAPIClient", _FakeAPI
+        ), patch("sparkvm.vm.FirecrackerProcess", _FakeFirecrackerProcess), patch("sparkvm.vm.ExecutionDisk", _FakeExecutionDisk):
+            result = vm.run(rollout)
+
+        self.assertEqual([prepared_image], copied_from)
+        self.assertEqual(0, result.exit_code)
+        self.assertEqual("image-rollout-prepared", result.runtime)
+
 
 if __name__ == "__main__":
     unittest.main()

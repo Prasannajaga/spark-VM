@@ -88,7 +88,7 @@ class RuntimeImageResolverTest(unittest.TestCase):
 
             with self.assertRaises(RuntimeImageNotFound) as ctx:
                 resolve_runtime_image("python:3.12-slim", config)
-            self.assertIn("Create a repo rollout with dockerfile/image support", str(ctx.exception))
+            self.assertIn("Create a repo rollout with dockerfile support", str(ctx.exception))
 
     def test_resolve_runtime_image_missing_kernel_raises(self) -> None:
         with tempfile.TemporaryDirectory(prefix="sparkvm-runtime-image-") as tmp:

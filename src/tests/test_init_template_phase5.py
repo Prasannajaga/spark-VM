@@ -52,6 +52,7 @@ class InitTemplatePhase5Test(unittest.TestCase):
         self.assertIn('sh "$script"', SPARKVM_INIT_TEMPLATE)
         self.assertIn('run_phase "setup" "/job/setup.sh"', SPARKVM_INIT_TEMPLATE)
         self.assertIn('run_phase "run" "/job/run.sh"', SPARKVM_INIT_TEMPLATE)
+        self.assertIn('SPARKVM_RUN_SETUP_IN_GUEST:-0', SPARKVM_INIT_TEMPLATE)
         self.assertIn('run_phase "setup" "/job/setup.sh" "${SPARKVM_SETUP_TIMEOUT_SEC:-300}"', SPARKVM_INIT_TEMPLATE)
         self.assertIn('run_phase "run" "/job/run.sh" "${SPARKVM_RUN_TIMEOUT_SEC:-300}"', SPARKVM_INIT_TEMPLATE)
         self.assertIn('timeout "$timeout_sec" sh "$script"', SPARKVM_INIT_TEMPLATE)

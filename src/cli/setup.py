@@ -441,7 +441,7 @@ def format_doctor_report(status: DoctorStatus) -> str:
 
     lines.append("Available runtimes:")
     if not status.available_runtimes:
-        lines.append("  no runtime images found. Create a repo rollout with `dockerfile=` or `image=` first.")
+        lines.append("  no runtime images found. Create a repo rollout with `dockerfile=` first.")
     else:
         for runtime in status.available_runtimes:
             source = runtime.source_image or "unknown"

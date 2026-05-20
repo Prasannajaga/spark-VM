@@ -258,6 +258,8 @@ rollout = rollouts.create(
 )
 ```
 
+For this phase, repo rollouts are Dockerfile-only. The Dockerfile is the build/setup contract: it must install dependencies, copy the app into the image, and define `CMD`/`ENTRYPOINT` unless you pass `run_cmd`.
+
 Recommended Dockerfile pattern:
 
 ```dockerfile
@@ -282,9 +284,11 @@ rollout = rollouts.create(
 ```
 
 Notes:
-- Prefer putting dependency installation in the Dockerfile.
+- Dependency installation belongs in the Dockerfile.
 - `run_cmd` is an execution override.
-- `setup_cmd` in Dockerfile mode is an advanced post-build patch step.
+- `image=` is not supported yet. Provide `dockerfile="Dockerfile"` instead.
+- `setup_cmd` is not supported in Dockerfile-only mode.
+- `SparkVM.run()` is execution-only: it boots the prepared ext4 image, attaches the job disk, and runs `/job/run.sh`; it does not call Docker or install dependencies.
 
 
 
@@ -325,9 +329,9 @@ This is kernel level code which runs the firecracker VM process
 
 ```text
 Host:
-  creates workers/<vm-id>/rootfs.ext4 as a writable copy of images/<runtime>.ext4
+  creates workers/<vm-id>/rootfs.ext4 as a writable copy of images/image-<rollout-id>.ext4 for Dockerfile repo rollouts
   creates rollout.ext4
-  copies rollout files
+  copies rollout run.sh
   writes .sparkvm/env.sh if env provided
   writes .sparkvm/redact.sed if env provided and redaction rules are available
   writes .sparkvm/network.env if network enabled
@@ -341,7 +345,7 @@ Guest /init:
   mounts /dev/vdb -> /job
   configures network
   sources env
-  runs setup.sh
+  runs setup.sh only when SPARKVM_RUN_SETUP_IN_GUEST=1
   runs run.sh
   writes results
   powers off

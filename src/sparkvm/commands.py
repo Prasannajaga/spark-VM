@@ -20,6 +20,8 @@ ALLOWED_COMMANDS = frozenset(
         "iptables",
         "mkfs.ext4",
         "mount",
+        "rsync",
+        "sync",
         "sysctl",
         "tar",
         "umount",

@@ -3404,3 +3404,8 @@ Acceptance criteria:
 2. setup.stdout.log shows step-by-step progress.
 3. network diagnostics are visible in firecracker.log and results.
 4. failed setup workers are preserved with useful logs.
+
+
+=============================================================================================
+
+

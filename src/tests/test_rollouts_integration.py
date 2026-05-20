@@ -87,6 +87,13 @@ class RolloutIntegrationTest(unittest.TestCase):
             subprocess.run(["git", "config", "user.email", "sparkvm@example.com"], cwd=repo_dir, check=True, capture_output=True, text=True)
             subprocess.run(["git", "config", "user.name", "SparkVM Test"], cwd=repo_dir, check=True, capture_output=True, text=True)
             (repo_dir / "main.py").write_text("print('repo-integration-ok')\n", encoding="utf-8")
+            (repo_dir / "Dockerfile").write_text(
+                "FROM alpine:latest\n"
+                "WORKDIR /workspace\n"
+                "COPY . .\n"
+                'CMD ["sh", "-c", "echo hello-from-dockerfile"]\n',
+                encoding="utf-8",
+            )
             subprocess.run(["git", "add", "."], cwd=repo_dir, check=True, capture_output=True, text=True)
             subprocess.run(["git", "commit", "-m", "init"], cwd=repo_dir, check=True, capture_output=True, text=True)
 
@@ -94,8 +101,7 @@ class RolloutIntegrationTest(unittest.TestCase):
                 name="integration-repo",
                 mode="repo",
                 source=repo_dir,
-                setup_cmd="",
-                run_cmd="python3 main.py",
+                dockerfile="Dockerfile",
             )
 
             try:
@@ -103,7 +109,7 @@ class RolloutIntegrationTest(unittest.TestCase):
                 self.assertEqual(result.exit_code, 0)
                 self.assertEqual(result.status, "passed")
                 self.assertEqual(result.rollout_mode, "repo")
-                self.assertIn("repo-integration-ok", result.stdout)
+                self.assertIn("hello-from-dockerfile", result.stdout)
             finally:
                 if rollout_manager.exists(rollout.id):
                     rollout_manager.delete_by_id(rollout.id)

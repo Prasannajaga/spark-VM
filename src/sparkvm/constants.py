@@ -242,18 +242,26 @@ collect_network_diagnostics() {
   : > "$err_file"
 
   echo "SparkVM: network diagnostics begin" > /dev/console
-  ip addr > /dev/console 2>&1 || true
-  ip route > /dev/console 2>&1 || true
+  if command -v ip >/dev/null 2>&1; then
+    ip addr > /dev/console 2>&1 || true
+    ip route > /dev/console 2>&1 || true
+  else
+    echo "SparkVM: ip command missing; network diagnostics limited" > /dev/console
+  fi
   cat /etc/resolv.conf > /dev/console 2>&1 || true
   echo "SparkVM: network diagnostics end" > /dev/console
 
   {
-    echo "[network] ip addr"
-    ip addr
-    echo ""
-    echo "[network] ip route"
-    ip route
-    echo ""
+    if command -v ip >/dev/null 2>&1; then
+      echo "[network] ip addr"
+      ip addr
+      echo ""
+      echo "[network] ip route"
+      ip route
+      echo ""
+    else
+      echo "[network] ip command missing"
+    fi
     echo "[network] /etc/resolv.conf"
     cat /etc/resolv.conf
   } > "$out_file" 2> "$err_file" || true
@@ -261,13 +269,13 @@ collect_network_diagnostics() {
 
 prepare_linux_runtime
 mount_job_disk
-configure_network
 load_runtime_env
+configure_network
 collect_network_diagnostics
 
 cd /job
 
-if [ -f /job/setup.sh ]; then
+if [ "${SPARKVM_RUN_SETUP_IN_GUEST:-0}" = "1" ] && [ -f /job/setup.sh ]; then
   run_phase "setup" "/job/setup.sh" "${SPARKVM_SETUP_TIMEOUT_SEC:-300}"
   setup_code=$?
 else
