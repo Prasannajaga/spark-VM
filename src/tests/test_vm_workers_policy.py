@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -10,7 +11,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sparkvm.errors import FirecrackerBinaryNotInstalled
+from sparkvm.errors import ExecutionDiskError, FirecrackerBinaryNotInstalled, JobTimeoutError
 from sparkvm.image import BaseImage
 from sparkvm.result import VMResult
 from sparkvm.rollouts import Rollout
@@ -335,6 +336,86 @@ class VMWorkersPolicyTest(unittest.TestCase):
         worker = next((self.home / "workers").glob("vm-*"))
         self.assertFalse((worker / "rootfs.ext4").exists())
         self.assertTrue((worker / "rollout.ext4").exists())
+
+    def test_host_timeout_writes_failure_json_and_extracts_partial_results(self) -> None:
+        vm = self._new_vm()
+
+        def _fake_copy_rollout(self_obj, runtime_files=None) -> None:  # noqa: ANN001
+            del runtime_files
+            self_obj.path.parent.mkdir(parents=True, exist_ok=True)
+            self_obj.path.write_bytes(b"fake-ext4")
+
+        def _timeout_wait(_self, timeout_sec=None):  # noqa: ANN001
+            raise subprocess.TimeoutExpired(cmd=["firecracker"], timeout=timeout_sec or 1.0)
+
+        def _fake_extract(_self, *, execution_disk_path, output_results_dir, env):  # noqa: ANN001
+            del execution_disk_path, env
+            output_results_dir.mkdir(parents=True, exist_ok=True)
+            (output_results_dir / "run.stdout.log").write_text("partial out\n", encoding="utf-8")
+            (output_results_dir / "run.stderr.log").write_text("partial err\n", encoding="utf-8")
+            return {
+                "partial_results_extracted": True,
+                "partial_results_error": None,
+                "files": ["run.stdout.log", "run.stderr.log"],
+            }
+
+        with patch("sparkvm.vm.FirecrackerAPIClient", _FakeAPI), patch("sparkvm.vm.FirecrackerProcess", _FakeFirecrackerProcess), patch(
+            "sparkvm.vm.ExecutionDisk.copy_rollout",
+            _fake_copy_rollout,
+        ), patch("sparkvm.vm.FirecrackerProcess.wait", _timeout_wait), patch(
+            "sparkvm.vm.SparkVM.extract_partial_results_from_execution_disk",
+            _fake_extract,
+        ):
+            with self.assertRaises(JobTimeoutError):
+                vm.run(self.rollout)
+
+        worker = next((self.home / "workers").glob("vm-*"))
+        self.assertTrue((worker / "failure.json").exists())
+        self.assertTrue((worker / "results" / "run.stdout.log").exists())
+        self.assertTrue((worker / "results" / "run.stderr.log").exists())
+        payload = json.loads((worker / "failure.json").read_text(encoding="utf-8"))
+        self.assertEqual("timeout", payload["status"])
+        self.assertTrue(payload["partial_results_extracted"])
+        self.assertFalse((worker / "rollout.ext4").exists())
+
+    def test_missing_final_exit_code_writes_failure_json_and_preserves_partial_results(self) -> None:
+        vm = self._new_vm()
+
+        def _fake_copy_rollout(self_obj, runtime_files=None) -> None:  # noqa: ANN001
+            del runtime_files
+            self_obj.path.parent.mkdir(parents=True, exist_ok=True)
+            self_obj.path.write_bytes(b"fake-ext4")
+
+        def _fake_read_result(_self, vm_id: str, duration_ms: int, firecracker_log_path: Path | None):  # noqa: ANN001
+            del vm_id, duration_ms, firecracker_log_path
+            raise ExecutionDiskError("Guest did not produce result files (/results or /exit_code) on execution disk.")
+
+        def _fake_extract(_self, *, execution_disk_path, output_results_dir, env):  # noqa: ANN001
+            del execution_disk_path, env
+            output_results_dir.mkdir(parents=True, exist_ok=True)
+            (output_results_dir / "run.stdout.log").write_text("partial stdout\n", encoding="utf-8")
+            return {
+                "partial_results_extracted": True,
+                "partial_results_error": None,
+                "files": ["run.stdout.log"],
+            }
+
+        with patch("sparkvm.vm.FirecrackerAPIClient", _FakeAPI), patch("sparkvm.vm.FirecrackerProcess", _FakeFirecrackerProcess), patch(
+            "sparkvm.vm.ExecutionDisk.copy_rollout",
+            _fake_copy_rollout,
+        ), patch("sparkvm.vm.ExecutionDisk.read_result", _fake_read_result), patch(
+            "sparkvm.vm.SparkVM.extract_partial_results_from_execution_disk",
+            _fake_extract,
+        ):
+            with self.assertRaises(ExecutionDiskError):
+                vm.run(self.rollout)
+
+        worker = next((self.home / "workers").glob("vm-*"))
+        self.assertTrue((worker / "failure.json").exists())
+        self.assertTrue((worker / "results" / "run.stdout.log").exists())
+        payload = json.loads((worker / "failure.json").read_text(encoding="utf-8"))
+        self.assertEqual("infrastructure_failed", payload["status"])
+        self.assertTrue(payload["partial_results_extracted"])
 
 
 if __name__ == "__main__":

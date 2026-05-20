@@ -11,8 +11,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sparkvm.errors import InvalidRepoError, RolloutError
-from sparkvm.rollouts import Rollouts
+from sparkvm.errors import InvalidRepoError, RolloutConfigError, RolloutError
+from sparkvm.rollouts import Rollouts, resolve_container_command
 
 
 class RolloutsModesTest(unittest.TestCase):
@@ -26,6 +26,54 @@ class RolloutsModesTest(unittest.TestCase):
 
     def _read_json(self, path: Path) -> dict[str, object]:
         return json.loads(path.read_text(encoding="utf-8"))
+
+    def _create_local_git_repo(self) -> tuple[tempfile.TemporaryDirectory[str], Path, str]:
+        repo_tmp = tempfile.TemporaryDirectory(prefix="sparkvm-local-repo-")
+        repo = Path(repo_tmp.name)
+        subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "config", "user.email", "sparkvm@example.com"], cwd=repo, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "config", "user.name", "SparkVM Test"], cwd=repo, check=True, capture_output=True, text=True)
+        (repo / "main.py").write_text("print('repo')\n", encoding="utf-8")
+        (repo / "README.md").write_text("repo\n", encoding="utf-8")
+        (repo / "Dockerfile").write_text(
+            "FROM python:3.12-slim\n"
+            "WORKDIR /workspace\n"
+            "COPY . .\n"
+            'CMD ["python", "main.py"]\n',
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True, text=True)
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        return repo_tmp, repo, commit
+
+    def _fake_docker_run_checked_factory(
+        self,
+        *,
+        working_dir: str = "/workspace",
+        entrypoint: list[str] | None = None,
+        cmd: list[str] | None = None,
+    ):
+        calls: list[list[str]] = []
+
+        def _fake_run_checked(cmd_args, *, error_factory, cwd=None):  # noqa: ANN001
+            del error_factory, cwd
+            cmd_list = [str(x) for x in cmd_args]
+            calls.append(cmd_list)
+            if cmd_list[:3] == ["docker", "image", "inspect"]:
+                payload = [{"Config": {"WorkingDir": working_dir, "Entrypoint": entrypoint, "Cmd": cmd, "Env": ["A=B"]}}]
+                return subprocess.CompletedProcess(cmd_list, 0, stdout=json.dumps(payload), stderr="")
+            if cmd_list[:2] == ["docker", "create"]:
+                return subprocess.CompletedProcess(cmd_list, 0, stdout="container-123\n", stderr="")
+            return subprocess.CompletedProcess(cmd_list, 0, stdout="", stderr="")
+
+        return _fake_run_checked, calls
 
     def test_script_rollout_create_writes_files_and_metadata(self) -> None:
         rollout = self.rollouts.create(
@@ -139,9 +187,9 @@ class RolloutsModesTest(unittest.TestCase):
     def test_repo_rollout_git_url_executes_expected_git_commands(self) -> None:
         calls: list[tuple[list[str], str | None]] = []
 
-        def _fake_run(cmd: list[str], cwd: str | None = None, check: bool = True, capture_output: bool = True, text: bool = True):
-            del check, capture_output, text
-            calls.append((list(cmd), cwd))
+        def _fake_run_checked(cmd: list[str], *, error_factory, cwd=None):  # noqa: ANN001
+            del error_factory
+            calls.append((list(cmd), str(cwd) if cwd is not None else None))
             if cmd[:2] == ["git", "clone"]:
                 target = Path(cmd[3])
                 target.mkdir(parents=True, exist_ok=True)
@@ -153,7 +201,7 @@ class RolloutsModesTest(unittest.TestCase):
                 return subprocess.CompletedProcess(cmd, 0, stdout="abc123\n", stderr="")
             raise AssertionError(f"Unexpected command: {cmd}")
 
-        with patch("sparkvm.rollouts.subprocess.run", side_effect=_fake_run):
+        with patch("sparkvm.rollouts.run_checked", side_effect=_fake_run_checked):
             rollout = self.rollouts.create(
                 name="repo-url",
                 mode="repo",
@@ -164,12 +212,215 @@ class RolloutsModesTest(unittest.TestCase):
 
         rollout_dir = self.home / "rollouts" / rollout.id
         repo_dir = rollout_dir / "repo"
+        source_dir = rollout_dir / "source"
         self.assertFalse((repo_dir / ".git").exists())
 
         commands = [cmd for cmd, _cwd in calls]
-        self.assertIn(["git", "clone", "https://github.com/org/repo.git", str(repo_dir)], commands)
+        self.assertIn(["git", "clone", "https://github.com/org/repo.git", str(source_dir)], commands)
         self.assertIn(["git", "checkout", "main"], commands)
         self.assertIn(["git", "rev-parse", "HEAD"], commands)
+
+    @unittest.skipUnless(shutil.which("git") is not None, "git is required")
+    def test_dockerfile_mode_does_not_require_setup_cmd_or_run_cmd_if_cmd_exists(self) -> None:
+        repo_tmp, repo, _commit = self._create_local_git_repo()
+        self.addCleanup(repo_tmp.cleanup)
+        fake_run_checked, calls = self._fake_docker_run_checked_factory(
+            working_dir="/workspace",
+            entrypoint=None,
+            cmd=["python", "main.py"],
+        )
+        with patch("sparkvm.rollouts.run_checked", side_effect=fake_run_checked):
+            rollout = self.rollouts.create(
+                name="dockerfile-default-cmd",
+                mode="repo",
+                source=repo,
+                dockerfile="Dockerfile",
+            )
+
+        payload = self._read_json(self.home / "rollouts" / rollout.id / "rollout.json")
+        self.assertEqual("docker_config", payload["resolved_run_command"]["source"])
+        self.assertIsNone(payload["run_cmd"])
+        self.assertIn(["docker", "build", "-f", str(self.home / "rollouts" / rollout.id / "source" / "Dockerfile"), "-t", f"sparkvm-rollout:{rollout.id}", str(self.home / "rollouts" / rollout.id / "source")], calls)
+
+    @unittest.skipUnless(shutil.which("git") is not None, "git is required")
+    def test_dockerfile_mode_accepts_external_dockerfile_path(self) -> None:
+        repo_tmp, repo, _commit = self._create_local_git_repo()
+        self.addCleanup(repo_tmp.cleanup)
+        external_tmp = tempfile.TemporaryDirectory(prefix="sparkvm-external-dockerfile-")
+        self.addCleanup(external_tmp.cleanup)
+        external_dockerfile = Path(external_tmp.name) / "Dockerfile.ext"
+        external_dockerfile.write_text(
+            "FROM python:3.12-slim\n"
+            "WORKDIR /workspace\n"
+            "COPY . .\n"
+            'CMD ["python", "main.py"]\n',
+            encoding="utf-8",
+        )
+        fake_run_checked, calls = self._fake_docker_run_checked_factory(
+            working_dir="/workspace",
+            entrypoint=None,
+            cmd=["python", "main.py"],
+        )
+
+        with patch("sparkvm.rollouts.run_checked", side_effect=fake_run_checked):
+            rollout = self.rollouts.create(
+                name="dockerfile-external-path",
+                mode="repo",
+                source=repo,
+                dockerfile=str(external_dockerfile),
+            )
+
+        self.assertIn(
+            [
+                "docker",
+                "build",
+                "-f",
+                str(external_dockerfile.resolve()),
+                "-t",
+                f"sparkvm-rollout:{rollout.id}",
+                str(self.home / "rollouts" / rollout.id / "source"),
+            ],
+            calls,
+        )
+
+    @unittest.skipUnless(shutil.which("git") is not None, "git is required")
+    def test_dockerfile_mode_raises_if_no_cmd_entrypoint_and_no_run_cmd(self) -> None:
+        repo_tmp, repo, _commit = self._create_local_git_repo()
+        self.addCleanup(repo_tmp.cleanup)
+        fake_run_checked, _calls = self._fake_docker_run_checked_factory(
+            working_dir="/workspace",
+            entrypoint=None,
+            cmd=None,
+        )
+        with patch("sparkvm.rollouts.run_checked", side_effect=fake_run_checked):
+            with self.assertRaises(RolloutConfigError):
+                self.rollouts.create(
+                    name="dockerfile-missing-command",
+                    mode="repo",
+                    source=repo,
+                    dockerfile="Dockerfile",
+                )
+
+    @unittest.skipUnless(shutil.which("git") is not None, "git is required")
+    def test_run_cmd_overrides_dockerfile_cmd(self) -> None:
+        repo_tmp, repo, _commit = self._create_local_git_repo()
+        self.addCleanup(repo_tmp.cleanup)
+        fake_run_checked, _calls = self._fake_docker_run_checked_factory(
+            working_dir="/workspace",
+            entrypoint=["python"],
+            cmd=["main.py"],
+        )
+        with patch("sparkvm.rollouts.run_checked", side_effect=fake_run_checked):
+            rollout = self.rollouts.create(
+                name="dockerfile-override",
+                mode="repo",
+                source=repo,
+                dockerfile="Dockerfile",
+                run_cmd="pytest -q",
+            )
+        payload = self._read_json(self.home / "rollouts" / rollout.id / "rollout.json")
+        self.assertEqual("run_cmd", payload["resolved_run_command"]["source"])
+        run_sh = (self.home / "rollouts" / rollout.id / "run.sh").read_text(encoding="utf-8")
+        self.assertIn("exec pytest -q", run_sh)
+
+    def test_resolve_container_command_uses_workdir_and_combines_entrypoint_cmd(self) -> None:
+        resolved = resolve_container_command(
+            run_cmd=None,
+            docker_entrypoint=["python", "-m"],
+            docker_cmd=["pytest", "-q"],
+            working_dir="/repo",
+        )
+        self.assertEqual("docker_config", resolved.source)
+        self.assertEqual("/repo", resolved.working_dir)
+        self.assertEqual("python -m pytest -q", resolved.command)
+
+    def test_resolve_container_command_shell_form_is_preserved(self) -> None:
+        resolved = resolve_container_command(
+            run_cmd=None,
+            docker_entrypoint=None,
+            docker_cmd="pytest -q tests/test_api.py",
+            working_dir=None,
+        )
+        self.assertEqual("/workspace", resolved.working_dir)
+        self.assertEqual("pytest -q tests/test_api.py", resolved.command)
+
+    @unittest.skipUnless(shutil.which("git") is not None, "git is required")
+    def test_image_mode_copies_source_to_workspace(self) -> None:
+        repo_tmp, repo, _commit = self._create_local_git_repo()
+        self.addCleanup(repo_tmp.cleanup)
+        fake_run_checked, _calls = self._fake_docker_run_checked_factory(
+            working_dir="/workspace",
+            entrypoint=None,
+            cmd=["python", "main.py"],
+        )
+        with patch("sparkvm.rollouts.run_checked", side_effect=fake_run_checked):
+            rollout = self.rollouts.create(
+                name="image-mode",
+                mode="repo",
+                source=repo,
+                image="python:3.12-slim",
+            )
+        rollout_dir = self.home / "rollouts" / rollout.id
+        self.assertTrue((rollout_dir / "workspace" / "main.py").exists())
+
+    @unittest.skipUnless(shutil.which("git") is not None, "git is required")
+    def test_dockerfile_mode_does_not_force_workspace_copy(self) -> None:
+        repo_tmp, repo, _commit = self._create_local_git_repo()
+        self.addCleanup(repo_tmp.cleanup)
+        fake_run_checked, _calls = self._fake_docker_run_checked_factory(
+            working_dir="/workspace",
+            entrypoint=None,
+            cmd=["python", "main.py"],
+        )
+        with patch("sparkvm.rollouts.run_checked", side_effect=fake_run_checked):
+            rollout = self.rollouts.create(
+                name="dockerfile-no-workspace-copy",
+                mode="repo",
+                source=repo,
+                dockerfile="Dockerfile",
+            )
+        rollout_dir = self.home / "rollouts" / rollout.id
+        self.assertFalse((rollout_dir / "workspace").exists())
+
+    @unittest.skipUnless(shutil.which("git") is not None, "git is required")
+    def test_setup_cmd_in_dockerfile_mode_runs_after_build_when_provided(self) -> None:
+        repo_tmp, repo, _commit = self._create_local_git_repo()
+        self.addCleanup(repo_tmp.cleanup)
+        fake_run_checked, calls = self._fake_docker_run_checked_factory(
+            working_dir="/workspace",
+            entrypoint=None,
+            cmd=["python", "main.py"],
+        )
+        with patch("sparkvm.rollouts.run_checked", side_effect=fake_run_checked):
+            self.rollouts.create(
+                name="dockerfile-setup-advanced",
+                mode="repo",
+                source=repo,
+                dockerfile="Dockerfile",
+                setup_cmd="pip install -e .",
+            )
+        docker_exec_calls = [call for call in calls if call[:2] == ["docker", "exec"]]
+        self.assertEqual(1, len(docker_exec_calls))
+
+    @unittest.skipUnless(shutil.which("git") is not None, "git is required")
+    def test_rollout_json_stores_resolved_run_command(self) -> None:
+        repo_tmp, repo, _commit = self._create_local_git_repo()
+        self.addCleanup(repo_tmp.cleanup)
+        fake_run_checked, _calls = self._fake_docker_run_checked_factory(
+            working_dir="/workspace",
+            entrypoint=["python"],
+            cmd=["-m", "uvicorn", "src.main:app"],
+        )
+        with patch("sparkvm.rollouts.run_checked", side_effect=fake_run_checked):
+            rollout = self.rollouts.create(
+                name="dockerfile-resolved-command",
+                mode="repo",
+                source=repo,
+                dockerfile="Dockerfile",
+            )
+        payload = self._read_json(self.home / "rollouts" / rollout.id / "rollout.json")
+        self.assertIn("resolved_run_command", payload)
+        self.assertEqual("docker_config", payload["resolved_run_command"]["source"])
 
     def test_unsafe_script_file_paths_raise(self) -> None:
         with self.assertRaises(RolloutError):

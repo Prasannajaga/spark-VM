@@ -185,7 +185,11 @@ def run_workers_view(
         return 0
 
     if show_results:
-        print(workers.results_text(vm_id))
+        text = workers.results_text(vm_id)
+        if not text:
+            print("No extracted result logs found. Check firecracker.log and failure.json.")
+        else:
+            print(text)
         return 0
 
     if live:

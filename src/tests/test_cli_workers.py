@@ -113,6 +113,11 @@ class CLIWorkersTest(unittest.TestCase):
         self.assertIn("run.stdout.log", out)
         self.assertIn("hello", out)
 
+    def test_workers_view_results_when_empty_prints_hint(self) -> None:
+        code, out = self._run_cli(["--home-dir", str(self.home), "workers", "view", "vm-abc123", "--results"])
+        self.assertEqual(0, code)
+        self.assertIn("No extracted result logs found. Check firecracker.log and failure.json.", out)
+
     def test_workers_view_live_streams_log_chunks(self) -> None:
         chunks = iter(["lineA\n", "lineB\n"])
 

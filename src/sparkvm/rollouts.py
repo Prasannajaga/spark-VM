@@ -6,7 +6,9 @@ import json
 import os
 import re
 import secrets
-import shutil  
+import shlex
+import shutil
+import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -17,6 +19,8 @@ from .commands import run_checked
 from .errors import (
     InvalidRepoError,
     InvalidRolloutModeError,
+    RolloutBuildError,
+    RolloutConfigError,
     RolloutError,
     RolloutMetadataError,
     RolloutNotFoundError,
@@ -50,6 +54,10 @@ class Rollout:
     updated_at: str | None = None
     runtime: str = DEFAULT_RUNTIME
     base_image: str | None = None
+    image: str | None = None
+    dockerfile: str | None = None
+    resolved_run_command: dict[str, Any] | None = None
+    rootfs_path: str | None = None
 
     def __post_init__(self) -> None:
         runtime_candidate: str | None = self.runtime if isinstance(self.runtime, str) and self.runtime.strip() else None
@@ -82,9 +90,21 @@ class Rollout:
         setup_cmd = str(setup_raw) if isinstance(setup_raw, str) and setup_raw.strip() else None
         run_raw = data.get("run_cmd")
         run_cmd = str(run_raw) if isinstance(run_raw, str) and run_raw.strip() else None
+        image_raw = data.get("image")
+        image = str(image_raw).strip() if isinstance(image_raw, str) and image_raw.strip() else None
+        dockerfile_raw = data.get("dockerfile")
+        dockerfile = str(dockerfile_raw).strip() if isinstance(dockerfile_raw, str) and dockerfile_raw.strip() else None
+        resolved_raw = data.get("resolved_run_command")
+        resolved_run_command = resolved_raw if isinstance(resolved_raw, dict) else None
+        rootfs_path_raw = data.get("rootfs_path")
+        rootfs_path = str(rootfs_path_raw) if isinstance(rootfs_path_raw, str) and rootfs_path_raw.strip() else None
 
         if run_cmd is None and command is not None:
             run_cmd = command
+        if run_cmd is None and isinstance(resolved_run_command, dict):
+            resolved_command_raw = resolved_run_command.get("command")
+            if isinstance(resolved_command_raw, str) and resolved_command_raw.strip():
+                run_cmd = resolved_command_raw.strip()
 
         disk_mb_raw = data.get("disk_mb")
         if isinstance(disk_mb_raw, int):
@@ -116,6 +136,10 @@ class Rollout:
                 files=files,
                 created_at=str(data["created_at"]),
                 updated_at=data.get("updated_at"),
+                image=image,
+                dockerfile=dockerfile,
+                resolved_run_command=resolved_run_command,
+                rootfs_path=rootfs_path,
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise RolloutMetadataError(f"Invalid rollout.json content: {data!r}") from exc
@@ -130,6 +154,18 @@ class Rollout:
             run_cmd = str(run_cmd_raw) if isinstance(run_cmd_raw, str) else command
             setup_cmd_raw = data.get("setup_cmd")
             setup_cmd = str(setup_cmd_raw) if isinstance(setup_cmd_raw, str) else None
+            image_raw = data.get("image")
+            image = str(image_raw).strip() if isinstance(image_raw, str) and image_raw.strip() else None
+            dockerfile_raw = data.get("dockerfile")
+            dockerfile = str(dockerfile_raw).strip() if isinstance(dockerfile_raw, str) and dockerfile_raw.strip() else None
+            resolved_raw = data.get("resolved_run_command")
+            resolved_run_command = resolved_raw if isinstance(resolved_raw, dict) else None
+            rootfs_path_raw = data.get("rootfs_path")
+            rootfs_path = str(rootfs_path_raw) if isinstance(rootfs_path_raw, str) and rootfs_path_raw.strip() else None
+            if run_cmd is None and isinstance(resolved_run_command, dict):
+                resolved_command_raw = resolved_run_command.get("command")
+                if isinstance(resolved_command_raw, str) and resolved_command_raw.strip():
+                    run_cmd = resolved_command_raw.strip()
             disk_mb_raw = data.get("disk_mb")
             if isinstance(disk_mb_raw, int):
                 disk_mb = disk_mb_raw
@@ -153,6 +189,10 @@ class Rollout:
                 files=[str(item) for item in data.get("files", [])],
                 created_at=str(data["created_at"]),
                 updated_at=data.get("updated_at"),
+                image=image,
+                dockerfile=dockerfile,
+                resolved_run_command=resolved_run_command,
+                rootfs_path=rootfs_path,
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise RolloutMetadataError(f"Invalid rollout metadata entry: {data!r}") from exc
@@ -167,6 +207,10 @@ class Rollout:
             "command": self.command,
             "setup_cmd": self.setup_cmd,
             "run_cmd": self.run_cmd,
+            "image": self.image,
+            "dockerfile": self.dockerfile,
+            "resolved_run_command": self.resolved_run_command,
+            "rootfs_path": self.rootfs_path,
             "disk_mb": self.disk_mb,
             "files": list(self.files),
             "created_at": self.created_at,
@@ -246,6 +290,84 @@ def run_git_checked(cmd: list[str], *, cwd: Path | None = None, error_cls: type[
     return completed.stdout.strip()
 
 
+@dataclass(frozen=True)
+class ResolvedCommand:
+    source: str
+    working_dir: str
+    command: str
+    entrypoint: list[str] | str | None
+    cmd: list[str] | str | None
+
+
+def shell_quote(arg: str) -> str:
+    return shlex.quote(arg)
+
+
+def command_value_to_shell(value: list[str] | tuple[str, ...] | str | None) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped if stripped else None
+    if isinstance(value, (list, tuple)):
+        parts = [str(part) for part in value if str(part).strip()]
+        if not parts:
+            return None
+        return " ".join(shell_quote(part) for part in parts)
+    raise RolloutConfigError(f"Unsupported Docker command value type: {type(value).__name__}")
+
+
+def normalize_command_value(value: object) -> list[str] | str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped if stripped else None
+    if isinstance(value, (list, tuple)):
+        parts = [str(part) for part in value if str(part).strip()]
+        return parts if parts else None
+    raise RolloutConfigError(f"Unsupported Docker command value type: {type(value).__name__}")
+
+
+def resolve_container_command(
+    *,
+    run_cmd: str | None,
+    docker_entrypoint: list[str] | str | None,
+    docker_cmd: list[str] | str | None,
+    working_dir: str | None,
+) -> ResolvedCommand:
+    resolved_working_dir = working_dir.strip() if isinstance(working_dir, str) and working_dir.strip() else "/workspace"
+    normalized_entrypoint = normalize_command_value(docker_entrypoint)
+    normalized_cmd = normalize_command_value(docker_cmd)
+
+    if isinstance(run_cmd, str) and run_cmd.strip():
+        return ResolvedCommand(
+            source="run_cmd",
+            working_dir=resolved_working_dir,
+            command=run_cmd.strip(),
+            entrypoint=normalized_entrypoint,
+            cmd=normalized_cmd,
+        )
+
+    entrypoint_shell = command_value_to_shell(normalized_entrypoint)
+    cmd_shell = command_value_to_shell(normalized_cmd)
+    if entrypoint_shell is None and cmd_shell is None:
+        raise RolloutConfigError("Dockerfile rollout requires either run_cmd or Dockerfile CMD/ENTRYPOINT.")
+
+    if entrypoint_shell and cmd_shell:
+        command = f"{entrypoint_shell} {cmd_shell}"
+    else:
+        command = entrypoint_shell or cmd_shell or ""
+
+    return ResolvedCommand(
+        source="docker_config",
+        working_dir=resolved_working_dir,
+        command=command,
+        entrypoint=normalized_entrypoint,
+        cmd=normalized_cmd,
+    )
+
+
 class Rollouts:
     """Rollout manager."""
 
@@ -263,6 +385,8 @@ class Rollouts:
         files: dict[str, str | bytes] | None = None,
         source: str | Path | None = None,
         ref: str | None = None,
+        image: str | None = None,
+        dockerfile: str | None = None,
         setup_cmd: str | None = None,
         run_cmd: str | None = None,
         disk_mb: int | None = None,
@@ -273,10 +397,16 @@ class Rollouts:
         rollout_mode = validate_rollout_mode(mode)
         rollout_runtime = validate_runtime(base_image if base_image is not None else runtime)
 
+        rollout_image = image.strip() if isinstance(image, str) and image.strip() else None
+        rollout_dockerfile = dockerfile.strip() if isinstance(dockerfile, str) and dockerfile.strip() else None
+        if rollout_image is not None and rollout_dockerfile is not None:
+            raise RolloutConfigError("Provide either image or dockerfile, not both.")
+
+        rollout_setup_cmd = setup_cmd.strip() if isinstance(setup_cmd, str) and setup_cmd.strip() else None
         resolved_run_cmd = run_cmd.strip() if isinstance(run_cmd, str) and run_cmd.strip() else None
         if resolved_run_cmd is None and isinstance(command, str) and command.strip():
             resolved_run_cmd = command.strip()
-        rollout_run_cmd = validate_non_empty(resolved_run_cmd, field_name="run_cmd")
+        rollout_run_cmd = resolved_run_cmd
 
         if disk_mb is None:
             rollout_disk_mb = REPO_DEFAULT_DISK_MB if rollout_mode == "repo" else SCRIPT_DEFAULT_DISK_MB
@@ -306,8 +436,8 @@ class Rollouts:
                     rollout_runtime=rollout_runtime,
                     rollout_path=rollout_path,
                     files=files,
-                    setup_cmd=setup_cmd,
-                    run_cmd=rollout_run_cmd,
+                    setup_cmd=rollout_setup_cmd,
+                    run_cmd=validate_non_empty(rollout_run_cmd, field_name="run_cmd"),
                     disk_mb=rollout_disk_mb,
                     created_at=created_at,
                 )
@@ -318,7 +448,9 @@ class Rollouts:
                     rollout_runtime=rollout_runtime,
                     rollout_path=rollout_path,
                     source=source,
-                    setup_cmd=setup_cmd,
+                    image=rollout_image,
+                    dockerfile=rollout_dockerfile,
+                    setup_cmd=rollout_setup_cmd,
                     run_cmd=rollout_run_cmd,
                     ref=ref,
                     disk_mb=rollout_disk_mb,
@@ -448,8 +580,10 @@ class Rollouts:
         rollout_runtime: str,
         rollout_path: Path,
         source: str | Path | None,
+        image: str | None,
+        dockerfile: str | None,
         setup_cmd: str | None,
-        run_cmd: str,
+        run_cmd: str | None,
         ref: str | None,
         disk_mb: int,
         created_at: str,
@@ -461,14 +595,34 @@ class Rollouts:
             raise InvalidRepoError("source must be a non-empty path or git URL for mode='repo'.")
         rollout_setup_cmd = setup_cmd.strip() if isinstance(setup_cmd, str) and setup_cmd.strip() else None
 
-        repo_dir = rollout_path / "repo"
-        created_files: list[str] = ["repo/"]
-
+        source_dir = rollout_path / "source"
         source_payload: dict[str, Any]
         if is_git_url(raw_source):
-            source_payload = self.prepare_repo_from_git_url(repo_dir=repo_dir, source=raw_source, ref=ref)
+            source_payload = self.prepare_repo_from_git_url(repo_dir=source_dir, source=raw_source, ref=ref)
         else:
-            source_payload = self.prepare_repo_from_local_path(repo_dir=repo_dir, source=Path(raw_source))
+            source_payload = self.prepare_repo_from_local_path(repo_dir=source_dir, source=Path(raw_source))
+
+        if dockerfile is not None or image is not None:
+            return self.create_repo_containerized_rollout(
+                rollout_id=rollout_id,
+                rollout_name=rollout_name,
+                rollout_runtime=rollout_runtime,
+                rollout_path=rollout_path,
+                source_dir=source_dir,
+                source_payload=source_payload,
+                image=image,
+                dockerfile=dockerfile,
+                setup_cmd=rollout_setup_cmd,
+                run_cmd=run_cmd,
+                disk_mb=disk_mb,
+                created_at=created_at,
+            )
+
+        rollout_run_cmd = validate_non_empty(run_cmd, field_name="run_cmd")
+        repo_dir = rollout_path / "repo"
+        if source_dir.exists():
+            source_dir.rename(repo_dir)
+        created_files: list[str] = ["repo/"]
 
         if rollout_setup_cmd is not None:
             setup_sh_path = rollout_path / "setup.sh"
@@ -477,7 +631,7 @@ class Rollouts:
             created_files.append("setup.sh")
 
         run_sh_path = rollout_path / "run.sh"
-        write_text(run_sh_path, f"#!/bin/sh\nset -eu\ncd /job/repo\n{run_cmd}\n", encoding="utf-8")
+        write_text(run_sh_path, f"#!/bin/sh\nset -eu\ncd /job/repo\n{rollout_run_cmd}\n", encoding="utf-8")
         run_sh_path.chmod(0o755)
         created_files.append("run.sh")
 
@@ -487,8 +641,11 @@ class Rollouts:
             "mode": "repo",
             "runtime": rollout_runtime,
             "source": source_payload,
+            "image": None,
+            "dockerfile": None,
+            "resolved_run_command": None,
             "setup_cmd": rollout_setup_cmd,
-            "run_cmd": run_cmd,
+            "run_cmd": rollout_run_cmd,
             "files": created_files,
             "disk_mb": disk_mb,
             "created_at": created_at,
@@ -503,12 +660,238 @@ class Rollouts:
             path=rollout_path.resolve(),
             command=None,
             setup_cmd=rollout_setup_cmd,
-            run_cmd=run_cmd,
+            run_cmd=rollout_run_cmd,
             disk_mb=disk_mb,
             files=created_files,
             created_at=created_at,
             updated_at=None,
         )
+
+    def create_repo_containerized_rollout(
+        self,
+        *,
+        rollout_id: str,
+        rollout_name: str,
+        rollout_runtime: str,
+        rollout_path: Path,
+        source_dir: Path,
+        source_payload: dict[str, Any],
+        image: str | None,
+        dockerfile: str | None,
+        setup_cmd: str | None,
+        run_cmd: str | None,
+        disk_mb: int,
+        created_at: str,
+    ) -> Rollout:
+        docker_image_tag = image
+        container_id = ""
+        source_prefix = "source/"
+        created_files: list[str] = [source_prefix]
+
+        try:
+            if dockerfile is not None:
+                dockerfile_path = self.resolve_dockerfile_path(dockerfile=dockerfile, source_dir=source_dir)
+                docker_image_tag = f"sparkvm-rollout:{rollout_id}"
+                run_checked(
+                    ["docker", "build", "-f", str(dockerfile_path), "-t", docker_image_tag, str(source_dir)],
+                    error_factory=RolloutBuildError,
+                )
+            else:
+                assert docker_image_tag is not None
+                run_checked(["docker", "pull", docker_image_tag], error_factory=RolloutBuildError)
+
+            assert docker_image_tag is not None
+            inspect_payload = self.inspect_docker_image_config(docker_image_tag)
+            config = inspect_payload.get("Config", {})
+            if not isinstance(config, dict):
+                config = {}
+            working_dir_raw = config.get("WorkingDir")
+            working_dir = working_dir_raw if isinstance(working_dir_raw, str) else None
+            entrypoint = config.get("Entrypoint")
+            cmd = config.get("Cmd")
+
+            resolved = resolve_container_command(
+                run_cmd=run_cmd,
+                docker_entrypoint=entrypoint if isinstance(entrypoint, (list, tuple, str)) else None,
+                docker_cmd=cmd if isinstance(cmd, (list, tuple, str)) else None,
+                working_dir=working_dir,
+            )
+
+            create_result = run_checked(["docker", "create", docker_image_tag], error_factory=RolloutBuildError)
+            container_id = create_result.stdout.strip()
+            if not container_id:
+                raise RolloutBuildError("docker create returned an empty container id.")
+
+            setup_workdir = self.resolve_setup_working_dir(
+                configured_workdir=resolved.working_dir,
+                dockerfile_mode=dockerfile is not None,
+            )
+            if setup_cmd is not None:
+                run_checked(["docker", "start", container_id], error_factory=RolloutBuildError)
+                run_checked(
+                    ["docker", "exec", "-w", setup_workdir, container_id, "sh", "-lc", setup_cmd],
+                    error_factory=RolloutBuildError,
+                )
+
+            rootfs_ext4_path = rollout_path / "rootfs.ext4"
+            rootfs_metadata_path = rollout_path / "rootfs.json"
+            self.export_container_rootfs_to_ext4(
+                container_id=container_id,
+                rootfs_ext4_path=rootfs_ext4_path,
+                disk_mb=disk_mb,
+            )
+            created_files.extend(["rootfs.ext4", "rootfs.json"])
+
+            rootfs_metadata = {
+                "rollout_id": rollout_id,
+                "image": docker_image_tag,
+                "dockerfile": dockerfile,
+                "working_dir": resolved.working_dir,
+                "entrypoint": resolved.entrypoint,
+                "cmd": resolved.cmd,
+                "created_at": created_at,
+            }
+            self.write_rollout_json(rootfs_metadata_path, rootfs_metadata)
+
+            if dockerfile is None:
+                workspace_dir = rollout_path / "workspace"
+                shutil.copytree(source_dir, workspace_dir, symlinks=True, ignore=COPYTREE_IGNORE)
+                created_files.append("workspace/")
+
+            run_sh_path = rollout_path / "run.sh"
+            self.write_run_script(
+                run_sh_path=run_sh_path,
+                working_dir=resolved.working_dir,
+                command=resolved.command,
+            )
+            created_files.append("run.sh")
+
+            rollout_json = {
+                "id": rollout_id,
+                "name": rollout_name,
+                "mode": "repo",
+                "runtime": rollout_runtime,
+                "source": source_payload,
+                "image": image,
+                "dockerfile": dockerfile,
+                "setup_cmd": setup_cmd,
+                "run_cmd": run_cmd,
+                "resolved_run_command": {
+                    "source": resolved.source,
+                    "working_dir": resolved.working_dir,
+                    "command": resolved.command,
+                    "entrypoint": resolved.entrypoint,
+                    "cmd": resolved.cmd,
+                },
+                "rootfs_path": str(rootfs_ext4_path),
+                "files": created_files,
+                "disk_mb": disk_mb,
+                "created_at": created_at,
+            }
+            self.write_rollout_json(rollout_path / "rollout.json", rollout_json)
+
+            return Rollout(
+                id=rollout_id,
+                name=rollout_name,
+                mode="repo",
+                runtime=rollout_runtime,
+                path=rollout_path.resolve(),
+                command=None,
+                setup_cmd=setup_cmd,
+                run_cmd=resolved.command,
+                disk_mb=disk_mb,
+                files=created_files,
+                created_at=created_at,
+                updated_at=None,
+                image=image,
+                dockerfile=dockerfile,
+                resolved_run_command=rollout_json["resolved_run_command"],
+                rootfs_path=str(rootfs_ext4_path),
+            )
+        finally:
+            if container_id:
+                try:
+                    run_checked(["docker", "rm", "-f", container_id], error_factory=RolloutBuildError)
+                except Exception:
+                    pass
+
+    def inspect_docker_image_config(self, image_tag: str) -> dict[str, Any]:
+        inspect_result = run_checked(["docker", "image", "inspect", image_tag], error_factory=RolloutBuildError)
+        try:
+            payload = json.loads(inspect_result.stdout)
+        except json.JSONDecodeError as exc:
+            raise RolloutBuildError("docker image inspect returned invalid JSON.") from exc
+        if not isinstance(payload, list) or not payload or not isinstance(payload[0], dict):
+            raise RolloutBuildError("docker image inspect returned unexpected payload.")
+        return payload[0]
+
+    def resolve_dockerfile_path(self, *, dockerfile: str, source_dir: Path) -> Path:
+        candidate = Path(dockerfile).expanduser()
+        candidates: list[Path] = []
+
+        if candidate.is_absolute():
+            candidates.append(candidate)
+        else:
+            candidates.append(Path.cwd() / candidate)
+            candidates.append(source_dir / candidate)
+
+        for path_candidate in candidates:
+            if path_candidate.is_file():
+                return path_candidate.resolve()
+
+        raise RolloutConfigError(
+            f"Dockerfile not found: {dockerfile}. "
+            "Pass an absolute path, a path relative to the current working directory, "
+            "or a path relative to the rollout source repository."
+        )
+
+    def resolve_setup_working_dir(self, *, configured_workdir: str, dockerfile_mode: bool) -> str:
+        if configured_workdir.strip():
+            return configured_workdir.strip()
+        if dockerfile_mode:
+            return "/workspace"
+        return "/"
+
+    def export_container_rootfs_to_ext4(self, *, container_id: str, rootfs_ext4_path: Path, disk_mb: int) -> None:
+        ensure_dir(rootfs_ext4_path.parent, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="sparkvm-rollout-rootfs-") as tmp_dir_str:
+            tmp_dir = Path(tmp_dir_str)
+            rootfs_tar = tmp_dir / "rootfs.tar"
+            rootfs_dir = tmp_dir / "rootfs"
+            ensure_dir(rootfs_dir, exist_ok=True)
+
+            run_checked(
+                ["docker", "export", "-o", str(rootfs_tar), container_id],
+                error_factory=RolloutBuildError,
+            )
+            run_checked(["tar", "-xf", str(rootfs_tar), "-C", str(rootfs_dir)], error_factory=RolloutBuildError)
+
+            ensure_dir(rootfs_dir / "job", exist_ok=True)
+            ensure_dir(rootfs_dir / "job" / "results", exist_ok=True)
+            init_path = rootfs_dir / "init"
+            from sparkvm.runtimes.debian import SPARKVM_INIT_TEMPLATE  # local import to avoid cycle during tests
+
+            write_text(init_path, SPARKVM_INIT_TEMPLATE, encoding="utf-8")
+            init_path.chmod(0o755)
+
+            run_checked(
+                ["dd", "if=/dev/zero", f"of={rootfs_ext4_path}", "bs=1M", f"count={disk_mb}", "status=none"],
+                error_factory=RolloutBuildError,
+            )
+            run_checked(
+                ["mkfs.ext4", "-d", str(rootfs_dir), "-F", str(rootfs_ext4_path)],
+                error_factory=RolloutBuildError,
+            )
+
+    def write_run_script(self, *, run_sh_path: Path, working_dir: str, command: str) -> None:
+        if not command.strip():
+            raise RolloutConfigError("Resolved run command is empty.")
+        write_text(
+            run_sh_path,
+            f"#!/bin/sh\nset -eu\ncd {shell_quote(working_dir)}\nexec {command}\n",
+            encoding="utf-8",
+        )
+        run_sh_path.chmod(0o755)
 
     def prepare_repo_from_local_path(self, *, repo_dir: Path, source: Path) -> dict[str, Any]:
         source_path = source.expanduser().resolve()
@@ -681,4 +1064,10 @@ class Rollouts:
 # Backward compatibility alias.
 RolloutManager = Rollouts
 
-__all__ = ["Rollout", "Rollouts", "RolloutManager"]
+__all__ = [
+    "Rollout",
+    "ResolvedCommand",
+    "resolve_container_command",
+    "Rollouts",
+    "RolloutManager",
+]

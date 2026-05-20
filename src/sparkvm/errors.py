@@ -97,6 +97,14 @@ class RolloutError(SparkVMError):
     """Rollout creation/loading/deletion failure."""
 
 
+class RolloutConfigError(RolloutError):
+    """Rollout configuration is invalid or incomplete."""
+
+
+class RolloutBuildError(RolloutError):
+    """Rollout build step failed (Docker build/export/setup)."""
+
+
 class RolloutNotFoundError(RolloutError):
     """Requested rollout does not exist."""
 
@@ -154,6 +162,8 @@ __all__ = [
     "CleanupError",
     "NetworkSetupError",
     "RolloutError",
+    "RolloutConfigError",
+    "RolloutBuildError",
     "RolloutNotFoundError",
     "RolloutMetadataError",
     "InvalidRepoError",

@@ -7,10 +7,11 @@ Run a rollout from a GitHub repository.
 Usage:
   python3 examples/run_vm_with_github_repo.py
 
-Edit REPO_URL / REF / SETUP_CMD / RUN_CMD below for your project.
+Edit REPO_URL / REF / DOCKERFILE / RUN_CMD_OVERRIDE below for your project.
 """
 
 import os
+from pathlib import Path
 
 from sparkvm import SparkVM
 from sparkvm.rollouts import Rollouts
@@ -19,34 +20,33 @@ from sparkvm.rollouts import Rollouts
 REPO_URL = "/home/prasanna/coding/test-fastapi"
 REF = "main"
 
-# Optional setup command; set to None or "" to skip setup.sh generation.
-# With network=True, internet-dependent installs (pip/apt/etc.) can run in-guest.
-SETUP_CMD = """
-set -eu
+# Dockerfile can now be provided as an explicit path (outside source repo).
+DOCKERFILE = str((Path(__file__).resolve().parent / "dockerfile").resolve())
 
-which python3
-python3 -m venv .venv
-.venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install -r requirements.txt
-"""
+# Optional execution override. Keep as None to use Docker CMD/ENTRYPOINT.
+RUN_CMD_OVERRIDE = None
 
-RUN_CMD = """
-set -eu
-
-.venv/bin/uvicorn src.main:app --host 127.0.0.1 --port 8000 &
-server_pid=$!
-
-sleep 3
-
-.venv/bin/python - <<'PY'
-import urllib.request
-resp = urllib.request.urlopen("http://127.0.0.1:8000")
-print("status:", resp.status)
-PY
-
-kill "$server_pid"
-wait "$server_pid" || true
-"""
+# Example bounded network debug override:
+# RUN_CMD_OVERRIDE = """
+# set -eux
+#
+# echo "[net] ip addr"
+# ip addr || true
+#
+# echo "[net] ip route"
+# ip route || true
+#
+# echo "[net] resolv.conf"
+# cat /etc/resolv.conf || true
+#
+# echo "[net] dns"
+# timeout 5 getent hosts pypi.org || true
+#
+# echo "[net] curl"
+# curl -Iv --connect-timeout 5 --max-time 10 https://pypi.org/simple/ || true
+#
+# echo "[net] done"
+# """
 
 def main() -> int:
     manager = Rollouts()
@@ -55,8 +55,8 @@ def main() -> int:
         mode="repo",
         source=REPO_URL,
         ref=REF,
-        setup_cmd=SETUP_CMD,
-        run_cmd=RUN_CMD,
+        dockerfile=DOCKERFILE,
+        run_cmd=RUN_CMD_OVERRIDE,
         # You can override this based on your repo size/workload.
         disk_mb=4096,
     )
@@ -74,7 +74,7 @@ def main() -> int:
     vm = SparkVM(
         vcpu=2,
         memory="2G",
-        timeout=500.0,
+        timeout=60.0,
         runtime="sparkvm-ubuntu-base-24.04",
         network=True,
         # Optional: pass runtime-only env vars for setup.sh/run.sh.

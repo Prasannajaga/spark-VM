@@ -70,6 +70,17 @@ class RolloutNegativeTest(unittest.TestCase):
                 run_cmd="  ",
             )
 
+    def test_create_rejects_both_image_and_dockerfile(self) -> None:
+        with self.assertRaises(RolloutError):
+            self.rollout.create(
+                name="bad-container-config",
+                mode="repo",
+                source=self.home_dir,
+                image="python:3.12-slim",
+                dockerfile="Dockerfile",
+                run_cmd="python3 main.py",
+            )
+
     def test_create_rejects_invalid_rollout_paths(self) -> None:
         invalid_paths = [
             "/etc/passwd",

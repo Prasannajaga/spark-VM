@@ -3279,3 +3279,128 @@ Acceptance criteria:
 3. Node/npm/go/rust/java workflows use the same /init.
 4. Rollout commands define runtime behavior.
 5. SparkVM behaves like a generic microVM execution platform, not a Python runner.
+
+
+
+=======================================================================
+======================================================================
+
+Fix SparkVM setup/run observability and timeout handling.
+
+Problem:
+Setup can appear stuck with no useful logs. Example setup output only shows:
+- python found
+- pip already satisfied
+Then execution appears to hang, likely during pip install/network access.
+
+Goals:
+1. Make setup/run phase logging explicit.
+2. Add per-phase timeout inside guest /init.
+3. Add network diagnostics when network=True.
+4. Make pip/network failures visible in logs.
+5. Preserve worker artifacts on setup/run failure.
+
+Required changes:
+
+1. Add phase timeout support to /init
+
+Before running setup.sh:
+- use timeout command if available
+
+For setup:
+timeout "${SPARKVM_SETUP_TIMEOUT_SEC:-300}" sh /job/setup.sh > /job/results/setup.stdout.log 2> /job/results/setup.stderr.log
+setup_code=$?
+
+For run:
+timeout "${SPARKVM_RUN_TIMEOUT_SEC:-300}" sh /job/run.sh > /job/results/run.stdout.log 2> /job/results/run.stderr.log
+run_code=$?
+
+If timeout command is missing:
+- fall back to sh /job/setup.sh
+- print warning to /dev/console:
+  "SparkVM: timeout command missing; phase timeout disabled"
+
+2. Write timeout metadata
+
+If setup_code == 124:
+- status should become setup_timeout
+
+If run_code == 124:
+- status should become run_timeout
+
+Update VMResult status handling:
+- setup_timeout
+- run_timeout
+
+3. Add runtime env vars for phase timeouts
+
+When creating execution disk, write non-secret config into /job/.sparkvm/runtime.env:
+
+SPARKVM_SETUP_TIMEOUT_SEC=300
+SPARKVM_RUN_TIMEOUT_SEC=300
+
+Then /init sources runtime.env before executing phases.
+
+4. Add network diagnostics to /init
+
+After configure_network(), if network is enabled, write diagnostics to /dev/console:
+
+echo "SparkVM: network diagnostics begin" > /dev/console
+ip addr > /dev/console 2>&1 || true
+ip route > /dev/console 2>&1 || true
+cat /etc/resolv.conf > /dev/console 2>&1 || true
+echo "SparkVM: network diagnostics end" > /dev/console
+
+Also write these to files:
+- /job/results/network.stdout.log
+- /job/results/network.stderr.log
+
+5. Improve examples
+
+Replace one-line setup_cmd examples with multi-line verbose scripts using:
+
+set -eux
+echo "[setup] step name"
+
+For Python dependency install examples, use:
+
+.venv/bin/python -m pip install -r requirements.txt --timeout 15 --retries 1 -v
+
+Do not use bare pip.
+Do not use long silent commands.
+
+6. Add optional network preflight command helper in docs/examples
+
+Recommended setup preflight:
+
+ip addr || true
+ip route || true
+cat /etc/resolv.conf || true
+getent hosts pypi.org || true
+curl -Iv --max-time 10 https://pypi.org/simple/ || true
+
+7. Result preservation
+
+For setup/run failures or timeouts:
+- preserve worker directory
+- copy setup stdout/stderr
+- copy run stdout/stderr if present
+- copy network diagnostics if present
+- write result.json
+
+8. Tests
+
+Add tests:
+- /init uses timeout for setup phase.
+- /init uses timeout for run phase.
+- setup exit code 124 maps to setup_timeout.
+- run exit code 124 maps to run_timeout.
+- /init writes network diagnostics when network enabled.
+- examples use verbose setup scripts.
+- examples use pip --timeout and --retries.
+
+Acceptance criteria:
+1. A hanging pip install exits with setup_timeout instead of appearing stuck forever.
+2. setup.stdout.log shows step-by-step progress.
+3. network diagnostics are visible in firecracker.log and results.
+4. failed setup workers are preserved with useful logs.

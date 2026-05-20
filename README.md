@@ -148,20 +148,20 @@ sparkvm recycle
             READ["Host reads results"]
             STATE{"Execution state"}
             PASS["Passed"]
-            CMD_FAIL["Command failed"]
+            CMD_FAIL["Command failed or phase timeout"]
             INFRA_FAIL["Infrastructure failed"]
             DELETE1["Delete worker directory"]
-            DELETE2["Return VMResult and delete worker"]
+            PRESERVE_RESULT["Preserve worker and write result.json"]
             PRESERVE["Preserve worker directory"]
             FAILURE["Redact logs and write failure.json"]
 
             SHUTDOWN --> READ
             READ --> STATE
             STATE -->|passed| PASS
-            STATE -->|setup or run failed| CMD_FAIL
+            STATE -->|setup run setup_timeout run_timeout| CMD_FAIL
             STATE -->|boot api timeout infra| INFRA_FAIL
             PASS --> DELETE1
-            CMD_FAIL --> DELETE2
+            CMD_FAIL --> PRESERVE_RESULT
             INFRA_FAIL --> PRESERVE
             PRESERVE --> FAILURE
         end
@@ -220,7 +220,23 @@ vm = SparkVM(
 
 `env` values are runtime-scoped: SparkVM writes them only to the temporary execution disk for the active run, scrubs them from preserved worker artifacts, and never stores raw values in rollout/result metadata. True in-memory secret delivery requires a future vsock guest-agent path.
 
+SparkVM also injects non-secret runtime config into `/job/.sparkvm/runtime.env`:
+- `SPARKVM_SETUP_TIMEOUT_SEC=300`
+- `SPARKVM_RUN_TIMEOUT_SEC=300`
+
+Guest `/init` enforces per-phase timeouts with `timeout` (when available). Exit code `124` maps to `setup_timeout` or `run_timeout`.
+
 Failure preservation defaults are metadata-first and disk-lightweight: SparkVM preserves `firecracker.log`, worker metadata (`result.json` / `failure.json`), and sanitized `results/`, while deleting per-run `rootfs.ext4` and `rollout.ext4` unless explicitly enabled with `keep_rootfs_on_failure=True` and/or `keep_disk_on_failure=True`.
+
+Recommended setup preflight commands for network-heavy installs:
+
+```bash
+ip addr || true
+ip route || true
+cat /etc/resolv.conf || true
+getent hosts pypi.org || true
+curl -Iv --max-time 10 https://pypi.org/simple/ || true
+```
 
 Custom Ubuntu runtime:
 
@@ -235,6 +251,46 @@ rollout = rollouts.create(
 
 result = SparkVM(runtime="ubuntu-24.04").run(rollout.id)
 ```     
+
+Dockerfile-first repo rollout:
+
+```python
+rollout = rollouts.create(
+    name="version-3",
+    mode="repo",
+    source=REPO_URL,
+    ref="main",
+    dockerfile="Dockerfile",
+)
+```
+
+Recommended Dockerfile pattern:
+
+```dockerfile
+FROM python:3.12-slim
+WORKDIR /workspace
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+COPY . .
+CMD ["pytest", "-q"]
+```
+
+Override the Docker command when needed:
+
+```python
+rollout = rollouts.create(
+    name="version-3-test",
+    mode="repo",
+    source=REPO_URL,
+    dockerfile="Dockerfile",
+    run_cmd="pytest tests/test_api.py -q",
+)
+```
+
+Notes:
+- Prefer putting dependency installation in the Dockerfile.
+- `run_cmd` is an execution override.
+- `setup_cmd` in Dockerfile mode is an advanced post-build patch step.
 
 
 

@@ -247,10 +247,13 @@ class ExecutionDiskAndVMRunTest(unittest.TestCase):
             "setup.stderr.log",
             "run.stdout.log",
             "run.stderr.log",
+            "network.stdout.log",
+            "network.stderr.log",
             "final_exit_code",
             "result.json",
             "failure.json",
             "env.sh",
+            "runtime.env",
             "network.env",
         ]
         for name in disallowed:

@@ -263,10 +263,16 @@ class ExecutionDisk:
                     )
 
                 status = "passed"
-                if setup is not None and setup.exit_code != 0:
+                if setup is not None and setup.exit_code == 124:
+                    status = "setup_timeout"
+                elif setup is not None and setup.exit_code != 0:
                     status = "setup_failed"
+                elif run is not None and run.exit_code == 124:
+                    status = "run_timeout"
                 elif run is not None and run.exit_code != 0:
                     status = "run_failed"
+                elif final_exit_code == 124:
+                    status = "run_timeout"
                 elif final_exit_code != 0:
                     status = "run_failed"
             else:
@@ -287,7 +293,12 @@ class ExecutionDisk:
                     )
                 final_exit_code = read_int_file(exit_code_path, fs_path="/exit_code")
                 run = PhaseResult(name="run", stdout=stdout, stderr=stderr, exit_code=final_exit_code)
-                status = "passed" if final_exit_code == 0 else "run_failed"
+                if final_exit_code == 0:
+                    status = "passed"
+                elif final_exit_code == 124:
+                    status = "run_timeout"
+                else:
+                    status = "run_failed"
 
             return VMResult(
                 rollout_id=self.rollout.id,

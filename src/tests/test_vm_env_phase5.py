@@ -11,6 +11,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sparkvm.disk import ExecutionDisk
+from sparkvm.errors import ExecutionDiskError
 from sparkvm.errors import FirecrackerBinaryNotInstalled
 from sparkvm.image import BaseImage
 from sparkvm.result import VMResult
@@ -134,6 +135,15 @@ class RuntimeFileAndFailureScrubTest(unittest.TestCase):
             disk.copy_rollout(runtime_files={".sparkvm/env.sh": "export X='1'\n"})
 
         self.assertIn("staged", captured)
+
+    def test_runtime_execution_files_include_runtime_env(self) -> None:
+        vm = SparkVM(home_dir=self.home, env={"OPENAI_API_KEY": "sk-123"}, network=True)
+        files = vm.runtime_execution_files(network_config=None)
+
+        self.assertIn(".sparkvm/runtime.env", files)
+        runtime_env = files[".sparkvm/runtime.env"]
+        self.assertIn("SPARKVM_SETUP_TIMEOUT_SEC=300", runtime_env)
+        self.assertIn("SPARKVM_RUN_TIMEOUT_SEC=300", runtime_env)
 
     def test_failure_json_contains_only_env_keys_and_scrubs_or_drops_disk(self) -> None:
         vm = SparkVM(home_dir=self.home, env={"OPENAI_API_KEY": "super-secret-token"})
@@ -416,6 +426,64 @@ class RuntimeFileAndFailureScrubTest(unittest.TestCase):
         worker = next((self.home / "workers").glob("vm-*"))
         result_text = (worker / "result.json").read_text(encoding="utf-8")
         self.assertNotIn(secret, result_text)
+
+    def test_extract_partial_results_handles_missing_files(self) -> None:
+        vm = SparkVM(home_dir=self.home)
+        execution_disk_path = self.home / "rollout.ext4"
+        execution_disk_path.write_bytes(b"fake-ext4")
+        output_results_dir = self.home / "worker" / "results"
+
+        with patch("sparkvm.vm.run_checked", return_value=None), patch("sparkvm.vm.unmount_ext4", return_value=None):
+            meta = vm.extract_partial_results_from_execution_disk(
+                execution_disk_path=execution_disk_path,
+                output_results_dir=output_results_dir,
+                env={},
+            )
+
+        self.assertFalse(meta["partial_results_extracted"])
+        self.assertEqual([], meta["files"])
+        self.assertIsNone(meta["partial_results_error"])
+
+    def test_extract_partial_results_handles_mount_failure(self) -> None:
+        vm = SparkVM(home_dir=self.home)
+        execution_disk_path = self.home / "rollout.ext4"
+        execution_disk_path.write_bytes(b"fake-ext4")
+        output_results_dir = self.home / "worker" / "results"
+
+        with patch("sparkvm.vm.run_checked", side_effect=ExecutionDiskError("mount failed")):
+            meta = vm.extract_partial_results_from_execution_disk(
+                execution_disk_path=execution_disk_path,
+                output_results_dir=output_results_dir,
+                env={},
+            )
+
+        self.assertFalse(meta["partial_results_extracted"])
+        self.assertIn("mount failed", str(meta["partial_results_error"]))
+
+    def test_extract_partial_results_redacts_env_values(self) -> None:
+        vm = SparkVM(home_dir=self.home, env={"OPENAI_API_KEY": "sk-secret"})
+        execution_disk_path = self.home / "rollout.ext4"
+        execution_disk_path.write_bytes(b"fake-ext4")
+        output_results_dir = self.home / "worker" / "results"
+
+        def _fake_mount(cmd, error_factory):  # noqa: ANN001
+            if cmd[:2] == ["mount", "-o"]:
+                mount_dir = Path(cmd[-1])
+                (mount_dir / "results").mkdir(parents=True, exist_ok=True)
+                (mount_dir / "results" / "run.stdout.log").write_text("token=sk-secret\n", encoding="utf-8")
+            return None
+
+        with patch("sparkvm.vm.run_checked", side_effect=_fake_mount), patch("sparkvm.vm.unmount_ext4", return_value=None):
+            meta = vm.extract_partial_results_from_execution_disk(
+                execution_disk_path=execution_disk_path,
+                output_results_dir=output_results_dir,
+                env={"OPENAI_API_KEY": "sk-secret"},
+            )
+
+        self.assertTrue(meta["partial_results_extracted"])
+        rendered = (output_results_dir / "run.stdout.log").read_text(encoding="utf-8")
+        self.assertNotIn("sk-secret", rendered)
+        self.assertIn("[REDACTED]", rendered)
 
 
 if __name__ == "__main__":

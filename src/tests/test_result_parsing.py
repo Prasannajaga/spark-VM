@@ -82,6 +82,37 @@ class ResultParsingTest(unittest.TestCase):
         self.assertEqual("run out\n", result.stdout)
         self.assertEqual("run err\n", result.stderr)
 
+    def test_setup_timeout_status(self) -> None:
+        result = self._read_with_mapping(
+            {
+                "/results/final_exit_code": "124\n",
+                "/results/setup.exit_code": "124\n",
+                "/results/setup.stdout.log": "setup start\n",
+                "/results/setup.stderr.log": "setup timeout\n",
+            }
+        )
+
+        self.assertEqual("setup_timeout", result.status)
+        self.assertEqual(124, result.exit_code)
+        self.assertIsNotNone(result.setup)
+        self.assertEqual(124, result.setup.exit_code if result.setup else -1)
+
+    def test_run_timeout_status(self) -> None:
+        result = self._read_with_mapping(
+            {
+                "/results/final_exit_code": "124\n",
+                "/results/setup.exit_code": "0\n",
+                "/results/run.exit_code": "124\n",
+                "/results/run.stdout.log": "run start\n",
+                "/results/run.stderr.log": "run timeout\n",
+            }
+        )
+
+        self.assertEqual("run_timeout", result.status)
+        self.assertEqual(124, result.exit_code)
+        self.assertIsNotNone(result.run)
+        self.assertEqual(124, result.run.exit_code if result.run else -1)
+
     def test_success_status(self) -> None:
         result = self._read_with_mapping(
             {

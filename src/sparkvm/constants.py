@@ -8,6 +8,8 @@ from pathlib import Path
 DEFAULT_VCPU = 1
 DEFAULT_MEMORY = "512M"
 DEFAULT_TIMEOUT_SEC = 30.0
+DEFAULT_SETUP_TIMEOUT_SEC = 300
+DEFAULT_RUN_TIMEOUT_SEC = 300
 DEFAULT_RUNTIME = "python-3.12-slim"
 DEFAULT_BASE_IMAGE = DEFAULT_RUNTIME
 DEFAULT_HOME_DIR = Path.home() / ".sparkvm"
@@ -141,11 +143,33 @@ configure_network() {
 }
 
 load_runtime_env() {
+  if [ -f /job/.sparkvm/runtime.env ]; then
+    set -a
+    . /job/.sparkvm/runtime.env
+    set +a
+  fi
+
   if [ -f /job/.sparkvm/env.sh ]; then
     set -a
     . /job/.sparkvm/env.sh
     set +a
   fi
+}
+
+run_with_timeout() {
+  timeout_sec="$1"
+  script="$2"
+  out_file="$3"
+  err_file="$4"
+
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$timeout_sec" sh "$script" > "$out_file" 2> "$err_file"
+    return "$?"
+  fi
+
+  echo "SparkVM: timeout command missing; phase timeout disabled" > /dev/console
+  sh "$script" > "$out_file" 2> "$err_file"
+  return "$?"
 }
 
 redact_to_console() {
@@ -189,26 +213,62 @@ print_phase_logs() {
 run_phase() {
   phase="$1"
   script="$2"
+  timeout_sec="$3"
+  out_file="/job/results/${phase}.stdout.log"
+  err_file="/job/results/${phase}.stderr.log"
 
-  echo "SparkVM: running ${script}" > /dev/console
-  sh "$script" > "/job/results/${phase}.stdout.log" 2> "/job/results/${phase}.stderr.log"
+  echo "SparkVM: ${phase} begin script=${script} timeout_sec=${timeout_sec}" > /dev/console
+  run_with_timeout "$timeout_sec" "$script" "$out_file" "$err_file"
   code=$?
-  echo "SparkVM: ${script} exit code=${code}" > /dev/console
+  if [ "$code" -eq 124 ]; then
+    echo "SparkVM: ${phase} timed out after ${timeout_sec}s" > /dev/console
+  fi
+  echo "SparkVM: ${phase} exit code=${code}" > /dev/console
   echo "$code" > "/job/results/${phase}.exit_code"
   print_phase_logs "$phase"
+  echo "SparkVM: ${phase} end" > /dev/console
 
   return "$code"
+}
+
+collect_network_diagnostics() {
+  if [ "${SPARKVM_NET_ENABLED:-0}" != "1" ]; then
+    return 0
+  fi
+
+  out_file="/job/results/network.stdout.log"
+  err_file="/job/results/network.stderr.log"
+  : > "$out_file"
+  : > "$err_file"
+
+  echo "SparkVM: network diagnostics begin" > /dev/console
+  ip addr > /dev/console 2>&1 || true
+  ip route > /dev/console 2>&1 || true
+  cat /etc/resolv.conf > /dev/console 2>&1 || true
+  echo "SparkVM: network diagnostics end" > /dev/console
+
+  {
+    echo "[network] ip addr"
+    ip addr
+    echo ""
+    echo "[network] ip route"
+    ip route
+    echo ""
+    echo "[network] /etc/resolv.conf"
+    cat /etc/resolv.conf
+  } > "$out_file" 2> "$err_file" || true
 }
 
 prepare_linux_runtime
 mount_job_disk
 configure_network
 load_runtime_env
+collect_network_diagnostics
 
 cd /job
 
 if [ -f /job/setup.sh ]; then
-  run_phase "setup" "/job/setup.sh"
+  run_phase "setup" "/job/setup.sh" "${SPARKVM_SETUP_TIMEOUT_SEC:-300}"
   setup_code=$?
 else
   setup_code=0
@@ -227,7 +287,7 @@ if [ ! -f /job/run.sh ]; then
   shutdown_vm
 fi
 
-run_phase "run" "/job/run.sh"
+run_phase "run" "/job/run.sh" "${SPARKVM_RUN_TIMEOUT_SEC:-300}"
 run_code=$?
 
 echo "$run_code" > /job/results/final_exit_code
@@ -262,6 +322,7 @@ BUSYBOX_CANDIDATE_PATHS = ("/bin/busybox", "/usr/bin/busybox", "/sbin/busybox", 
 
 __all__ = [
     "DEFAULT_VCPU", "DEFAULT_MEMORY", "DEFAULT_TIMEOUT_SEC", "DEFAULT_RUNTIME", "DEFAULT_BASE_IMAGE", "DEFAULT_HOME_DIR",
+    "DEFAULT_SETUP_TIMEOUT_SEC", "DEFAULT_RUN_TIMEOUT_SEC",
     "MEMORY_RE", "ENV_KEY_RE", "WORKER_ID_RE", "ROLLOUT_ID_RE",
     "METADATA_VERSION", "SUPPORTED_MODES", "SCRIPT_DEFAULT_DISK_MB", "REPO_DEFAULT_DISK_MB", "GIT_URL_PREFIXES", "COPYTREE_IGNORE", "ROLLOUT_METADATA_VERSION",
     "NET_SETUP_PRIVILEGE_MESSAGE",
