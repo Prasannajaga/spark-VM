@@ -19,7 +19,7 @@ from sparkvm.image import normalize_runtime_name
 from sparkvm.runtime_store import list_runtime_records, runtime_paths
 from sparkvm.runtimes.debian import SPARKVM_INIT_TEMPLATE
 
-from sparkvm.constants import IP_CANDIDATE_PATHS, SHUTDOWN_FALLBACK_PATHS
+from sparkvm.constants import BUSYBOX_CANDIDATE_PATHS, IP_CANDIDATE_PATHS, SHUTDOWN_FALLBACK_PATHS
 
 
 def utc_now_iso() -> str:
@@ -65,9 +65,11 @@ def run_docker_export(container_id: str, rootfs_dir: Path) -> None:
 
 
 def assert_rootfs_basics(rootfs_dir: Path) -> None:
-    sh_path = rootfs_dir / "bin" / "sh"
-    if not sh_path.exists():
-        raise SparkVMSetupError(f"Runtime rootfs missing required file/tool: /bin/sh. Checked rootfs: {rootfs_dir}.")
+    sh_candidates = [rootfs_dir / "bin/sh", rootfs_dir / "usr/bin/sh"]
+    if not any(path.exists() for path in sh_candidates):
+        raise SparkVMSetupError(
+            f"Runtime rootfs missing required file/tool: /bin/sh or /usr/bin/sh. Checked rootfs: {rootfs_dir}."
+        )
 
     init_path = rootfs_dir / "init"
     if not init_path.exists():
@@ -80,26 +82,50 @@ def assert_rootfs_basics(rootfs_dir: Path) -> None:
     mount_candidates = [rootfs_dir / "bin/mount", rootfs_dir / "usr/bin/mount"]
     if not any(path.exists() for path in mount_candidates):
         raise SparkVMSetupError(
-            f"Runtime rootfs missing recommended tool: mount command. Checked rootfs: {rootfs_dir}."
+            f"Runtime rootfs missing required file/tool: mount command. Checked rootfs: {rootfs_dir}."
         )
-
 
 def runtime_validation_metadata(rootfs_dir: Path) -> dict[str, object]:
     ip_present = [candidate for candidate in IP_CANDIDATE_PATHS if (rootfs_dir / candidate.lstrip("/")).exists()]
-    shutdown_present = [
+    shutdown_paths = [
         candidate for candidate in SHUTDOWN_FALLBACK_PATHS if (rootfs_dir / candidate.lstrip("/")).exists()
     ]
+    busybox_paths = [
+        candidate for candidate in BUSYBOX_CANDIDATE_PATHS if (rootfs_dir / candidate.lstrip("/")).exists()
+    ]
+    ca_cert_candidates = ["/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/cert.pem"]
+    ca_cert_paths = [candidate for candidate in ca_cert_candidates if (rootfs_dir / candidate.lstrip("/")).exists()]
+    curl_candidates = ["/usr/bin/curl", "/bin/curl"]
+    wget_candidates = ["/usr/bin/wget", "/bin/wget"]
+    curl_paths = [candidate for candidate in curl_candidates if (rootfs_dir / candidate.lstrip("/")).exists()]
+    wget_paths = [candidate for candidate in wget_candidates if (rootfs_dir / candidate.lstrip("/")).exists()]
 
     warnings: list[str] = []
     if not ip_present:
         warnings.append("Runtime image does not contain ip command. network=True will fail unless installed.")
-    if not shutdown_present:
-        warnings.append("Runtime image does not contain poweroff/halt/reboot binaries; /init shutdown fallback loop may be used.")
+    if not shutdown_paths and not busybox_paths:
+        warnings.append(
+            "Runtime image does not contain poweroff/halt/reboot/busybox. "
+            "Guest shutdown may rely on /proc/sysrq-trigger fallback."
+        )
+    if not ca_cert_paths:
+        warnings.append("Runtime image does not contain CA certificates; HTTPS calls may fail.")
+    if not curl_paths and not wget_paths:
+        warnings.append("Runtime image does not contain curl/wget. Optional, but useful for debugging.")
 
     return {
         "ip_command_present": bool(ip_present),
         "ip_command_paths": ip_present,
-        "shutdown_command_present": bool(shutdown_present),
+        "shutdown_command_present": bool(shutdown_paths),
+        "shutdown_command_paths": shutdown_paths,
+        "busybox_present": bool(busybox_paths),
+        "busybox_paths": busybox_paths,
+        "ca_certificates_present": bool(ca_cert_paths),
+        "ca_certificates_paths": ca_cert_paths,
+        "curl_present": bool(curl_paths),
+        "curl_paths": curl_paths,
+        "wget_present": bool(wget_paths),
+        "wget_paths": wget_paths,
         "warnings": warnings,
     }
 

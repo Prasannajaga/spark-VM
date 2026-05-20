@@ -5,8 +5,9 @@ import json
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -63,6 +64,13 @@ class CLIWorkersTest(unittest.TestCase):
             code = cli_main(argv)
         return code, stream.getvalue()
 
+    def _run_cli_with_stderr(self, argv: list[str]) -> tuple[int, str, str]:
+        out_stream = io.StringIO()
+        err_stream = io.StringIO()
+        with redirect_stdout(out_stream), redirect_stderr(err_stream):
+            code = cli_main(argv)
+        return code, out_stream.getvalue(), err_stream.getvalue()
+
     def test_workers_list(self) -> None:
         code, out = self._run_cli(["--home-dir", str(self.home), "workers", "list"])
         self.assertEqual(0, code)
@@ -104,6 +112,28 @@ class CLIWorkersTest(unittest.TestCase):
         self.assertEqual(0, code)
         self.assertIn("run.stdout.log", out)
         self.assertIn("hello", out)
+
+    def test_workers_view_live_streams_log_chunks(self) -> None:
+        chunks = iter(["lineA\n", "lineB\n"])
+
+        def _fake_stream(_self, vm_id: str, *, tail: int | None = None, poll_interval_sec: float = 0.2):
+            del tail, poll_interval_sec
+            self.assertEqual("vm-abc123", vm_id)
+            for chunk in chunks:
+                yield chunk
+
+        with patch("sparkvm.workers.Workers.stream_log", _fake_stream):
+            code, out = self._run_cli(["--home-dir", str(self.home), "workers", "view", "vm-abc123", "--live"])
+        self.assertEqual(0, code)
+        self.assertIn("lineA", out)
+        self.assertIn("lineB", out)
+
+    def test_workers_view_live_rejects_conflicting_flags(self) -> None:
+        code, _out, err = self._run_cli_with_stderr(
+            ["--home-dir", str(self.home), "workers", "view", "vm-abc123", "--live", "--result"]
+        )
+        self.assertEqual(1, code)
+        self.assertIn("--live can only be used with default log view", err)
 
     def test_workers_delete_force(self) -> None:
         code, _ = self._run_cli(["--home-dir", str(self.home), "workers", "delete", "vm-abc123", "--force"])

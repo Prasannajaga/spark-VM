@@ -10,6 +10,13 @@ from sparkvm.runtimes.debian import SPARKVM_INIT_TEMPLATE
 
 
 class InitTemplatePhase5Test(unittest.TestCase):
+    def test_template_contains_universal_bootstrap_functions(self) -> None:
+        self.assertIn("prepare_linux_runtime()", SPARKVM_INIT_TEMPLATE)
+        self.assertIn("mount_job_disk()", SPARKVM_INIT_TEMPLATE)
+        self.assertIn("configure_network()", SPARKVM_INIT_TEMPLATE)
+        self.assertIn("load_runtime_env()", SPARKVM_INIT_TEMPLATE)
+        self.assertIn("run_phase()", SPARKVM_INIT_TEMPLATE)
+
     def test_template_contains_network_env_sourcing(self) -> None:
         self.assertIn("/job/.sparkvm/network.env", SPARKVM_INIT_TEMPLATE)
         self.assertIn("ip link set eth0 up", SPARKVM_INIT_TEMPLATE)
@@ -21,14 +28,35 @@ class InitTemplatePhase5Test(unittest.TestCase):
         self.assertIn("set +a", SPARKVM_INIT_TEMPLATE)
 
     def test_template_contains_tmpfs_mounts(self) -> None:
+        self.assertIn("mountpoint -q /proc || mount -t proc proc /proc", SPARKVM_INIT_TEMPLATE)
+        self.assertIn("mountpoint -q /sys || mount -t sysfs sysfs /sys", SPARKVM_INIT_TEMPLATE)
+        self.assertIn("mountpoint -q /dev || mount -t devtmpfs devtmpfs /dev", SPARKVM_INIT_TEMPLATE)
+        self.assertIn("mountpoint -q /dev/pts || mount -t devpts devpts /dev/pts", SPARKVM_INIT_TEMPLATE)
         self.assertIn("mount -t tmpfs tmpfs /tmp", SPARKVM_INIT_TEMPLATE)
         self.assertIn("mount -t tmpfs tmpfs /run", SPARKVM_INIT_TEMPLATE)
         self.assertIn("mount -t tmpfs tmpfs /var/tmp", SPARKVM_INIT_TEMPLATE)
+        self.assertIn("ln -sf /proc/self/fd /dev/fd", SPARKVM_INIT_TEMPLATE)
+        self.assertIn("ln -sf /proc/self/fd/0 /dev/stdin", SPARKVM_INIT_TEMPLATE)
+        self.assertIn("ln -sf /proc/self/fd/1 /dev/stdout", SPARKVM_INIT_TEMPLATE)
+        self.assertIn("ln -sf /proc/self/fd/2 /dev/stderr", SPARKVM_INIT_TEMPLATE)
 
     def test_template_contains_shutdown_fallback(self) -> None:
         self.assertIn("if command -v poweroff", SPARKVM_INIT_TEMPLATE)
         self.assertIn("if command -v halt", SPARKVM_INIT_TEMPLATE)
         self.assertIn("if command -v reboot", SPARKVM_INIT_TEMPLATE)
+
+    def test_template_runs_rollout_shell_scripts_generically(self) -> None:
+        self.assertIn('sh "$script"', SPARKVM_INIT_TEMPLATE)
+        self.assertIn('run_phase "setup" "/job/setup.sh"', SPARKVM_INIT_TEMPLATE)
+        self.assertIn('run_phase "run" "/job/run.sh"', SPARKVM_INIT_TEMPLATE)
+        self.assertIn("export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", SPARKVM_INIT_TEMPLATE)
+        self.assertNotIn("python3 ", SPARKVM_INIT_TEMPLATE)
+        self.assertNotIn("python ", SPARKVM_INIT_TEMPLATE)
+        self.assertNotIn("node ", SPARKVM_INIT_TEMPLATE)
+        self.assertNotIn("pip ", SPARKVM_INIT_TEMPLATE)
+        self.assertNotIn("go ", SPARKVM_INIT_TEMPLATE)
+        self.assertNotIn("cargo ", SPARKVM_INIT_TEMPLATE)
+        self.assertNotIn("java ", SPARKVM_INIT_TEMPLATE)
 
 
 if __name__ == "__main__":

@@ -21,14 +21,37 @@ REF = "main"
 
 # Optional setup command; set to None or "" to skip setup.sh generation.
 # With network=True, internet-dependent installs (pip/apt/etc.) can run in-guest.
-SETUP_CMD = "pip install -r requirements.txt"
-RUN_CMD = "uvicorn src.main:app --reload"
+SETUP_CMD = """
+set -eu
 
+which python3
+python3 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -r requirements.txt
+"""
+
+RUN_CMD = """
+set -eu
+
+.venv/bin/uvicorn src.main:app --host 127.0.0.1 --port 8000 &
+server_pid=$!
+
+sleep 3
+
+.venv/bin/python - <<'PY'
+import urllib.request
+resp = urllib.request.urlopen("http://127.0.0.1:8000")
+print("status:", resp.status)
+PY
+
+kill "$server_pid"
+wait "$server_pid" || true
+"""
 
 def main() -> int:
     manager = Rollouts()
     rollout = manager.create(
-        name="github-repo-run",
+        name="version-3",
         mode="repo",
         source=REPO_URL,
         ref=REF,
@@ -52,7 +75,7 @@ def main() -> int:
         vcpu=2,
         memory="2G",
         timeout=500.0,
-        runtime="ubuntu-24.04",
+        runtime="sparkvm-ubuntu-base-24.04",
         network=True,
         # Optional: pass runtime-only env vars for setup.sh/run.sh.
         env=runtime_env,

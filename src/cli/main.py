@@ -99,6 +99,7 @@ def build_parser() -> argparse.ArgumentParser:
     workers_view = workers_subparsers.add_parser("view", help="View worker details/log")
     workers_view.add_argument("vm_id", help="Worker vm id (e.g. vm-02e67edfc7a0)")
     workers_view.add_argument("--tail", type=int, default=None, help="Show only last N log lines")
+    workers_view.add_argument("--live", action="store_true", help="Stream firecracker.log updates live")
     workers_view.add_argument("--result", action="store_true", help="Print result.json for the worker")
     workers_view.add_argument("--failure", action="store_true", help="Print failure.json for the worker")
     workers_view.add_argument("--results", action="store_true", help="Print sanitized worker result logs")
@@ -159,12 +160,16 @@ def run_workers_view(
     vm_id: str,
     *,
     tail: int | None,
+    live: bool,
     show_result: bool,
     show_failure: bool,
     show_results: bool,
     show_path: bool,
 ) -> int:
     workers = Workers(home_dir=home_dir)
+    if live and (show_result or show_failure or show_results or show_path):
+        raise SparkVMError("--live can only be used with default log view.")
+
     if show_path:
         print(workers.path(vm_id))
         return 0
@@ -181,6 +186,14 @@ def run_workers_view(
 
     if show_results:
         print(workers.results_text(vm_id))
+        return 0
+
+    if live:
+        try:
+            for chunk in workers.stream_log(vm_id, tail=tail):
+                print(chunk, end="", flush=True)
+        except KeyboardInterrupt:
+            return 0
         return 0
 
     print(workers.log_text(vm_id, tail=tail))
@@ -252,6 +265,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.home_dir,
                     args.vm_id,
                     tail=args.tail,
+                    live=args.live,
                     show_result=args.result,
                     show_failure=args.failure,
                     show_results=args.results,

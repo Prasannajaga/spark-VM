@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -135,6 +136,47 @@ class Workers:
             return ""
         lines = text.splitlines()
         return "\n".join(lines[-tail:])
+
+    def stream_log(self, vm_id: str, *, tail: int | None = None, poll_interval_sec: float = 0.2):
+        worker = self.get_by_id(vm_id)
+        log_path = worker.firecracker_log_path
+
+        # Emit initial snapshot (optionally tailed), then follow appends.
+        initial = self.log_text(vm_id, tail=tail)
+        if initial:
+            if not initial.endswith("\n"):
+                initial += "\n"
+            yield initial
+
+        offset = 0
+        try:
+            if log_path.exists():
+                offset = log_path.stat().st_size
+        except OSError:
+            offset = 0
+
+        while True:
+            try:
+                if not log_path.exists():
+                    time.sleep(poll_interval_sec)
+                    continue
+
+                size = log_path.stat().st_size
+                if size < offset:
+                    # Log was truncated/rotated.
+                    offset = 0
+                if size == offset:
+                    time.sleep(poll_interval_sec)
+                    continue
+
+                with log_path.open("r", encoding="utf-8", errors="replace") as handle:
+                    handle.seek(offset)
+                    chunk = handle.read()
+                offset = size
+                if chunk:
+                    yield chunk
+            except OSError:
+                time.sleep(poll_interval_sec)
 
     def failure_json(self, vm_id: str) -> dict[str, Any]:
         worker_path = self.path(vm_id)

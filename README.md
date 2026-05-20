@@ -54,6 +54,133 @@ sparkvm recycle
 └── cache/
 ```
 
+## High level design 
+
+![SparkVM workflow](./assets/version2.png)
+
+```mermaid
+ flowchart LR
+    U["User CLI or SDK"]
+
+    subgraph SPARK["SparkVM"]
+        direction LR
+
+        subgraph SETUP["Setup layer"]
+            direction TB
+            SETUP_CMD["sparkvm setup"]
+            BIN["bin/firecracker"]
+            KERNEL["images/vmlinux"]
+            ROOTFS_IMG["images/runtime.ext4"]
+            RUNTIME_JSON["images/runtime.json"]
+            CACHE["cache"]
+            RUNTIMES["runtimes"]
+
+            SETUP_CMD --> BIN
+            SETUP_CMD --> KERNEL
+            SETUP_CMD --> ROOTFS_IMG
+            SETUP_CMD --> RUNTIME_JSON
+            SETUP_CMD --> CACHE
+            SETUP_CMD --> RUNTIMES
+        end
+
+        subgraph ROLLOUTS["Rollouts layer"]
+            direction TB
+            CREATE["Rollouts.create"]
+            R_META["rollouts metadata.json"]
+            R_DIR["rollouts rollout id"]
+            R_JSON["rollout.json"]
+            SETUP_SH["setup.sh optional"]
+            RUN_SH["run.sh required"]
+            SOURCE["repo or files"]
+
+            CREATE --> R_META
+            CREATE --> R_DIR
+            R_DIR --> R_JSON
+            R_DIR --> SETUP_SH
+            R_DIR --> RUN_SH
+            R_DIR --> SOURCE
+        end
+
+        subgraph WRAPPER["Firecracker wrapper layer"]
+            direction TB
+            RUN["SparkVM.run"]
+            RESOLVE["Resolve rollout and runtime"]
+            WORKER["Create worker directory"]
+            ROOTFS["Copy rootfs"]
+            JOBDISK["Build rollout disk"]
+            INJECT["Inject runtime files"]
+            FC["Start firecracker"]
+            API["Configure microVM"]
+            START["Start instance"]
+
+            RUN --> RESOLVE
+            RESOLVE --> WORKER
+            WORKER --> ROOTFS
+            WORKER --> JOBDISK
+            JOBDISK --> INJECT
+            ROOTFS --> FC
+            INJECT --> FC
+            FC --> API
+            API --> START
+        end
+
+        subgraph VM["Guest microVM"]
+            direction TB
+            BOOT["Kernel boots"]
+            INIT["Run init"]
+            MOUNT["Mount job disk"]
+            SETUP_RUN["Run setup if exists"]
+            MAIN_RUN["Run required run script"]
+            WRITE["Write result files"]
+            SHUTDOWN["Power off"]
+
+            START --> BOOT
+            BOOT --> INIT
+            INIT --> MOUNT
+            MOUNT --> SETUP_RUN
+            SETUP_RUN --> MAIN_RUN
+            MAIN_RUN --> WRITE
+            WRITE --> SHUTDOWN
+        end
+
+        subgraph CLEANUP["Result and cleanup"]
+            direction TB
+            READ["Host reads results"]
+            STATE{"Execution state"}
+            PASS["Passed"]
+            CMD_FAIL["Command failed"]
+            INFRA_FAIL["Infrastructure failed"]
+            DELETE1["Delete worker directory"]
+            DELETE2["Return VMResult and delete worker"]
+            PRESERVE["Preserve worker directory"]
+            FAILURE["Redact logs and write failure.json"]
+
+            SHUTDOWN --> READ
+            READ --> STATE
+            STATE -->|passed| PASS
+            STATE -->|setup or run failed| CMD_FAIL
+            STATE -->|boot api timeout infra| INFRA_FAIL
+            PASS --> DELETE1
+            CMD_FAIL --> DELETE2
+            INFRA_FAIL --> PRESERVE
+            PRESERVE --> FAILURE
+        end
+
+        BIN -.-> FC
+        KERNEL -.-> RESOLVE
+        ROOTFS_IMG -.-> RESOLVE
+        R_META -.-> RESOLVE
+        SOURCE -.-> JOBDISK
+        RUN_SH -.-> JOBDISK
+        SETUP_SH -.-> JOBDISK
+    end
+
+    U --> SETUP_CMD
+    U --> CREATE
+    U --> RUN
+
+```
+
 
 ## Python usage
 
