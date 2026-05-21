@@ -20,13 +20,11 @@ from .fsops import ensure_dir, read_json, remove_file, write_json_atomic, write_
 INIT_TEMPLATE_VERSION = "sparkvm-init-template-v1"
 
 
-@dataclass(frozen=True)
-class ResolvedRunCommand:
-    source: str
-    working_dir: str
-    command: str
-    entrypoint: list[str] | str | None
-    cmd: list[str] | str | None
+from .utils import (
+    ResolvedCommand as ResolvedRunCommand,
+    now_utc_iso,
+    resolve_container_command as resolve_run_command,
+)
 
 
 @dataclass(frozen=True)
@@ -41,76 +39,11 @@ class BuiltImage:
     created_at: str
 
 
-def now_utc_iso() -> str:
-    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
 def image_id_for_rollout(rollout_id: str) -> str:
     return f"image-{rollout_id}"
 
 
-def _normalize_command_value(value: Any) -> list[str] | str | None:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        stripped = value.strip()
-        return stripped if stripped else None
-    if isinstance(value, (list, tuple)):
-        parts = [str(part) for part in value if str(part).strip()]
-        return parts if parts else None
-    raise RolloutConfigError(f"Unsupported Docker command value type: {type(value).__name__}")
-
-
-def _command_value_to_shell(value: list[str] | str | None) -> str | None:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        stripped = value.strip()
-        return stripped if stripped else None
-    if isinstance(value, list):
-        parts = [str(part) for part in value if str(part).strip()]
-        if not parts:
-            return None
-        return " ".join(shlex.quote(part) for part in parts)
-    raise RolloutConfigError(f"Unsupported Docker command value type: {type(value).__name__}")
-
-
-def resolve_run_command(
-    *,
-    run_cmd: str | None,
-    docker_working_dir: str | None,
-    docker_entrypoint: Any,
-    docker_cmd: Any,
-) -> ResolvedRunCommand:
-    working_dir = docker_working_dir.strip() if isinstance(docker_working_dir, str) and docker_working_dir.strip() else "/workspace"
-    entrypoint = _normalize_command_value(docker_entrypoint)
-    cmd = _normalize_command_value(docker_cmd)
-
-    if isinstance(run_cmd, str) and run_cmd.strip():
-        return ResolvedRunCommand(
-            source="run_cmd",
-            working_dir=working_dir,
-            command=run_cmd.strip(),
-            entrypoint=entrypoint,
-            cmd=cmd,
-        )
-
-    entrypoint_shell = _command_value_to_shell(entrypoint)
-    cmd_shell = _command_value_to_shell(cmd)
-    if entrypoint_shell is None and cmd_shell is None:
-        raise RolloutConfigError("Dockerfile rollout requires either run_cmd or Dockerfile CMD/ENTRYPOINT.")
-
-    command = f"{entrypoint_shell} {cmd_shell}" if entrypoint_shell and cmd_shell else (entrypoint_shell or cmd_shell or "")
-    return ResolvedRunCommand(
-        source="docker_config",
-        working_dir=working_dir,
-        command=command,
-        entrypoint=entrypoint,
-        cmd=cmd,
-    )
-
-
-def _chown_owner(path: Path, owner: str | None) -> None:
+def chown_owner(path: Path, owner: str | None) -> None:
     if owner is None or not owner.strip():
         return
     user: str | None = owner
@@ -122,7 +55,7 @@ def _chown_owner(path: Path, owner: str | None) -> None:
     shutil.chown(path, user=user, group=group)
 
 
-def _append_log(path: Path, text: str) -> None:
+def append_log(path: Path, text: str) -> None:
     ensure_dir(path.parent, exist_ok=True)
     with path.open("a", encoding="utf-8", errors="replace") as handle:
         handle.write(text)
@@ -130,18 +63,18 @@ def _append_log(path: Path, text: str) -> None:
             handle.write("\n")
 
 
-def _run_checked_with_logs(cmd: list[str], *, stdout_log: Path, stderr_log: Path) -> subprocess.CompletedProcess[str]:
+def run_checked_with_logs(cmd: list[str], *, stdout_log: Path, stderr_log: Path) -> subprocess.CompletedProcess[str]:
     try:
         completed = run_checked(cmd, error_factory=RolloutBuildError)
     except RolloutBuildError as exc:
-        _append_log(stderr_log, str(exc))
+        append_log(stderr_log, str(exc))
         raise
-    _append_log(stdout_log, completed.stdout or "")
-    _append_log(stderr_log, completed.stderr or "")
+    append_log(stdout_log, completed.stdout or "")
+    append_log(stderr_log, completed.stderr or "")
     return completed
 
 
-def _run_streamed_to_logs(cmd: list[str], *, stdout_log: Path, stderr_log: Path) -> None:
+def run_streamed_to_logs(cmd: list[str], *, stdout_log: Path, stderr_log: Path) -> None:
     ensure_dir(stdout_log.parent, exist_ok=True)
     with stdout_log.open("ab") as stdout_handle, stderr_log.open("ab") as stderr_handle:
         try:
@@ -152,8 +85,8 @@ def _run_streamed_to_logs(cmd: list[str], *, stdout_log: Path, stderr_log: Path)
         raise RolloutBuildError(f"Command failed: {' '.join(cmd)}. See build logs in {stdout_log.parent}.")
 
 
-def _inspect_image(image_tag: str, *, stdout_log: Path, stderr_log: Path) -> dict[str, Any]:
-    inspect_result = _run_checked_with_logs(
+def inspect_image(image_tag: str, *, stdout_log: Path, stderr_log: Path) -> dict[str, Any]:
+    inspect_result = run_checked_with_logs(
         ["docker", "image", "inspect", image_tag], stdout_log=stdout_log, stderr_log=stderr_log
     )
     try:
@@ -165,7 +98,7 @@ def _inspect_image(image_tag: str, *, stdout_log: Path, stderr_log: Path) -> dic
     return payload[0]
 
 
-def _tar_contains_workspace(tar_path: Path) -> bool:
+def tar_contains_workspace(tar_path: Path) -> bool:
     for candidate in ("workspace", "workspace/", "./workspace", "./workspace/"):
         try:
             completed = subprocess.run(["tar", "-tf", str(tar_path), candidate], capture_output=True, text=True, check=False)
@@ -176,7 +109,7 @@ def _tar_contains_workspace(tar_path: Path) -> bool:
     return False
 
 
-def _validate_exported_rootfs(rootfs_dir: Path) -> None:
+def validate_exported_rootfs(rootfs_dir: Path) -> None:
     init_path = rootfs_dir / "init"
     if not init_path.exists():
         raise RolloutBuildError("Exported rootfs is missing /init after injection.")
@@ -216,7 +149,7 @@ def convert_docker_export_to_ext4(
             ensure_dir(mount_dir, exist_ok=True)
 
             try:
-                _run_checked_with_logs(
+                run_checked_with_logs(
                     ["tar", "-xf", str(tar_path), "-C", str(rootfs_dir)],
                     stdout_log=build_log_stdout,
                     stderr_log=build_log_stderr,
@@ -227,20 +160,20 @@ def convert_docker_export_to_ext4(
                 init_path.chmod(0o755)
                 ensure_dir(rootfs_dir / "job", exist_ok=True)
                 ensure_dir(rootfs_dir / "job" / "results", exist_ok=True)
-                _validate_exported_rootfs(rootfs_dir)
+                validate_exported_rootfs(rootfs_dir)
 
                 remove_file(tmp_image, missing_ok=True)
-                _run_checked_with_logs(
+                run_checked_with_logs(
                     ["dd", "if=/dev/zero", f"of={tmp_image}", "bs=1M", f"count={disk_mb}", "status=none"],
                     stdout_log=build_log_stdout,
                     stderr_log=build_log_stderr,
                 )
-                _run_checked_with_logs(
+                run_checked_with_logs(
                     ["mkfs.ext4", "-F", str(tmp_image)],
                     stdout_log=build_log_stdout,
                     stderr_log=build_log_stderr,
                 )
-                _run_checked_with_logs(
+                run_checked_with_logs(
                     ["mount", "-o", "loop", str(tmp_image), str(mount_dir)],
                     stdout_log=build_log_stdout,
                     stderr_log=build_log_stderr,
@@ -248,31 +181,31 @@ def convert_docker_export_to_ext4(
                 mounted = True
 
                 try:
-                    _run_checked_with_logs(
+                    run_checked_with_logs(
                         ["rsync", "-aHAX", "--numeric-ids", f"{rootfs_dir}/", str(mount_dir) + "/"],
                         stdout_log=build_log_stdout,
                         stderr_log=build_log_stderr,
                     )
                 except (ValueError, RolloutBuildError):
-                    _run_checked_with_logs(
+                    run_checked_with_logs(
                         ["cp", "-a", f"{rootfs_dir}/.", str(mount_dir)],
                         stdout_log=build_log_stdout,
                         stderr_log=build_log_stderr,
                     )
-                _run_checked_with_logs(["sync"], stdout_log=build_log_stdout, stderr_log=build_log_stderr)
+                run_checked_with_logs(["sync"], stdout_log=build_log_stdout, stderr_log=build_log_stderr)
             finally:
                 if mounted:
                     try:
-                        _run_checked_with_logs(["umount", str(mount_dir)], stdout_log=build_log_stdout, stderr_log=build_log_stderr)
+                        run_checked_with_logs(["umount", str(mount_dir)], stdout_log=build_log_stdout, stderr_log=build_log_stderr)
                     except Exception:
-                        _run_checked_with_logs(["umount", "-l", str(mount_dir)], stdout_log=build_log_stdout, stderr_log=build_log_stderr)
+                        run_checked_with_logs(["umount", "-l", str(mount_dir)], stdout_log=build_log_stdout, stderr_log=build_log_stderr)
                     finally:
                         mounted = False
 
         try:
             os.replace(tmp_image, output_path)
             output_path.chmod(0o644)
-            _chown_owner(output_path, owner)
+            chown_owner(output_path, owner)
         except Exception:
             remove_file(tmp_image, missing_ok=True)
             raise
@@ -282,7 +215,7 @@ def convert_docker_export_to_ext4(
         raise
 
 
-def _load_images_metadata(path: Path) -> dict[str, Any]:
+def load_images_metadata(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {"version": 1, "images": []}
     try:
@@ -297,9 +230,9 @@ def _load_images_metadata(path: Path) -> dict[str, Any]:
     return {"version": payload.get("version", 1) if isinstance(payload.get("version", 1), int) else 1, "images": images}
 
 
-def _update_images_metadata(images_dir: Path, image_payload: dict[str, Any]) -> None:
+def update_images_metadata(images_dir: Path, image_payload: dict[str, Any]) -> None:
     metadata_path = images_dir / "metadata.json"
-    metadata = _load_images_metadata(metadata_path)
+    metadata = load_images_metadata(metadata_path)
     image_id = image_payload.get("id")
     kept = [entry for entry in metadata["images"] if not (isinstance(entry, dict) and entry.get("id") == image_id)]
     kept.append(
@@ -356,20 +289,20 @@ class RolloutImageBuilder:
         container_created = False
         try:
             build_cmd = ["docker", "build", "-f", str(dockerfile_path), "-t", docker_tag, str(source_dir)]
-            _run_streamed_to_logs(build_cmd, stdout_log=stdout_log, stderr_log=stderr_log)
+            run_streamed_to_logs(build_cmd, stdout_log=stdout_log, stderr_log=stderr_log)
 
-            inspect_payload = _inspect_image(docker_tag, stdout_log=stdout_log, stderr_log=stderr_log)
+            inspect_payload = inspect_image(docker_tag, stdout_log=stdout_log, stderr_log=stderr_log)
             config = inspect_payload.get("Config", {})
             if not isinstance(config, dict):
                 config = {}
 
-            _run_checked_with_logs(
+            run_checked_with_logs(
                 ["docker", "create", "--name", container_name, docker_tag],
                 stdout_log=stdout_log,
                 stderr_log=stderr_log,
             )
             container_created = True
-            _run_checked_with_logs(
+            run_checked_with_logs(
                 ["docker", "export", "-o", str(rootfs_tar), container_name],
                 stdout_log=stdout_log,
                 stderr_log=stderr_log,
@@ -377,10 +310,10 @@ class RolloutImageBuilder:
 
             docker_working_dir = config.get("WorkingDir") if isinstance(config.get("WorkingDir"), str) else None
             if not (isinstance(docker_working_dir, str) and docker_working_dir.strip()):
-                docker_working_dir = "/workspace" if _tar_contains_workspace(rootfs_tar) else "/"
+                docker_working_dir = "/workspace" if tar_contains_workspace(rootfs_tar) else "/"
             resolved = resolve_run_command(
                 run_cmd=run_cmd,
-                docker_working_dir=docker_working_dir,
+                working_dir=docker_working_dir,
                 docker_entrypoint=config.get("Entrypoint"),
                 docker_cmd=config.get("Cmd"),
             )
@@ -421,7 +354,7 @@ class RolloutImageBuilder:
                 "created_at": created_at,
             }
             write_json_atomic(image_metadata_path, image_payload, pretty=True)
-            _update_images_metadata(image_path.parent, image_payload)
+            update_images_metadata(image_path.parent, image_payload)
             write_json_atomic(
                 build_json_path,
                 {
@@ -450,7 +383,7 @@ class RolloutImageBuilder:
         finally:
             if container_created:
                 try:
-                    _run_checked_with_logs(
+                    run_checked_with_logs(
                         ["docker", "rm", "-f", container_name],
                         stdout_log=stdout_log,
                         stderr_log=stderr_log,

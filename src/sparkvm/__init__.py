@@ -1,7 +1,6 @@
 """SparkVM public API."""
 
 from .errors import SparkVMError
-from .job import VMJob, VMJobs
 from .result import VMResult
 from .rollouts import Rollout, Rollouts
 from .vm import SparkVM
@@ -15,6 +14,4 @@ __all__ = [
     "Workers",
     "VMResult",
     "SparkVMError",
-    "VMJob",
-    "VMJobs",
 ]

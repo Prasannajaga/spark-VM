@@ -26,52 +26,12 @@ def validate_worker_id(vm_id: str) -> str:
     return candidate
 
 
-def path_within(base: Path, candidate: Path) -> bool:
-    try:
-        candidate.relative_to(base)
-        return True
-    except ValueError:
-        return False
-
-
-def unescape_mount_path(raw: str) -> str:
-    return (
-        raw.replace("\\040", " ")
-        .replace("\\011", "\t")
-        .replace("\\012", "\n")
-        .replace("\\134", "\\")
-    )
-
-
-def mount_points_under(base_dir: Path) -> list[Path]:
-    mountinfo = Path("/proc/self/mountinfo")
-    if not mountinfo.exists():
-        return []
-
-    points: list[Path] = []
-    try:
-        lines = read_text(mountinfo, encoding="utf-8", errors="replace").splitlines()
-    except OSError:
-        return []
-
-    for line in lines:
-        parts = line.split()
-        if len(parts) < 5:
-            continue
-        mount_path = Path(unescape_mount_path(parts[4]))
-        if mount_path == base_dir or path_within(base_dir, mount_path):
-            points.append(mount_path)
-    return sorted(points, key=lambda path: len(path.parts), reverse=True)
-
-
-def unmount_under(base_dir: Path) -> None:
-    for mount_path in mount_points_under(base_dir):
-        try:
-            run_checked(["umount", str(mount_path)], error_factory=CleanupError)
-        except CleanupError as exc:
-            raise CleanupError(
-                f"Could not unmount active mount '{mount_path}' while deleting worker '{base_dir.name}'."
-            ) from exc
+from .utils import (
+    mount_points_under,
+    path_within,
+    unescape_mount_path,
+    unmount_under,
+)
 
 
 @dataclass(frozen=True)

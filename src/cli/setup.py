@@ -16,6 +16,7 @@ from sparkvm.commands import run_checked
 from sparkvm.errors import FirecrackerBinaryNotInstalled, KVMUnavailableError, SparkVMSetupError
 from sparkvm.fsops import ensure_dir, read_json, write_json_atomic
 from sparkvm.runtime_store import RuntimeRecord, list_runtime_records
+from sparkvm.utils import has_cap_net_admin, has_network_privileges as network_privileges_ok
 
 from sparkvm.constants import (
     ARCH_ALIASES as _ARCH_ALIASES,
@@ -157,37 +158,7 @@ def host_tool_status() -> dict[str, bool]:
     return {tool: shutil.which(tool) is not None for tool in sorted(tools)}
 
 
-def has_cap_net_admin() -> bool:
-    status_path = Path("/proc/self/status")
-    if not status_path.exists():
-        return False
 
-    try:
-        lines = status_path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
-        return False
-
-    cap_eff_raw = None
-    for line in lines:
-        if line.startswith("CapEff:"):
-            cap_eff_raw = line.split(":", 1)[1].strip()
-            break
-    if cap_eff_raw is None:
-        return False
-
-    try:
-        cap_eff = int(cap_eff_raw, 16)
-    except ValueError:
-        return False
-
-    cap_net_admin_bit = 12
-    return bool(cap_eff & (1 << cap_net_admin_bit))
-
-
-def network_privileges_ok() -> bool:
-    if os.geteuid() == 0:
-        return True
-    return has_cap_net_admin()
 
 
 def require_setup_tools() -> None:

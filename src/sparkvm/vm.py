@@ -47,13 +47,10 @@ from .image import ManagedImageResolver, RuntimeImage
 from .network import NetworkConfig, NetworkManager, render_network_env_file
 from .result import VMResult
 from .rollouts import Rollout, Rollouts
+from .utils import shell_quote
 from cli.setup import ManagedSetup
 
 from .constants import BOOT_ARGS, DEFAULT_RUN_TIMEOUT_SEC, DEFAULT_SETUP_TIMEOUT_SEC, ENV_KEY_RE
-
-
-def shell_quote(value: str) -> str:
-    return shlex.quote(value)
 
 
 def render_env_file(env: Mapping[str, str]) -> str:
@@ -207,6 +204,17 @@ class SparkVM:
         self._images = ManagedImageResolver(self.config)
         self._rollouts = Rollouts(home_dir=self.config.home_dir)
         self._network = NetworkManager(home_dir=self.config.home_dir)
+
+    def __enter__(self) -> SparkVM:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: object | None,
+    ) -> None:
+        pass
 
     def run(self, rollout: str | Rollout) -> VMResult:
         rollout_obj = self.resolve_rollout(rollout)

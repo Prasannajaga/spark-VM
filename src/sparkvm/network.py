@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .commands import run_checked
 from .errors import CleanupError, NetworkSetupError
+from .utils import has_cap_net_admin, has_network_privileges
 
 from .constants import NET_SETUP_PRIVILEGE_MESSAGE
 
@@ -224,37 +225,6 @@ def looks_like_privilege_error(detail: str) -> bool:
     return any(marker in lowered for marker in markers)
 
 
-def has_network_privileges() -> bool:
-    if os.geteuid() == 0:
-        return True
-    return has_cap_net_admin()
-
-
-def has_cap_net_admin() -> bool:
-    status_path = Path("/proc/self/status")
-    if not status_path.exists():
-        return False
-
-    try:
-        lines = status_path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
-        return False
-
-    raw_value = None
-    for line in lines:
-        if line.startswith("CapEff:"):
-            raw_value = line.split(":", 1)[1].strip()
-            break
-    if raw_value is None:
-        return False
-
-    try:
-        cap_eff = int(raw_value, 16)
-    except ValueError:
-        return False
-
-    cap_net_admin_bit = 12
-    return bool(cap_eff & (1 << cap_net_admin_bit))
 
 
 __all__ = [

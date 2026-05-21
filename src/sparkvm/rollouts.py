@@ -29,6 +29,14 @@ from .image_builder import (
     RolloutImageBuilder,
     image_id_for_rollout,
 )
+from .utils import (
+    ResolvedCommand,
+    command_value_to_shell,
+    normalize_command_value,
+    now_utc_iso,
+    resolve_container_command,
+    shell_quote,
+)
 
 from .constants import (
     COPYTREE_IGNORE,
@@ -236,9 +244,6 @@ class Rollout:
         }
 
 
-def now_utc_iso() -> str:
-    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
 
 def validate_rollout_id(rollout_id: str) -> str:
     if not isinstance(rollout_id, str) or not rollout_id.strip():
@@ -307,83 +312,6 @@ def run_git_checked(cmd: list[str], *, cwd: Path | None = None, error_cls: type[
     completed = run_checked(cmd, error_factory=error_cls, cwd=cwd)
     return completed.stdout.strip()
 
-
-@dataclass(frozen=True)
-class ResolvedCommand:
-    source: str
-    working_dir: str
-    command: str
-    entrypoint: list[str] | str | None
-    cmd: list[str] | str | None
-
-
-def shell_quote(arg: str) -> str:
-    return shlex.quote(arg)
-
-
-def command_value_to_shell(value: list[str] | tuple[str, ...] | str | None) -> str | None:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        stripped = value.strip()
-        return stripped if stripped else None
-    if isinstance(value, (list, tuple)):
-        parts = [str(part) for part in value if str(part).strip()]
-        if not parts:
-            return None
-        return " ".join(shell_quote(part) for part in parts)
-    raise RolloutConfigError(f"Unsupported Docker command value type: {type(value).__name__}")
-
-
-def normalize_command_value(value: object) -> list[str] | str | None:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        stripped = value.strip()
-        return stripped if stripped else None
-    if isinstance(value, (list, tuple)):
-        parts = [str(part) for part in value if str(part).strip()]
-        return parts if parts else None
-    raise RolloutConfigError(f"Unsupported Docker command value type: {type(value).__name__}")
-
-
-def resolve_container_command(
-    *,
-    run_cmd: str | None,
-    docker_entrypoint: list[str] | str | None,
-    docker_cmd: list[str] | str | None,
-    working_dir: str | None,
-) -> ResolvedCommand:
-    resolved_working_dir = working_dir.strip() if isinstance(working_dir, str) and working_dir.strip() else "/workspace"
-    normalized_entrypoint = normalize_command_value(docker_entrypoint)
-    normalized_cmd = normalize_command_value(docker_cmd)
-
-    if isinstance(run_cmd, str) and run_cmd.strip():
-        return ResolvedCommand(
-            source="run_cmd",
-            working_dir=resolved_working_dir,
-            command=run_cmd.strip(),
-            entrypoint=normalized_entrypoint,
-            cmd=normalized_cmd,
-        )
-
-    entrypoint_shell = command_value_to_shell(normalized_entrypoint)
-    cmd_shell = command_value_to_shell(normalized_cmd)
-    if entrypoint_shell is None and cmd_shell is None:
-        raise RolloutConfigError("Dockerfile rollout requires either run_cmd or Dockerfile CMD/ENTRYPOINT.")
-
-    if entrypoint_shell and cmd_shell:
-        command = f"{entrypoint_shell} {cmd_shell}"
-    else:
-        command = entrypoint_shell or cmd_shell or ""
-
-    return ResolvedCommand(
-        source="docker_config",
-        working_dir=resolved_working_dir,
-        command=command,
-        entrypoint=normalized_entrypoint,
-        cmd=normalized_cmd,
-    )
 
 
 class Rollouts:
