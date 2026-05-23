@@ -11,7 +11,6 @@ from pathlib import Path
 from .errors import InvalidMemoryError, InvalidResourceError, SparkVMConfigError
 
 from .constants import (
-    DEFAULT_BASE_IMAGE,
     DEFAULT_HOME_DIR,
     DEFAULT_MEMORY,
     DEFAULT_RUNTIME,
@@ -117,7 +116,6 @@ def build_config(
     memory: int | str,
     timeout: float,
     runtime: str | None = None,
-    base_image: str | None = None,
     network: bool = False,
     home_dir: str | Path | None = None,
 ) -> SparkVMConfig:
@@ -129,9 +127,7 @@ def build_config(
     if not isinstance(network, bool):
         raise InvalidResourceError("network must be a boolean.")
 
-    selected_runtime = runtime if runtime is not None else base_image
-    if selected_runtime is None:
-        selected_runtime = DEFAULT_RUNTIME
+    selected_runtime = runtime if runtime is not None else DEFAULT_RUNTIME
 
     resolved_home = resolve_home_dir(home_dir)
 
@@ -155,7 +151,6 @@ __all__ = [
     "DEFAULT_MEMORY",
     "DEFAULT_TIMEOUT_SEC",
     "DEFAULT_RUNTIME",
-    "DEFAULT_BASE_IMAGE",
     "DEFAULT_HOME_DIR",
     "resolve_home_dir",
     "parse_memory_to_mib",

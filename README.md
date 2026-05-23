@@ -1,96 +1,44 @@
 # SparkVM
 
-SparkVM runs persistent rollouts inside Firecracker VMs.
+SparkVM is a Firecracker microVM runner for Dockerfile-backed rollouts.
 
-## Current execution model
-
-- No direct script execution API.
-- No direct script CLI execution path.
-- All execution goes through rollout IDs.
-- `Rollouts.create()` is repo-only.
-- Runtime resources are configured at execution time with `RunConfig`.
-
-## CLI usage
-
-```bash
-sparkvm setup
-sparkvm cleanup all
-sparkvm cleanup rollouts
-sparkvm cleanup workers
-sparkvm reset
-sparkvm workers list
-sparkvm workers view <vm-id>
-sparkvm workers delete <vm-id>
-```
-
-## Python usage
+## Canonical Python API
 
 ```python
-from sparkvm import RunConfig, SparkVM
+from sparkvm import SparkVM
 from sparkvm.rollouts import Rollouts
 
 rollout = Rollouts().create(
-    name="version-3",
-    source="/path/to/local/git/repo",  # or git URL
-    ref="main",                        # optional
-    setup_cmd="pip install -r requirements.txt",  # optional
-    run_cmd="python3 main.py",
-    delete_on_success=False,
+    name="my-agent",
+    runtime="Dockerfile",
+    deleteOnSuccess=False,
 )
 
 runtime_env = {"OPENAI_API_KEY": "..."}
 
-result = SparkVM().run(
-    rollout.id,
-    config=RunConfig(
-        vcpu=2,
-        memory="2G",
-        disk="4G",
-        timeout=300,
-        runtime="sparkvm-debian-minbase",
-        network=True,
-        env=runtime_env,
-    ),
+vm = SparkVM(
+    vcpu=2,
+    memory="2G",
+    disk="4G",
+    timeout=60.0,
+    network=True,
+    env=runtime_env,
 )
 
-print(result.exit_code, result.status)
+result = vm.run(rollout.id)
+print(result.status, result.exit_code)
 ```
 
-## Rollouts.create contract
+## Canonical CLI
 
-`Rollouts.create()` supports:
-
-- `name` (required)
-- `source` (required): local git repo path or git URL
-- `run_cmd` (required)
-- `setup_cmd` (optional)
-- `ref` (optional)
-- `delete_on_success` (optional, default `False`)
-
-Unsupported:
-
-- `mode`
-- `files`
-- `command`
-- `disk_mb`
-- direct script rollouts
-
-## deleteOnSuccess behavior
-
-Rollout metadata stores:
-
-```json
-{
-  "deleteOnSuccess": false
-}
+```bash
+sparkvm setup
+sparkvm rollout create --name my-agent --runtime Dockerfile
+sparkvm run <rollout-id> --vcpu 2 --memory 2G --disk 4G --timeout 60 --network
 ```
 
-If `deleteOnSuccess` is `true`, SparkVM deletes the rollout directory and removes it from `rollouts/metadata.json` only when `VMResult.passed` is `true`.
+## Notes
 
-SparkVM does not delete the rollout on:
-
-- setup failure
-- run failure
-- infrastructure failure
-- timeout
-- OOM
+- SparkVM supports only Dockerfile-backed rollouts.
+- `rollout create` builds the Docker image, exports filesystem, injects `/init`, and stores rollout ext4 artifacts.
+- `sparkvm run` and `SparkVM.run()` execute by rollout id only.

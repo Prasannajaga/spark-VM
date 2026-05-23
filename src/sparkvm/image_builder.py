@@ -257,7 +257,6 @@ class RolloutImageBuilder:
         rollout_id: str,
         source_dir: Path,
         dockerfile_path: Path,
-        run_cmd: str | None,
         disk_mb: int,
         image_path: Path,
         image_metadata_path: Path,
@@ -312,7 +311,6 @@ class RolloutImageBuilder:
             if not (isinstance(docker_working_dir, str) and docker_working_dir.strip()):
                 docker_working_dir = "/workspace" if tar_contains_workspace(rootfs_tar) else "/"
             resolved = resolve_run_command(
-                run_cmd=run_cmd,
                 working_dir=docker_working_dir,
                 docker_entrypoint=config.get("Entrypoint"),
                 docker_cmd=config.get("Cmd"),

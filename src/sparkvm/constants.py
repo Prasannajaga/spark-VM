@@ -1,7 +1,6 @@
 """Centralized constants for the SparkVM project."""
 
 import re
-import shutil
 from pathlib import Path
 
 # --- Configuration Defaults ---
@@ -10,8 +9,7 @@ DEFAULT_MEMORY = "512M"
 DEFAULT_TIMEOUT_SEC = 30.0
 DEFAULT_SETUP_TIMEOUT_SEC = 300
 DEFAULT_RUN_TIMEOUT_SEC = 300
-DEFAULT_RUNTIME = "python-3.12-slim"
-DEFAULT_BASE_IMAGE = DEFAULT_RUNTIME
+DEFAULT_RUNTIME = "Dockerfile"
 DEFAULT_HOME_DIR = Path.home() / ".sparkvm"
 
 # --- Regex Patterns ---
@@ -22,11 +20,6 @@ ROLLOUT_ID_RE = re.compile(r"^rollout-[A-Za-z0-9_-]+$")
 
 # --- Rollouts ---
 METADATA_VERSION = 1
-SUPPORTED_MODES = {"script", "repo"}
-SCRIPT_DEFAULT_DISK_MB = 1024
-REPO_DEFAULT_DISK_MB = 4096
-GIT_URL_PREFIXES = ("http://", "https://", "git@", "ssh://")
-COPYTREE_IGNORE = shutil.ignore_patterns(".git", "__pycache__", ".venv", "node_modules", "target", "dist", "build")
 ROLLOUT_METADATA_VERSION = 1
 
 # --- Network ---
@@ -329,10 +322,10 @@ SHUTDOWN_FALLBACK_PATHS = ("/sbin/poweroff", "/usr/sbin/poweroff", "/sbin/halt",
 BUSYBOX_CANDIDATE_PATHS = ("/bin/busybox", "/usr/bin/busybox", "/sbin/busybox", "/usr/sbin/busybox")
 
 __all__ = [
-    "DEFAULT_VCPU", "DEFAULT_MEMORY", "DEFAULT_TIMEOUT_SEC", "DEFAULT_RUNTIME", "DEFAULT_BASE_IMAGE", "DEFAULT_HOME_DIR",
+    "DEFAULT_VCPU", "DEFAULT_MEMORY", "DEFAULT_TIMEOUT_SEC", "DEFAULT_RUNTIME", "DEFAULT_HOME_DIR",
     "DEFAULT_SETUP_TIMEOUT_SEC", "DEFAULT_RUN_TIMEOUT_SEC",
     "MEMORY_RE", "ENV_KEY_RE", "WORKER_ID_RE", "ROLLOUT_ID_RE",
-    "METADATA_VERSION", "SUPPORTED_MODES", "SCRIPT_DEFAULT_DISK_MB", "REPO_DEFAULT_DISK_MB", "GIT_URL_PREFIXES", "COPYTREE_IGNORE", "ROLLOUT_METADATA_VERSION",
+    "METADATA_VERSION", "ROLLOUT_METADATA_VERSION",
     "NET_SETUP_PRIVILEGE_MESSAGE",
     "BOOT_ARGS", "DEBIAN_BOOT_ARGS", "DEBIAN_MINBASE_IMAGE_ID", "SPARKVM_INIT_TEMPLATE", "INIT_TEMPLATE",
     "FIRECRACKER_VERSION", "KERNEL_FILENAME", "SUPPORTED_ARCHES", "REQUIRED_SETUP_TOOLS", "DOCTOR_TOOLS", "DOCTOR_NETWORK_TOOLS", "ARCH_ALIASES", "KERNEL_URLS",

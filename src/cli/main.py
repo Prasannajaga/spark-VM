@@ -14,7 +14,23 @@ from cli.setup import (
     get_sparkvm_paths,
     run_setup_command,
 )
+from sparkvm.rollouts import Rollouts
 from sparkvm.workers import Workers
+
+
+def parse_env_vars(pairs: list[str] | None) -> dict[str, str]:
+    if not pairs:
+        return {}
+    env: dict[str, str] = {}
+    for pair in pairs:
+        if "=" not in pair:
+            raise SparkVMError(f"Invalid --env value {pair!r}. Expected KEY=VALUE.")
+        key, value = pair.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise SparkVMError(f"Invalid --env value {pair!r}. KEY cannot be empty.")
+        env[key] = value
+    return env
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -30,33 +46,47 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("doctor", help="Show SparkVM host and asset diagnostics")
 
     setup_parser = subparsers.add_parser("setup", help="Install/verify managed SparkVM assets")
-    setup_parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Reinstall managed assets even when they already exist",
+    setup_parser.add_argument("--force", action="store_true", help="Reinstall managed assets")
+    setup_parser.add_argument("--owner", default=None, help="User that should own files under SparkVM home after setup")
+
+    rollout_parser = subparsers.add_parser("rollout", help="Rollout operations")
+    rollout_subparsers = rollout_parser.add_subparsers(dest="rollout_command", required=True)
+    rollout_create = rollout_subparsers.add_parser("create", help="Create Dockerfile-backed rollout")
+    rollout_create.add_argument("--name", required=True, help="Rollout name")
+    rollout_create.add_argument("--runtime", default="Dockerfile", help="Runtime value (must be Dockerfile)")
+    rollout_create.add_argument(
+        "--dockerfile",
+        default="Dockerfile",
+        help="Dockerfile path (absolute path or relative to current working directory)",
     )
-    setup_parser.add_argument(
-        "--owner",
+    rollout_create.add_argument(
+        "--delete-on-success",
+        action="store_true",
+        help="Delete rollout artifacts after a passed run",
+    )
+
+    run_parser = subparsers.add_parser("run", help="Run a rollout id")
+    run_parser.add_argument("rollout_id", help="Rollout id")
+    run_parser.add_argument("--vcpu", type=int, default=2, help="vCPU count")
+    run_parser.add_argument("--memory", default="2G", help="Memory (e.g. 2G)")
+    run_parser.add_argument("--disk", default="4G", help="Execution disk (e.g. 4G)")
+    run_parser.add_argument("--timeout", type=float, default=60.0, help="Timeout seconds")
+    run_parser.add_argument("--network", action="store_true", help="Enable network")
+    run_parser.add_argument(
+        "--env",
+        action="append",
         default=None,
-        help="User that should own files under SparkVM home after setup (useful with sudo).",
+        help="Environment variable KEY=VALUE (repeatable)",
     )
 
     cleanup_parser = subparsers.add_parser("cleanup", help="Cleanup rollouts and/or preserved failed worker folders")
     cleanup_parser.add_argument("target", choices=["rollouts", "workers", "all"], help="Cleanup target")
-    cleanup_parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Skip confirmation prompt before deleting files",
-    )
+    cleanup_parser.add_argument("--force", action="store_true", help="Skip confirmation prompt before deleting files")
 
     reset_parser = subparsers.add_parser("reset", help="Delete all files under SparkVM home directory")
-    reset_parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Skip confirmation prompt before deleting files",
-    )
+    reset_parser.add_argument("--force", action="store_true", help="Skip confirmation prompt before deleting files")
 
-    workers_parser = subparsers.add_parser("workers", help="Inspect and manage preserved failed worker attempts")
+    workers_parser = subparsers.add_parser("workers", help="Inspect and manage preserved workers")
     workers_subparsers = workers_parser.add_subparsers(dest="workers_command", required=True)
 
     workers_subparsers.add_parser("list", help="List preserved workers")
@@ -74,16 +104,6 @@ def build_parser() -> argparse.ArgumentParser:
     workers_delete.add_argument("vm_id", help="Worker vm id (e.g. vm-02e67edfc7a0)")
     workers_delete.add_argument("--force", action="store_true", help="Skip confirmation prompt")
 
-    recycle_parser = subparsers.add_parser("recycle", help="Retry failed rollout workers in a loop")
-    recycle_parser.add_argument("--interval", type=float, default=5.0, help="Seconds between scans (default: 5)")
-    recycle_parser.add_argument("--timeout", type=float, default=None, help="Optional overall timeout in seconds")
-    recycle_parser.add_argument("--max-parallel", type=int, default=1, help="Max reruns per scan iteration")
-    recycle_parser.add_argument(
-        "--once",
-        action="store_true",
-        help="Run a single scan pass (debug/testing only).",
-    )
-
     return parser
 
 
@@ -91,6 +111,63 @@ def run_doctor(home_dir: str | None) -> int:
     paths = get_sparkvm_paths(home_dir)
     status = doctor_status(paths)
     print(format_doctor_report(status))
+    return 0
+
+
+def run_rollout_create(
+    home_dir: str | None,
+    *,
+    name: str,
+    runtime: str,
+    dockerfile: str,
+    delete_on_success: bool,
+) -> int:
+    manager = Rollouts(home_dir=home_dir)
+    rollout = manager.create(
+        name=name,
+        runtime=runtime,
+        dockerfile=dockerfile,
+        deleteOnSuccess=delete_on_success,
+    )
+    print(json.dumps(rollout.to_metadata_entry(), indent=2, sort_keys=True))
+    return 0
+
+
+def run_rollout_execute(
+    home_dir: str | None,
+    *,
+    rollout_id: str,
+    vcpu: int,
+    memory: str,
+    disk: str,
+    timeout: float,
+    network: bool,
+    env_pairs: list[str] | None,
+) -> int:
+    if home_dir is not None:
+        # CLI-level home override remains available via SPARKVM_HOME.
+        import os
+
+        os.environ["SPARKVM_HOME"] = home_dir
+    env = parse_env_vars(env_pairs)
+    from sparkvm.vm import SparkVM
+
+    vm = SparkVM(vcpu=vcpu, memory=memory, disk=disk, timeout=timeout, network=network, env=env)
+    result = vm.run(rollout_id)
+    print(
+        json.dumps(
+            {
+                "rollout_id": result.rollout_id,
+                "vm_id": result.vm_id,
+                "status": result.status,
+                "exit_code": result.exit_code,
+                "duration_ms": result.duration_ms,
+                "passed": result.passed,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
     return 0
 
 
@@ -197,11 +274,40 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        if args.home_dir is not None:
+            import os
+
+            os.environ["SPARKVM_HOME"] = args.home_dir
+
         if args.command == "doctor":
             return run_doctor(args.home_dir)
 
         if args.command == "setup":
             return run_setup_command(args.home_dir, args.force, owner=args.owner)
+
+        if args.command == "rollout":
+            if args.rollout_command == "create":
+                return run_rollout_create(
+                    args.home_dir,
+                    name=args.name,
+                    runtime=args.runtime,
+                    dockerfile=args.dockerfile,
+                    delete_on_success=args.delete_on_success,
+                )
+            parser.error(f"Unknown rollout command: {args.rollout_command}")
+            return 2
+
+        if args.command == "run":
+            return run_rollout_execute(
+                args.home_dir,
+                rollout_id=args.rollout_id,
+                vcpu=args.vcpu,
+                memory=args.memory,
+                disk=args.disk,
+                timeout=args.timeout,
+                network=args.network,
+                env_pairs=args.env,
+            )
 
         if args.command == "cleanup":
             return run_cleanup_command(args.home_dir, args.target, args.force)
@@ -227,18 +333,6 @@ def main(argv: list[str] | None = None) -> int:
                 return run_workers_delete(args.home_dir, args.vm_id, force=args.force)
             parser.error(f"Unknown workers command: {args.workers_command}")
             return 2
-
-        if args.command == "recycle":
-            from sparkvm.vm import SparkVM
-
-            vm = SparkVM(home_dir=args.home_dir)
-            vm.recycle(
-                interval=args.interval,
-                timeout=args.timeout,
-                max_parallel=args.max_parallel,
-                once=args.once,
-            )
-            return 0
 
         parser.error(f"Unknown command: {args.command}")
         return 2

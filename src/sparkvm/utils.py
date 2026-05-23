@@ -110,7 +110,6 @@ def command_value_to_shell(value: list[str] | tuple[str, ...] | str | None) -> s
 
 def resolve_container_command(
     *,
-    run_cmd: str | None,
     docker_entrypoint: Any,
     docker_cmd: Any,
     working_dir: str | None = None,
@@ -122,19 +121,10 @@ def resolve_container_command(
     normalized_entrypoint = normalize_command_value(docker_entrypoint)
     normalized_cmd = normalize_command_value(docker_cmd)
 
-    if isinstance(run_cmd, str) and run_cmd.strip():
-        return ResolvedCommand(
-            source="run_cmd",
-            working_dir=resolved_working_dir,
-            command=run_cmd.strip(),
-            entrypoint=normalized_entrypoint,
-            cmd=normalized_cmd,
-        )
-
     entrypoint_shell = command_value_to_shell(normalized_entrypoint)
     cmd_shell = command_value_to_shell(normalized_cmd)
     if entrypoint_shell is None and cmd_shell is None:
-        raise RolloutConfigError("Dockerfile rollout requires either run_cmd or Dockerfile CMD/ENTRYPOINT.")
+        raise RolloutConfigError("Dockerfile rollout requires CMD and/or ENTRYPOINT in the Dockerfile.")
 
     if entrypoint_shell and cmd_shell:
         command = f"{entrypoint_shell} {cmd_shell}"
