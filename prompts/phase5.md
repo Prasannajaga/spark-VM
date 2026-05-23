@@ -1,65 +1,38 @@
 # SparkVM Phase 5
 
-## 1. Public API
+## 1. Runtime config ownership
 
-`SparkVM` now supports:
+`RunConfig` owns execution-time resources:
 
-- `network: bool = False`
-- `env: dict[str, str] | None = None`
+- `vcpu`
+- `memory`
+- `disk`
+- `timeout`
+- `runtime`
+- `network`
+- `env`
 
-Example:
+Rollouts do not own CPU/RAM/DISK/network.
 
-```python
-import os
-from sparkvm import SparkVM
+## 2. Global resource policy
 
-vm = SparkVM(
-    runtime="python-3.12-slim",
-    vcpu=2,
-    memory="2G",
-    timeout=300,
-    network=True,
-    env={"OPENAI_API_KEY": os.environ["OPENAI_API_KEY"]},
-)
+`SparkVM.run` and recycle flows must respect the global resource cap policy before starting VMs:
+
+```json
+{
+  "resource_policy": {
+    "max_vm_cpu_percent": 80,
+    "max_vm_memory_percent": 80,
+    "max_vm_disk_percent": 80,
+    "min_host_cpu_percent": 20,
+    "min_host_memory_percent": 20,
+    "min_host_disk_percent": 20
+  }
+}
 ```
 
-## 2. Runtime env injection model
+## 3. Execution model remains rollout-first
 
-- Env keys are validated with `^[A-Za-z_][A-Za-z0-9_]*$`.
-- Env values must be strings.
-- Env values are stored only in-memory on the `SparkVM` instance.
-- During a VM run, SparkVM writes runtime-only `/job/.sparkvm/env.sh` into the temporary execution disk.
-- `/init` sources `/job/.sparkvm/env.sh` before `setup.sh` and `run.sh`.
-- Env values are not written to rollout metadata and not written to `failure.json`.
-
-## 3. Networking model
-
-- `network=True` creates a per-VM TAP device and configures NAT/forwarding with `iptables`.
-- Guest network config is written to runtime-only `/job/.sparkvm/network.env`.
-- `/init` configures `eth0` from `network.env`.
-- Firecracker network interface attach is done before `InstanceStart`.
-
-Phase-5 privilege requirement:
-
-- Root or `CAP_NET_ADMIN` is required for TAP + `iptables` setup.
-- If missing, SparkVM raises:
-  `Network setup requires root/CAP_NET_ADMIN for TAP and iptables. Run with sudo or configure capabilities.`
-
-## 4. Secret handling
-
-- Env values never persist to rollouts (`~/.sparkvm/rollouts`).
-- Env values never persist to runtime image assets (`~/.sparkvm/images`).
-- On infrastructure failure, SparkVM attempts to scrub `/job/.sparkvm/env.sh` from `rollout.ext4`.
-- If scrub fails, SparkVM deletes `rollout.ext4` to avoid preserving secrets.
-- `failure.json` stores only env keys, never values.
-
-## 5. Doctor and dockify updates
-
-- `sparkvm doctor` reports network host tool availability (`ip`, `iptables`, `sysctl`) and privilege status.
-- `sparkvm network doctor` aliases the same diagnostics.
-- `sparkvm dockify` metadata now records runtime validation details and warns when `ip` is missing:
-  `Runtime image does not contain ip command. network=True will fail unless installed.`
-
-## 6. Known limitation
-
-SparkVM cannot prevent secret leakage if user-provided `setup.sh`/`run.sh` prints environment variables to stdout/stderr.
+- direct script execution is intentionally unsupported
+- all runs are rollout ID based
+- failed worker retries target rollout-backed workers only

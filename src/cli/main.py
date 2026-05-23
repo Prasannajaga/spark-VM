@@ -74,6 +74,16 @@ def build_parser() -> argparse.ArgumentParser:
     workers_delete.add_argument("vm_id", help="Worker vm id (e.g. vm-02e67edfc7a0)")
     workers_delete.add_argument("--force", action="store_true", help="Skip confirmation prompt")
 
+    recycle_parser = subparsers.add_parser("recycle", help="Retry failed rollout workers in a loop")
+    recycle_parser.add_argument("--interval", type=float, default=5.0, help="Seconds between scans (default: 5)")
+    recycle_parser.add_argument("--timeout", type=float, default=None, help="Optional overall timeout in seconds")
+    recycle_parser.add_argument("--max-parallel", type=int, default=1, help="Max reruns per scan iteration")
+    recycle_parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Run a single scan pass (debug/testing only).",
+    )
+
     return parser
 
 
@@ -217,6 +227,18 @@ def main(argv: list[str] | None = None) -> int:
                 return run_workers_delete(args.home_dir, args.vm_id, force=args.force)
             parser.error(f"Unknown workers command: {args.workers_command}")
             return 2
+
+        if args.command == "recycle":
+            from sparkvm.vm import SparkVM
+
+            vm = SparkVM(home_dir=args.home_dir)
+            vm.recycle(
+                interval=args.interval,
+                timeout=args.timeout,
+                max_parallel=args.max_parallel,
+                once=args.once,
+            )
+            return 0
 
         parser.error(f"Unknown command: {args.command}")
         return 2

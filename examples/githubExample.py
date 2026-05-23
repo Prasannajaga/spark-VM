@@ -5,60 +5,44 @@ from __future__ import annotations
 Run a rollout from a GitHub repository.
 
 Usage:
-  python3 examples/run_vm_with_github_repo.py
+  python3 examples/githubExample.py
 
-Edit REPO_URL / REF / DOCKERFILE / RUN_CMD_OVERRIDE below for your project.
+Edit REPO_URL / REF / RUN_CMD below for your project.
 """
 
 import os
-from pathlib import Path
 
-from sparkvm import SparkVM
+from sparkvm import RunConfig, SparkVM
 from sparkvm.rollouts import Rollouts
 
-# Example public repository URL.
-REPO_URL = "/home/prasanna/coding/test-fastapi"
+REPO_URL = "https://github.com/org/repo.git"
 REF = "main"
+RUN_CMD = "python3 main.py"
 
-# Dockerfile can now be provided as an explicit path (outside source repo).
-DOCKERFILE = str((Path(__file__).resolve().parent / "dockerfile").resolve())
-
-# Optional execution override. Keep as None to use Docker CMD/ENTRYPOINT.
-RUN_CMD_OVERRIDE = None
-
-# Example bounded network debug override:
-# RUN_CMD_OVERRIDE = """
+# Optional bounded network debug override:
+# RUN_CMD = """
 # set -eux
-#
 # echo "[net] ip addr"
 # ip addr || true
-#
 # echo "[net] ip route"
 # ip route || true
-#
-# echo "[net] resolv.conf"
+# echo "[net] resolv"
 # cat /etc/resolv.conf || true
-#
 # echo "[net] dns"
 # timeout 5 getent hosts pypi.org || true
-#
 # echo "[net] curl"
 # curl -Iv --connect-timeout 5 --max-time 10 https://pypi.org/simple/ || true
-#
-# echo "[net] done"
 # """
+
 
 def main() -> int:
     manager = Rollouts()
     rollout = manager.create(
         name="version-4",
-        mode="repo",
         source=REPO_URL,
         ref=REF,
-        dockerfile=DOCKERFILE,
-        run_cmd=RUN_CMD_OVERRIDE,
-        # You can override this based on your repo size/workload.
-        disk_mb=4096,
+        run_cmd=RUN_CMD,
+        delete_on_success=False,
     )
 
     print("Created repo rollout")
@@ -71,16 +55,18 @@ def main() -> int:
     if api_key:
         runtime_env["OPENAI_API_KEY"] = api_key
 
-    vm = SparkVM(
-        vcpu=2,
-        memory="2G",
-        timeout=60.0,
-        runtime="sparkvm-ubuntu-base-24.04",
-        network=True,
-        # Optional: pass runtime-only env vars for run.sh.
-        env=runtime_env,
+    result = SparkVM().run(
+        rollout.id,
+        config=RunConfig(
+            vcpu=2,
+            memory="2G",
+            disk="4G",
+            timeout=60.0,
+            runtime="sparkvm-debian-minbase",
+            network=True,
+            env=runtime_env,
+        ),
     )
-    result = vm.run(rollout.id)
 
     print("\nVM run result")
     print(f"rollout_id: {result.rollout_id}")

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import json
 import os
 import pwd
@@ -18,7 +18,7 @@ from uuid import uuid4
 
 from .commands import run_checked
 from .firecracker.api import FirecrackerAPIClient
-from .config import DEFAULT_MEMORY, DEFAULT_TIMEOUT_SEC, DEFAULT_VCPU, SparkVMConfig, build_config
+from .config import DEFAULT_MEMORY, DEFAULT_TIMEOUT_SEC, DEFAULT_VCPU, SparkVMConfig, build_config, parse_memory_to_mib
 from .disk import (
     ExecutionDisk,
     create_worker_rootfs,
@@ -46,8 +46,10 @@ from .fsops import ensure_dir, read_text, remove_file, remove_tree, write_text
 from .image import ManagedImageResolver, RuntimeImage
 from .network import NetworkConfig, NetworkManager, render_network_env_file
 from .result import VMResult
+from .resource_policy import assert_resource_capacity, check_resource_capacity
 from .rollouts import Rollout, Rollouts
 from .utils import shell_quote
+from .workers import Workers
 from cli.setup import ManagedSetup
 
 from .constants import BOOT_ARGS, DEFAULT_RUN_TIMEOUT_SEC, DEFAULT_SETUP_TIMEOUT_SEC, ENV_KEY_RE
@@ -166,6 +168,21 @@ PARTIAL_RESULT_FILES = (
 )
 
 
+@dataclass(frozen=True)
+class RunConfig:
+    vcpu: int | None = None
+    memory: int | str | None = None
+    disk: int | str | None = None
+    timeout: float | None = None
+    runtime: str | None = None
+    network: bool | None = None
+    env: Mapping[str, str] | None = None
+
+
+def parse_disk_to_mib(disk: int | str) -> int:
+    return parse_memory_to_mib(disk)
+
+
 class SparkVM:
     def __init__(
         self,
@@ -216,9 +233,55 @@ class SparkVM:
     ) -> None:
         pass
 
-    def run(self, rollout: str | Rollout) -> VMResult:
-        rollout_obj = self.resolve_rollout(rollout)
-        selected_runtime = self.config.runtime if self._runtime_override else rollout_obj.runtime
+    def run(self, rollout_id: str, config: RunConfig | None = None) -> VMResult:
+        if not isinstance(rollout_id, str):
+            raise TypeError("SparkVM.run expects a rollout id string.")
+        if config is not None and not isinstance(config, RunConfig):
+            raise TypeError("SparkVM.run config must be a RunConfig instance.")
+
+        run_vcpu = self.config.vcpu if config is None or config.vcpu is None else config.vcpu
+        run_memory: int | str = self.config.memory_mib if config is None or config.memory is None else config.memory
+        run_timeout = self.config.timeout_sec if config is None or config.timeout is None else config.timeout
+        run_runtime = self.config.runtime if config is None or config.runtime is None else config.runtime
+        run_network = self.config.network_enabled if config is None or config.network is None else config.network
+        run_env = self._env if config is None or config.env is None else validate_env_mapping(config.env)
+        run_disk = "4G" if config is None or config.disk is None else config.disk
+        run_disk_mib = parse_disk_to_mib(run_disk)
+
+        previous_config = self.config
+        previous_env = self._env
+        previous_override = self._runtime_override
+        self.config = build_config(
+            vcpu=run_vcpu,
+            memory=run_memory,
+            timeout=run_timeout,
+            runtime=run_runtime,
+            network=run_network,
+            home_dir=previous_config.home_dir,
+        )
+        self._env = run_env
+        self._runtime_override = True
+
+        try:
+            rollout_obj = self.resolve_rollout(rollout_id)
+        except Exception:
+            self._restore_run_state(config=previous_config, env=previous_env, runtime_override=previous_override)
+            raise
+        selected_runtime = self.config.runtime
+        assert_resource_capacity(
+            home_dir=self.config.home_dir,
+            vcpu=int(run_vcpu),
+            memory_mib=parse_memory_to_mib(run_memory),
+            disk_mib=run_disk_mib,
+        )
+        machine_specs = {
+            "vcpu": self.config.vcpu,
+            "memory": self.config.memory_mib,
+            "disk": run_disk_mib,
+            "timeout": self.config.timeout_sec,
+            "runtime": self.config.runtime,
+            "network": self.config.network_enabled,
+        }
 
         self._setup.ensure_layout()
 
@@ -235,7 +298,7 @@ class SparkVM:
         execution_disk = ExecutionDisk(
             rollout=rollout_obj,
             path=execution_disk_path,
-            size_mb=rollout_obj.disk_mb,
+            size_mb=run_disk_mib,
             mount_base=mount_base,
         )
         started_at = time.monotonic()
@@ -257,7 +320,7 @@ class SparkVM:
             if self.config.network_enabled:
                 network_config = self._network.setup(vm_id)
 
-            runtime_files = self.runtime_execution_files(network_config)
+            runtime_files = self.runtime_execution_files(rollout=rollout_obj, network_config=network_config)
             execution_disk.copy_rollout(runtime_files=runtime_files if runtime_files else None)
             self.assert_worker_image_permissions(
                 worker_rootfs=worker_rootfs_path,
@@ -310,6 +373,11 @@ class SparkVM:
                         firecracker=firecracker,
                         execution_disk=execution_disk,
                     )
+                    if rollout_obj.delete_on_success:
+                        try:
+                            self._rollouts.delete_by_id(rollout_obj.id)
+                        except RolloutNotFoundError:
+                            pass
                     final_result = result
                 else:
                     self.cleanup_process_socket(
@@ -325,6 +393,7 @@ class SparkVM:
                         result=result,
                         error=None,
                         duration_ms=duration_ms,
+                        machine_specs=machine_specs,
                     )
         except (FirecrackerAPIError, FirecrackerProcessError) as exc:
             failure = self.classify_infrastructure_error(
@@ -379,6 +448,7 @@ class SparkVM:
                 result=None,
                 error=failure,
                 duration_ms=int((time.monotonic() - started_at) * 1000),
+                machine_specs=machine_specs,
             )
             if cleanup_failure_message is not None:
                 self.append_worker_note(
@@ -387,17 +457,33 @@ class SparkVM:
                     note=f"network_cleanup_error={cleanup_failure_message}",
                 )
             del preserved
+            self._restore_run_state(config=previous_config, env=previous_env, runtime_override=previous_override)
             raise failure
 
         assert final_result is not None
+        self._restore_run_state(config=previous_config, env=previous_env, runtime_override=previous_override)
         return final_result
 
-    def runtime_execution_files(self, network_config: NetworkConfig | None) -> dict[str, str]:
+    def _restore_run_state(
+        self,
+        *,
+        config: SparkVMConfig,
+        env: Mapping[str, str],
+        runtime_override: bool,
+    ) -> None:
+        self.config = config
+        self._env = dict(env)
+        self._runtime_override = runtime_override
+
+    def runtime_execution_files(self, *, rollout: Rollout, network_config: NetworkConfig | None) -> dict[str, str]:
+        runtime_env = render_runtime_config_file(
+            setup_timeout_sec=self._setup_timeout_sec,
+            run_timeout_sec=self._run_timeout_sec,
+        )
+        if rollout.setup_cmd:
+            runtime_env += "SPARKVM_RUN_SETUP_IN_GUEST=1\n"
         files: dict[str, str] = {
-            ".sparkvm/runtime.env": render_runtime_config_file(
-                setup_timeout_sec=self._setup_timeout_sec,
-                run_timeout_sec=self._run_timeout_sec,
-            )
+            ".sparkvm/runtime.env": runtime_env,
         }
         if self._env:
             files[".sparkvm/env.sh"] = render_env_file(self._env)
@@ -408,18 +494,8 @@ class SparkVM:
             files[".sparkvm/network.env"] = render_network_env_file(network_config)
         return files
 
-    def resolve_rollout(self, rollout: str | Rollout) -> Rollout:
-        if isinstance(rollout, Rollout):
-            if not rollout.path.exists():
-                raise RolloutNotFoundError(f"Rollout path does not exist: {rollout.path}")
-            if not (rollout.path / "rollout.json").exists():
-                raise RolloutNotFoundError(f"rollout.json missing for rollout: {rollout.id}")
-            return rollout
-
-        if isinstance(rollout, str):
-            return self._rollouts.get_by_id(rollout)
-
-        raise TypeError("SparkVM.run expects a rollout id (str) or an object returned by Rollouts.create().")
+    def resolve_rollout(self, rollout_id: str) -> Rollout:
+        return self._rollouts.get_by_id(rollout_id)
 
     def resolve_runtime_image_for_rollout(self, rollout: Rollout, selected_runtime: str) -> RuntimeImage:
         runtime_image_path: Path | None = None
@@ -621,6 +697,7 @@ class SparkVM:
         prune: Mapping[str, Any],
         results_path: Path | None,
         partial: Mapping[str, Any],
+        machine_specs: Mapping[str, Any],
     ) -> None:
         payload: dict[str, object] = {
             "vm_id": vm_id,
@@ -647,6 +724,7 @@ class SparkVM:
             "partial_results_extracted": bool(partial.get("partial_results_extracted", False)),
             "partial_results_error": partial.get("partial_results_error"),
             "partial_result_files": partial.get("files", []),
+            "machine_specs": dict(machine_specs),
             "created_at": datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         }
         self.write_worker_json(path=worker_dir / "result.json", payload=payload)
@@ -664,6 +742,7 @@ class SparkVM:
         prune: Mapping[str, Any],
         results_path: Path | None,
         partial: Mapping[str, Any],
+        machine_specs: Mapping[str, Any],
     ) -> None:
         if isinstance(error, JobTimeoutError):
             status = "timeout"
@@ -701,6 +780,7 @@ class SparkVM:
             "partial_results_extracted": bool(partial.get("partial_results_extracted", False)),
             "partial_results_error": partial.get("partial_results_error"),
             "partial_result_files": partial.get("files", []),
+            "machine_specs": dict(machine_specs),
             "created_at": datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         }
         self.write_worker_json(path=worker_dir / "failure.json", payload=payload)
@@ -1004,6 +1084,7 @@ class SparkVM:
         result: VMResult | None,
         error: BaseException | None,
         duration_ms: int,
+        machine_specs: Mapping[str, Any],
     ) -> VMResult | None:
         firecracker_log_path = worker_dir / "firecracker.log"
 
@@ -1039,6 +1120,7 @@ class SparkVM:
                 prune=prune,
                 results_path=results_path,
                 partial=partial,
+                machine_specs=machine_specs,
             )
             return sanitized_result
 
@@ -1056,12 +1138,90 @@ class SparkVM:
             prune=prune,
             results_path=results_path,
             partial=partial,
+            machine_specs=machine_specs,
         )
         return None
+
+    def recycle(
+        self,
+        *,
+        interval: float = 5.0,
+        timeout: float | None = None,
+        max_parallel: int = 1,
+        once: bool = False,
+    ) -> int:
+        workers = Workers(home_dir=self.config.home_dir)
+        started = time.monotonic()
+        recovered = 0
+        max_parallel = max(1, int(max_parallel))
+
+        while True:
+            candidates = [item for item in workers.list() if item.rollout_id]
+            reruns = 0
+
+            for worker in candidates:
+                if reruns >= max_parallel:
+                    break
+                if worker.status == "passed":
+                    continue
+
+                machine_specs: dict[str, Any] = {}
+                if worker.failure_path is not None:
+                    try:
+                        machine_specs = workers.failure_json(worker.vm_id).get("machine_specs", {})
+                    except Exception:
+                        machine_specs = {}
+                elif worker.result_path is not None:
+                    try:
+                        machine_specs = workers.result_json(worker.vm_id).get("machine_specs", {})
+                    except Exception:
+                        machine_specs = {}
+
+                vcpu = int(machine_specs.get("vcpu", self.config.vcpu))
+                memory_mib = int(machine_specs.get("memory", self.config.memory_mib))
+                disk_mib = int(machine_specs.get("disk", 4096))
+                timeout_sec = float(machine_specs.get("timeout", self.config.timeout_sec))
+                runtime = str(machine_specs.get("runtime", self.config.runtime))
+                network = bool(machine_specs.get("network", self.config.network_enabled))
+
+                capacity = check_resource_capacity(
+                    home_dir=self.config.home_dir,
+                    vcpu=vcpu,
+                    memory_mib=memory_mib,
+                    disk_mib=disk_mib,
+                )
+                if not capacity.allowed:
+                    continue
+
+                try:
+                    self.run(
+                        str(worker.rollout_id),
+                        config=RunConfig(
+                            vcpu=vcpu,
+                            memory=memory_mib,
+                            disk=disk_mib,
+                            timeout=timeout_sec,
+                            runtime=runtime,
+                            network=network,
+                        ),
+                    )
+                    recovered += 1
+                except Exception:
+                    pass
+                reruns += 1
+
+            if once:
+                break
+            if timeout is not None and (time.monotonic() - started) >= timeout:
+                break
+            time.sleep(max(0.1, float(interval)))
+
+        return recovered
 
 
 __all__ = [
     "SparkVM",
+    "RunConfig",
     "shell_quote",
     "render_env_file",
     "render_redact_sed_file",

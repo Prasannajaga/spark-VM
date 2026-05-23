@@ -1,47 +1,32 @@
 # SparkVM Phase 3
 
-## 1. Rollouts API
+## 1. Rollouts are repo-only
 
-Rollouts are persisted execution packages with two modes:
+`Rollouts.create(...)` is intentionally repo-only.
 
-- `script`
-- `repo`
+Supported inputs:
 
-`Rollouts.create(...)` stores:
+- `name` (required)
+- `source` (required): local git repo path or git URL
+- `run_cmd` (required)
+- `setup_cmd` (optional)
+- `ref` (optional)
+- `delete_on_success` (optional, default `False`)
 
-- normalized `runtime`
-- optional `setup_cmd`
-- required `run_cmd`
-- mode-specific defaults for `disk_mb`
+Unsupported:
 
-## 2. Script mode
+- `mode`
+- `files`
+- `command`
+- `disk_mb`
+- script-mode rollouts
 
-- requires `files`
-- writes `run.sh` at rollout root
-- runs from `/job`
-- default disk size: 1024 MB
+## 2. Direct script execution is intentionally not supported
 
-## 3. Repo mode
+SparkVM does not support direct script execution APIs in this phase.
+All execution must go through persisted rollout IDs.
 
-- requires `source`
-- local source must contain `.git`
-- git URL sources are cloned
-- writes `run.sh` (and optional `setup.sh`)
-- runs from `/job/repo`
-- default disk size: 4096 MB
+## 3. Execution resources are runtime-time only
 
-## 4. VM execution contract
-
-`SparkVM.run(rollout)`:
-
-- loads rollout runtime
-- resolves managed runtime image + kernel
-- attaches rollout ext4 as `/dev/vdb`
-- collects setup/run phase outputs from `/job/results`
-- returns `VMResult`
-
-Workers are cleaned for normal setup/run outcomes and preserved only for infrastructure failures.
-
-## 5. Runtime requirement
-
-SparkVM does not auto-create runtime images at execution time. Missing runtime images produce a clear `sparkvm dockify` instruction.
+CPU/RAM/DISK/network are execution-time concerns.
+They are passed through `RunConfig` at `SparkVM.run(...)` time, not stored as rollout ownership.

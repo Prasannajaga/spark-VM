@@ -69,6 +69,7 @@ class Rollout:
     resolved_run_command: dict[str, Any] | None = None
     rootfs_path: str | None = None
     runtime_image: dict[str, Any] | None = None
+    delete_on_success: bool = False
 
     def __post_init__(self) -> None:
         runtime_candidate: str | None = self.runtime if isinstance(self.runtime, str) and self.runtime.strip() else None
@@ -138,6 +139,7 @@ class Rollout:
         runtime_raw = data.get("runtime")
         if not isinstance(runtime_raw, str) or not runtime_raw.strip():
             runtime_raw = str(data.get("base_image") or DEFAULT_RUNTIME)
+        delete_on_success = bool(data.get("deleteOnSuccess", False))
 
         try:
             return cls(
@@ -158,6 +160,7 @@ class Rollout:
                 resolved_run_command=resolved_run_command,
                 rootfs_path=rootfs_path,
                 runtime_image=runtime_image,
+                delete_on_success=delete_on_success,
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise RolloutMetadataError(f"Invalid rollout.json content: {data!r}") from exc
@@ -199,6 +202,7 @@ class Rollout:
             runtime_raw = data.get("runtime")
             if not isinstance(runtime_raw, str) or not runtime_raw.strip():
                 runtime_raw = str(data.get("base_image") or DEFAULT_RUNTIME)
+            delete_on_success = bool(data.get("deleteOnSuccess", False))
 
             return cls(
                 id=str(data["id"]),
@@ -218,6 +222,7 @@ class Rollout:
                 resolved_run_command=resolved_run_command,
                 rootfs_path=rootfs_path,
                 runtime_image=runtime_image,
+                delete_on_success=delete_on_success,
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise RolloutMetadataError(f"Invalid rollout metadata entry: {data!r}") from exc
@@ -237,6 +242,7 @@ class Rollout:
             "resolved_run_command": self.resolved_run_command,
             "rootfs_path": self.rootfs_path,
             "runtime_image": self.runtime_image,
+            "deleteOnSuccess": self.delete_on_success,
             "disk_mb": self.disk_mb,
             "files": list(self.files),
             "created_at": self.created_at,
@@ -326,9 +332,7 @@ class Rollouts:
         self,
         *,
         name: str,
-        mode: str = "repo",
         runtime: str = DEFAULT_RUNTIME,
-        files: dict[str, str | bytes] | None = None,
         source: str | Path | None = None,
         ref: str | None = None,
         dockerfile: str | Path = "Dockerfile",
@@ -336,6 +340,7 @@ class Rollouts:
         disk_mb: int | None = None,
         command: str | None = None,
         base_image: str | None = None,
+        delete_on_success: bool = False,
         **kwargs: Any,
     ) -> Rollout:
         if "image" in kwargs:
@@ -349,12 +354,11 @@ class Rollouts:
             raise RolloutConfigError(f"Unsupported rollout create parameter(s): {unexpected}")
 
         rollout_name = validate_non_empty(name, field_name="name")
-        rollout_mode = validate_rollout_mode(mode)
         rollout_runtime = validate_runtime(base_image if base_image is not None else runtime)
 
         rollout_dockerfile = str(dockerfile).strip() if dockerfile is not None else ""
-        if rollout_mode == "repo" and not rollout_dockerfile:
-            raise RolloutConfigError("dockerfile is required for mode='repo'.")
+        if not rollout_dockerfile:
+            raise RolloutConfigError("dockerfile is required.")
 
         resolved_run_cmd = run_cmd.strip() if isinstance(run_cmd, str) and run_cmd.strip() else None
         if resolved_run_cmd is None and isinstance(command, str) and command.strip():
@@ -362,7 +366,7 @@ class Rollouts:
         rollout_run_cmd = resolved_run_cmd
 
         if disk_mb is None:
-            rollout_disk_mb = REPO_DEFAULT_DISK_MB if rollout_mode == "repo" else SCRIPT_DEFAULT_DISK_MB
+            rollout_disk_mb = REPO_DEFAULT_DISK_MB
         elif isinstance(disk_mb, bool) or not isinstance(disk_mb, int) or disk_mb <= 0:
             raise RolloutError("disk_mb must be a positive integer.")
         else:
@@ -381,32 +385,19 @@ class Rollouts:
 
         try:
             ensure_dir(rollout_path, exist_ok=False)
-
-            if rollout_mode == "script":
-                rollout_item = self.create_script_rollout(
-                    rollout_id=rollout_id,
-                    rollout_name=rollout_name,
-                    rollout_runtime=rollout_runtime,
-                    rollout_path=rollout_path,
-                    files=files,
-                    setup_cmd=None,
-                    run_cmd=validate_non_empty(rollout_run_cmd, field_name="run_cmd"),
-                    disk_mb=rollout_disk_mb,
-                    created_at=created_at,
-                )
-            else:
-                rollout_item = self.create_repo_rollout(
-                    rollout_id=rollout_id,
-                    rollout_name=rollout_name,
-                    rollout_runtime=rollout_runtime,
-                    rollout_path=rollout_path,
-                    source=source,
-                    dockerfile=rollout_dockerfile,
-                    run_cmd=rollout_run_cmd,
-                    ref=ref,
-                    disk_mb=rollout_disk_mb,
-                    created_at=created_at,
-                )
+            rollout_item = self.create_repo_rollout(
+                rollout_id=rollout_id,
+                rollout_name=rollout_name,
+                rollout_runtime=rollout_runtime,
+                rollout_path=rollout_path,
+                source=source,
+                dockerfile=rollout_dockerfile,
+                run_cmd=rollout_run_cmd,
+                ref=ref,
+                disk_mb=rollout_disk_mb,
+                created_at=created_at,
+                delete_on_success=bool(delete_on_success),
+            )
 
             metadata["rollouts"].append(rollout_item.to_metadata_entry())
             self.write_metadata(metadata)
@@ -536,6 +527,7 @@ class Rollouts:
         ref: str | None,
         disk_mb: int,
         created_at: str,
+        delete_on_success: bool = False,
     ) -> Rollout:
         if source is None:
             raise InvalidRepoError("source is required for mode='repo'.")
@@ -563,6 +555,7 @@ class Rollouts:
             run_cmd=run_cmd,
             disk_mb=disk_mb,
             created_at=created_at,
+            delete_on_success=delete_on_success,
         )
 
     def create_repo_containerized_rollout(
@@ -578,6 +571,7 @@ class Rollouts:
         run_cmd: str | None,
         disk_mb: int,
         created_at: str,
+        delete_on_success: bool = False,
     ) -> Rollout:
         source_prefix = "source/"
         created_files: list[str] = [source_prefix, "run.sh", "rollout.json", "build/"]
@@ -634,6 +628,7 @@ class Rollouts:
             "resolved_run_command": resolved_payload,
             "runtime_image": runtime_image_payload,
             "rootfs_path": str(built_image.path),
+            "deleteOnSuccess": bool(delete_on_success),
             "files": created_files,
             "disk_mb": disk_mb,
             "created_at": created_at,
@@ -658,6 +653,7 @@ class Rollouts:
             resolved_run_command=resolved_payload,
             rootfs_path=str(built_image.path),
             runtime_image=runtime_image_payload,
+            delete_on_success=bool(delete_on_success),
         )
 
     def resolve_dockerfile_path(self, *, dockerfile: str, source_dir: Path) -> Path:

@@ -1,24 +1,35 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-from sparkvm import SparkVM
+from sparkvm import RunConfig, SparkVM
 from sparkvm.rollouts import Rollouts
+
+# Replace this with a local git repo path or git URL.
+REPO_SOURCE = "/path/to/local/repo"
 
 
 def main() -> int:
     manager = Rollouts()
     rollout = manager.create(
         name="loop-run",
-        mode="script",
-        files={"main.py": "for _ in range(100):\n    print('hello from vm run example')\n"},
-        run_cmd="python3 /job/main.py",
+        source=REPO_SOURCE,
+        run_cmd="python3 main.py",
     )
 
     print("Created rollout")
     print(f"id: {rollout.id}")
 
-    vm = SparkVM(vcpu=2, memory="512M", timeout=30.0)
-    result = vm.run(rollout)
+    result = SparkVM().run(
+        rollout.id,
+        config=RunConfig(
+            vcpu=2,
+            memory="2G",
+            disk="4G",
+            timeout=30,
+            runtime="sparkvm-debian-minbase",
+            network=False,
+        ),
+    )
 
     print("\nVM run result")
     print(f"rollout_id: {result.rollout_id}")
@@ -28,10 +39,6 @@ def main() -> int:
     print(f"duration_ms: {result.duration_ms}")
     print(f"stdout: {result.stdout.strip()}")
     print(f"stderr: {result.stderr.strip()}")
-
-    # manager.delete_by_id(rollout.id)
-    # print("\nDeleted rollout")
-    # print(f"id: {rollout.id}")
     return 0
 
 

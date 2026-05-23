@@ -113,8 +113,11 @@ def resolve_container_command(
     run_cmd: str | None,
     docker_entrypoint: Any,
     docker_cmd: Any,
-    working_dir: str | None,
+    working_dir: str | None = None,
+    docker_working_dir: str | None = None,
 ) -> ResolvedCommand:
+    if docker_working_dir is not None and not working_dir:
+        working_dir = docker_working_dir
     resolved_working_dir = working_dir.strip() if isinstance(working_dir, str) and working_dir.strip() else "/workspace"
     normalized_entrypoint = normalize_command_value(docker_entrypoint)
     normalized_cmd = normalize_command_value(docker_cmd)

@@ -21,14 +21,14 @@ class ResultParsingTest(unittest.TestCase):
         self.rollout = Rollout(
             id="rollout-test-1",
             name="test",
-            mode="script",
+            mode="repo",
             base_image="debian-minbase",
             path=self.rollout_path,
-            command="python3 /job/main.py",
+            command="python3 /job/source/main.py",
             setup_cmd=None,
-            run_cmd="python3 /job/main.py",
+            run_cmd="python3 /job/source/main.py",
             disk_mb=1024,
-            files=["main.py", "run.sh"],
+            files=["source/", "run.sh"],
             created_at="2026-01-01T00:00:00Z",
         )
         self.execution_disk = ExecutionDisk(

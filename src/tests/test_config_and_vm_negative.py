@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -11,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from sparkvm.config import build_config, parse_memory_to_mib, resolve_home_dir
 from sparkvm.errors import InvalidMemoryError, InvalidResourceError, RolloutNotFoundError, RuntimeImageNotFound, SparkVMConfigError
 from sparkvm.rollouts import Rollout
-from sparkvm.vm import SparkVM
+from sparkvm.vm import RunConfig, SparkVM
 
 
 class ConfigNegativeTest(unittest.TestCase):
@@ -58,56 +59,21 @@ class SparkVMNegativeTest(unittest.TestCase):
     def _new_temp_path(self, *, prefix: str) -> Path:
         tmp = tempfile.TemporaryDirectory(prefix=prefix)
         self._tmpdirs.append(tmp)
-        return Path(tmp.name)
+        path = Path(tmp.name)
+        (path / "config.json").write_text(json.dumps({"resource_policy": {"max_vm_cpu_percent": 100, "max_vm_memory_percent": 100, "max_vm_disk_percent": 100, "min_host_cpu_percent": 0, "min_host_memory_percent": 0, "min_host_disk_percent": 0}}), encoding="utf-8")
+        return path
 
     def test_run_rejects_invalid_rollout_type(self) -> None:
         vm = SparkVM(home_dir=self._new_temp_path(prefix="sparkvm-vm-negative-"))
         with self.assertRaises(TypeError):
             vm.run(123)  # type: ignore[arg-type]
 
-    def test_run_rollout_item_with_missing_path_raises(self) -> None:
+    def test_run_rollout_id_not_found_raises(self) -> None:
         vm = SparkVM(home_dir=self._new_temp_path(prefix="sparkvm-vm-negative-"))
-        missing_path = self._new_temp_path(prefix="sparkvm-missing-rollout-") / "missing"
-
-        rollout = Rollout(
-            id="rollout-item-missing-path",
-            name="missing",
-            mode="script",
-            path=missing_path,
-            command="python3 /job/main.py",
-            setup_cmd=None,
-            run_cmd="python3 /job/main.py",
-            disk_mb=1024,
-            files=["main.py", "run.sh"],
-            created_at="2026-01-01T00:00:00Z",
-            runtime="python-3.12-slim",
-        )
-
         with self.assertRaises(RolloutNotFoundError):
-            vm.run(rollout)
+            vm.run("rollout-does-not-exist")
 
-    def test_run_rollout_item_with_missing_rollout_json_raises(self) -> None:
-        vm = SparkVM(home_dir=self._new_temp_path(prefix="sparkvm-vm-negative-"))
-        rollout_dir = self._new_temp_path(prefix="sparkvm-rollout-dir-no-json-")
-
-        rollout = Rollout(
-            id="rollout-item-no-json",
-            name="missing-json",
-            mode="script",
-            path=rollout_dir,
-            command="python3 /job/main.py",
-            setup_cmd=None,
-            run_cmd="python3 /job/main.py",
-            disk_mb=1024,
-            files=["main.py", "run.sh"],
-            created_at="2026-01-01T00:00:00Z",
-            runtime="python-3.12-slim",
-        )
-
-        with self.assertRaises(RolloutNotFoundError):
-            vm.run(rollout)
-
-    def test_run_uses_rollout_runtime_when_vm_runtime_not_explicit(self) -> None:
+    def test_run_uses_run_config_runtime(self) -> None:
         vm = SparkVM(home_dir=self._new_temp_path(prefix="sparkvm-vm-negative-"))
         rollout_dir = self._new_temp_path(prefix="sparkvm-rollout-runtime-")
         (rollout_dir / "rollout.json").write_text("{}", encoding="utf-8")
@@ -123,23 +89,26 @@ class SparkVMNegativeTest(unittest.TestCase):
             raise RuntimeImageNotFound("missing")
 
         vm._images.resolve = MethodType(_fake_resolve, vm._images)
-
         rollout = Rollout(
-            id="rollout-runtime-uses-rollout",
-            name="runtime-from-rollout",
-            mode="script",
+            id="rollout-runtime-uses-config",
+            name="runtime-from-config",
+            mode="repo",
             path=rollout_dir,
-            command="python3 /job/main.py",
+            command="python3 /job/source/main.py",
             setup_cmd=None,
-            run_cmd="python3 /job/main.py",
+            run_cmd="python3 /job/source/main.py",
             disk_mb=1024,
-            files=["main.py", "run.sh"],
+            files=["run.sh"],
             created_at="2026-01-01T00:00:00Z",
-            runtime="ubuntu-24.04",
+            runtime="python-3.12-slim",
         )
+        vm._rollouts.get_by_id = MethodType(lambda _self, _rid: rollout, vm._rollouts)
 
         with self.assertRaises(RuntimeImageNotFound):
-            vm.run(rollout)
+            vm.run(
+                rollout.id,
+                config=RunConfig(runtime="ubuntu-24.04"),
+            )
         self.assertEqual("ubuntu-24.04", captured["runtime"])
 
 

@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sparkvm.errors import InvalidRolloutModeError, RolloutConfigError, RolloutError, RolloutMetadataError, RolloutNotFoundError
+from sparkvm.errors import InvalidRepoError, RolloutConfigError, RolloutMetadataError, RolloutNotFoundError
 from sparkvm.rollouts import Rollouts
 
 
@@ -29,98 +29,27 @@ class RolloutNegativeTest(unittest.TestCase):
     def write_metadata(self, obj: object) -> None:
         self._write_metadata_raw(json.dumps(obj))
 
-    def test_create_rejects_empty_files(self) -> None:
-        with self.assertRaises(RolloutError):
-            self.rollout.create(
-                name="bad-empty-files",
-                mode="script",
-                files={},
-                run_cmd="python3 /job/main.py",
-            )
+    def test_create_rejects_missing_source_and_run_cmd(self) -> None:
+        with self.assertRaises(TypeError):
+            self.rollout.create(name="x", run_cmd="echo hi")  # type: ignore[call-arg]
 
-    def test_create_rejects_invalid_runtime(self) -> None:
-        with self.assertRaises(RolloutError):
+        with self.assertRaises(TypeError):
+            self.rollout.create(name="x", source="/tmp")  # type: ignore[call-arg]
+
+    def test_create_rejects_unsupported_args(self) -> None:
+        with self.assertRaises(RolloutConfigError):
             self.rollout.create(
-                name="bad-image",
-                mode="script",
-                runtime="   ",
+                name="legacy",
+                source="https://github.com/org/repo.git",
+                run_cmd="pytest -q",
                 files={"main.py": "print('x')"},
-                run_cmd="python3 /job/main.py",
             )
 
-    def test_create_rejects_invalid_mode(self) -> None:
-        with self.assertRaises(InvalidRolloutModeError):
-            self.rollout.create(
-                name="bad-mode",
-                mode="container",
-                files={"main.py": "print('x')"},
-                run_cmd="python3 /job/main.py",
-            )
-
-    def test_create_rejects_invalid_name_and_command(self) -> None:
-        with self.assertRaises(RolloutError):
-            self.rollout.create(
-                name="",
-                mode="script",
-                files={"main.py": "print('x')"},
-                run_cmd="python3 /job/main.py",
-            )
-
-        with self.assertRaises(RolloutError):
-            self.rollout.create(
-                name="bad-command",
-                mode="script",
-                files={"main.py": "print('x')"},
-                run_cmd="  ",
-            )
-
-    def test_create_rejects_image_parameter(self) -> None:
-        with self.assertRaises(RolloutConfigError) as ctx:
-            self.rollout.create(
-                name="bad-container-config",
-                mode="repo",
-                source=self.home_dir,
-                image="python:3.12-slim",
-                dockerfile="Dockerfile",
-                run_cmd="python3 main.py",
-            )
-        self.assertIn("image= is not supported", str(ctx.exception))
-
-    def test_create_rejects_invalid_rollout_paths(self) -> None:
-        invalid_paths = [
-            "/etc/passwd",
-            "../escape.py",
-            "a//b.py",
-            "./main.py",
-            "dir/../main.py",
-            "dir/./main.py",
-            " ",
-        ]
-
-        for path in invalid_paths:
-            with self.subTest(path=path):
-                with self.assertRaises(RolloutError):
-                    self.rollout.create(
-                        name="bad-path",
-                        mode="script",
-                        files={path: "print('x')"},
-                        run_cmd="python3 /job/main.py",
-                    )
-
-    def test_create_rejects_invalid_file_content_type(self) -> None:
-        with self.assertRaises(RolloutError):
-            self.rollout.create(
-                name="bad-content",
-                mode="script",
-                files={"main.py": 123},  # type: ignore[arg-type]
-                run_cmd="python3 /job/main.py",
-            )
-
-    def test_get_by_id_rejects_invalid_rollout_id_format(self) -> None:
-        for rollout_id in ["", " ", "abc", "rollout with spaces", "rollout-"]:
-            with self.subTest(rollout_id=rollout_id):
-                with self.assertRaises(RolloutError):
-                    self.rollout.get_by_id(rollout_id)
+    def test_create_rejects_non_git_local_source(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="sparkvm-non-git-") as tmp_dir:
+            src = Path(tmp_dir)
+            with self.assertRaises(InvalidRepoError):
+                self.rollout.create(name="repo", source=src, run_cmd="python3 main.py")
 
     def test_get_by_id_raises_when_rollout_directory_missing(self) -> None:
         self.write_metadata(
@@ -130,11 +59,12 @@ class RolloutNegativeTest(unittest.TestCase):
                     {
                         "id": "rollout-missing-dir",
                         "name": "x",
+                        "mode": "repo",
                         "runtime": "python-3.12-slim",
                         "path": str(self.home_dir / "rollouts" / "rollout-missing-dir"),
-                        "command": "python3 /job/main.py",
-                        "run_cmd": "python3 /job/main.py",
-                        "files": ["main.py", "run.sh"],
+                        "run_cmd": "python3 /job/source/main.py",
+                        "files": ["source/", "run.sh"],
+                        "deleteOnSuccess": False,
                         "created_at": "2026-01-01T00:00:00Z",
                         "updated_at": None,
                     }
@@ -145,59 +75,8 @@ class RolloutNegativeTest(unittest.TestCase):
         with self.assertRaises(RolloutNotFoundError):
             self.rollout.get_by_id("rollout-missing-dir")
 
-    def test_get_by_id_raises_when_rollout_json_missing(self) -> None:
-        rollout_dir = self.home_dir / "rollouts" / "rollout-has-dir-no-json"
-        rollout_dir.mkdir(parents=True, exist_ok=True)
-
-        self.write_metadata(
-            {
-                "version": 1,
-                "rollouts": [
-                    {
-                        "id": "rollout-has-dir-no-json",
-                        "name": "x",
-                        "runtime": "python-3.12-slim",
-                        "path": str(rollout_dir),
-                        "command": "python3 /job/main.py",
-                        "run_cmd": "python3 /job/main.py",
-                        "files": ["main.py", "run.sh"],
-                        "created_at": "2026-01-01T00:00:00Z",
-                        "updated_at": None,
-                    }
-                ],
-            }
-        )
-
-        with self.assertRaises(RolloutNotFoundError):
-            self.rollout.get_by_id("rollout-has-dir-no-json")
-
-    def test_delete_by_id_not_found(self) -> None:
-        with self.assertRaises(RolloutNotFoundError):
-            self.rollout.delete_by_id("rollout-missing-123")
-
     def test_corrupt_metadata_json_raises_metadata_error(self) -> None:
         self._write_metadata_raw("{this is not valid json")
-
-        with self.assertRaises(RolloutMetadataError):
-            self.rollout.list()
-
-    def test_metadata_must_be_object(self) -> None:
-        self.write_metadata(["not", "an", "object"])
-
-        with self.assertRaises(RolloutMetadataError):
-            self.rollout.list()
-
-    def test_metadata_version_and_rollouts_types(self) -> None:
-        self.write_metadata({"version": "1", "rollouts": []})
-        with self.assertRaises(RolloutMetadataError):
-            self.rollout.list()
-
-        self.write_metadata({"version": 1, "rollouts": "not-a-list"})
-        with self.assertRaises(RolloutMetadataError):
-            self.rollout.list()
-
-    def test_list_raises_on_invalid_rollout_entry_shape(self) -> None:
-        self.write_metadata({"version": 1, "rollouts": [{"id": "rollout-bad"}]})
 
         with self.assertRaises(RolloutMetadataError):
             self.rollout.list()

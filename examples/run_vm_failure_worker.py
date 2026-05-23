@@ -3,29 +3,31 @@ from __future__ import annotations
 
 import json
 
-from sparkvm import SparkVM
+from sparkvm import RunConfig, SparkVM
 from sparkvm.errors import SparkVMError
 from sparkvm.rollouts import Rollouts
 from sparkvm.workers import Workers
+
+# Replace this with a local git repo path or git URL.
+REPO_SOURCE = "/path/to/local/repo"
 
 
 def main() -> int:
     manager = Rollouts()
     rollout = manager.create(
         name="example-failure-worker",
-        mode="script",
-        files={"main.py": "import time\ntime.sleep(120)\n"},
-        run_cmd="python3 /job/main.py",
+        source=REPO_SOURCE,
+        run_cmd="python3 slow_script.py",
     )
 
     print("Created rollout")
     print(f"id: {rollout.id}")
 
-    # Intentionally short timeout to trigger infrastructure/runtime failure.
-    vm = SparkVM(vcpu=1, memory="512M", timeout=3.0)
-
     try:
-        vm.run(rollout)
+        SparkVM().run(
+            rollout.id,
+            config=RunConfig(vcpu=1, memory="512M", disk="2G", timeout=3.0),
+        )
         print("Unexpected success. This example is meant to fail.")
         return 1
     except SparkVMError as exc:

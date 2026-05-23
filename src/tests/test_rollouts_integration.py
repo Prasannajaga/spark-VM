@@ -23,11 +23,19 @@ class RolloutIntegrationTest(unittest.TestCase):
     def test_python_rollout_execution(self) -> None:
         home_dir = Path(os.getenv("SPARKVM_HOME", "~/.sparkvm")).expanduser()
         rollout_manager = Rollouts(home_dir=home_dir)
+        repo_dir = home_dir / "itest-repo-simple"
+        repo_dir.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "config", "user.email", "sparkvm@example.com"], cwd=repo_dir, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "config", "user.name", "SparkVM Test"], cwd=repo_dir, check=True, capture_output=True, text=True)
+        (repo_dir / "main.py").write_text("print('integration-ok')\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=repo_dir, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=repo_dir, check=True, capture_output=True, text=True)
 
         rollout = rollout_manager.create(
             name="integration-python",
-            files={"main.py": "print('integration-ok')"},
-            run_cmd="python3 /job/main.py",
+            source=repo_dir,
+            run_cmd="python3 main.py",
         )
 
         try:
@@ -46,11 +54,19 @@ class RolloutIntegrationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="sparkvm-itest-rollout-") as tmp_home:
             home_dir = Path(tmp_home)
             rollout_manager = Rollouts(home_dir=home_dir)
+            repo_dir = home_dir / "itest-repo-list"
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "config", "user.email", "sparkvm@example.com"], cwd=repo_dir, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "config", "user.name", "SparkVM Test"], cwd=repo_dir, check=True, capture_output=True, text=True)
+            (repo_dir / "main.py").write_text("print('integration-list-get-delete')\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=repo_dir, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo_dir, check=True, capture_output=True, text=True)
 
             rollout = rollout_manager.create(
                 name="integration-list-get-delete",
-                files={"main.py": "print('integration-list-get-delete')"},
-                run_cmd="python3 /job/main.py",
+                source=repo_dir,
+                run_cmd="python3 main.py",
             )
 
             try:
@@ -99,9 +115,8 @@ class RolloutIntegrationTest(unittest.TestCase):
 
             rollout = rollout_manager.create(
                 name="integration-repo",
-                mode="repo",
                 source=repo_dir,
-                dockerfile="Dockerfile",
+                run_cmd="sh -c 'echo hello-from-repo'",
             )
 
             try:

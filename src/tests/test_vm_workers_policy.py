@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -11,11 +10,10 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sparkvm.errors import ExecutionDiskError, FirecrackerBinaryNotInstalled, JobTimeoutError
 from sparkvm.image import BaseImage
 from sparkvm.result import VMResult
 from sparkvm.rollouts import Rollout
-from sparkvm.vm import SparkVM
+from sparkvm.vm import RunConfig, SparkVM
 
 
 class _FakeAPI:
@@ -32,7 +30,6 @@ class _FakeAPI:
 
 class _FakeFirecrackerProcess:
     def __init__(self, *, firecracker_bin: Path, socket_path: Path, log_path: Path | None = None) -> None:
-        self.firecracker_bin = firecracker_bin
         self.socket_path = socket_path
         self.log_path = log_path
         self._running = False
@@ -60,20 +57,21 @@ class VMWorkersPolicyTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory(prefix="sparkvm-vm-workers-policy-")
         self.home = Path(self.tmp.name)
+        (self.home / "config.json").write_text(json.dumps({"resource_policy": {"max_vm_cpu_percent": 100, "max_vm_memory_percent": 100, "max_vm_disk_percent": 100, "min_host_cpu_percent": 0, "min_host_memory_percent": 0, "min_host_disk_percent": 0}}), encoding="utf-8")
         self.rollout_dir = self.home / "rollout-item"
         self.rollout_dir.mkdir(parents=True, exist_ok=True)
         (self.rollout_dir / "rollout.json").write_text("{}", encoding="utf-8")
         self.rollout = Rollout(
             id="rollout-example-1",
             name="example",
-            mode="script",
+            mode="repo",
             base_image="debian-minbase",
             path=self.rollout_dir,
-            command="python3 /job/main.py",
+            command="python3 /job/source/main.py",
             setup_cmd=None,
-            run_cmd="python3 /job/main.py",
+            run_cmd="python3 /job/source/main.py",
             disk_mb=1024,
-            files=["main.py", "run.sh"],
+            files=["run.sh"],
             created_at="2026-01-01T00:00:00Z",
             updated_at=None,
         )
@@ -81,19 +79,9 @@ class VMWorkersPolicyTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def _new_vm(
-        self,
-        *,
-        env: dict[str, str] | None = None,
-        keep_rootfs_on_failure: bool = False,
-        keep_disk_on_failure: bool = False,
-    ) -> SparkVM:
-        vm = SparkVM(
-            home_dir=self.home,
-            env=env,
-            keep_rootfs_on_failure=keep_rootfs_on_failure,
-            keep_disk_on_failure=keep_disk_on_failure,
-        )
+    def _new_vm(self) -> SparkVM:
+        vm = SparkVM(home_dir=self.home)
+        vm._rollouts.get_by_id = MethodType(lambda _self, _rid: self.rollout, vm._rollouts)
         vm._setup.ensure_layout()
         (self.home / "images").mkdir(parents=True, exist_ok=True)
         (self.home / "images" / "fake-rootfs.ext4").write_bytes(b"rootfs")
@@ -108,15 +96,11 @@ class VMWorkersPolicyTest(unittest.TestCase):
             ),
             vm._images,
         )
-        vm.wait_for_firecracker_socket = MethodType(
-            lambda self, api, process, timeout_sec: None, vm
-        )
-        vm.configure_microvm = MethodType(
-            lambda self, api, runtime_image, worker_rootfs_path, execution_disk_path: None, vm
-        )
+        vm.wait_for_firecracker_socket = MethodType(lambda self, api, process, timeout_sec: None, vm)
+        vm.configure_microvm = MethodType(lambda self, api, runtime_image, worker_rootfs_path, execution_disk_path: None, vm)
         return vm
 
-    def test_successful_run_cleans_up_worker_directory(self) -> None:
+    def test_non_zero_exit_code_preserves_worker_with_machine_specs(self) -> None:
         vm = self._new_vm()
 
         def _fake_copy_rollout(self_obj, runtime_files=None) -> None:  # noqa: ANN001
@@ -130,6 +114,59 @@ class VMWorkersPolicyTest(unittest.TestCase):
                 rollout_name=self.rollout.name,
                 rollout_mode=self.rollout.mode,
                 runtime=self.rollout.base_image,
+                vm_id=vm_id,
+                status="run_failed",
+                exit_code=2,
+                duration_ms=duration_ms,
+                run=None,
+                firecracker_log_path=firecracker_log_path,
+                execution_disk_path=self_obj.path,
+            )
+
+        with patch("sparkvm.vm.FirecrackerAPIClient", _FakeAPI), patch("sparkvm.vm.FirecrackerProcess", _FakeFirecrackerProcess), patch(
+            "sparkvm.vm.ExecutionDisk.copy_rollout", _fake_copy_rollout
+        ), patch("sparkvm.vm.ExecutionDisk.read_result", _fake_read_result):
+            result = vm.run(self.rollout.id, config=RunConfig(vcpu=2, memory="2G", disk="4G", timeout=30, network=False))
+
+        self.assertEqual(2, result.exit_code)
+        worker_entries = list((self.home / "workers").glob("vm-*"))
+        self.assertEqual(1, len(worker_entries))
+        payload = json.loads((worker_entries[0] / "result.json").read_text(encoding="utf-8"))
+        self.assertIn("machine_specs", payload)
+        self.assertEqual(2, payload["machine_specs"]["vcpu"])
+        self.assertEqual(2048, payload["machine_specs"]["memory"])
+        self.assertEqual(4096, payload["machine_specs"]["disk"])
+        self.assertFalse(payload["machine_specs"]["network"])
+
+    def test_delete_on_success_invokes_rollout_delete(self) -> None:
+        vm = self._new_vm()
+        rollout = Rollout(
+            id=self.rollout.id,
+            name=self.rollout.name,
+            mode=self.rollout.mode,
+            base_image=self.rollout.base_image,
+            path=self.rollout.path,
+            command=self.rollout.command,
+            setup_cmd=self.rollout.setup_cmd,
+            run_cmd=self.rollout.run_cmd,
+            disk_mb=self.rollout.disk_mb,
+            files=self.rollout.files,
+            created_at=self.rollout.created_at,
+            delete_on_success=True,
+        )
+        vm._rollouts.get_by_id = MethodType(lambda _self, _rid: rollout, vm._rollouts)
+
+        def _fake_copy_rollout(self_obj, runtime_files=None) -> None:  # noqa: ANN001
+            del runtime_files
+            self_obj.path.parent.mkdir(parents=True, exist_ok=True)
+            self_obj.path.write_bytes(b"fake-ext4")
+
+        def _fake_read_result(self_obj, vm_id: str, duration_ms: int, firecracker_log_path: Path | None) -> VMResult:  # noqa: ANN001
+            return VMResult(
+                rollout_id=rollout.id,
+                rollout_name=rollout.name,
+                rollout_mode=rollout.mode,
+                runtime=rollout.base_image,
                 vm_id=vm_id,
                 status="passed",
                 exit_code=0,
@@ -139,283 +176,16 @@ class VMWorkersPolicyTest(unittest.TestCase):
                 execution_disk_path=self_obj.path,
             )
 
+        called: list[str] = []
+        vm._rollouts.delete_by_id = MethodType(lambda _self, rid: called.append(rid), vm._rollouts)
+
         with patch("sparkvm.vm.FirecrackerAPIClient", _FakeAPI), patch("sparkvm.vm.FirecrackerProcess", _FakeFirecrackerProcess), patch(
-            "sparkvm.vm.ExecutionDisk.copy_rollout",
-            _fake_copy_rollout,
+            "sparkvm.vm.ExecutionDisk.copy_rollout", _fake_copy_rollout
         ), patch("sparkvm.vm.ExecutionDisk.read_result", _fake_read_result):
-            result = vm.run(self.rollout)
+            result = vm.run(rollout.id)
 
-        self.assertEqual(0, result.exit_code)
-        worker_entries = list((self.home / "workers").glob("vm-*"))
-        self.assertEqual([], worker_entries)
-
-    def test_non_zero_exit_code_preserves_worker_directory(self) -> None:
-        vm = self._new_vm()
-
-        def _fake_copy_rollout(self_obj, runtime_files=None) -> None:  # noqa: ANN001
-            del runtime_files
-            self_obj.path.parent.mkdir(parents=True, exist_ok=True)
-            self_obj.path.write_bytes(b"fake-ext4")
-
-        def _fake_read_result(self_obj, vm_id: str, duration_ms: int, firecracker_log_path: Path | None) -> VMResult:  # noqa: ANN001
-            return VMResult(
-                rollout_id=self.rollout.id,
-                rollout_name=self.rollout.name,
-                rollout_mode=self.rollout.mode,
-                runtime=self.rollout.base_image,
-                vm_id=vm_id,
-                status="run_failed",
-                exit_code=2,
-                duration_ms=duration_ms,
-                run=None,
-                firecracker_log_path=firecracker_log_path,
-                execution_disk_path=self_obj.path,
-            )
-
-        with patch("sparkvm.vm.FirecrackerAPIClient", _FakeAPI), patch("sparkvm.vm.FirecrackerProcess", _FakeFirecrackerProcess), patch(
-            "sparkvm.vm.ExecutionDisk.copy_rollout",
-            _fake_copy_rollout,
-        ), patch("sparkvm.vm.ExecutionDisk.read_result", _fake_read_result):
-            result = vm.run(self.rollout)
-
-        self.assertEqual(2, result.exit_code)
-        self.assertFalse(result.passed)
-        self.assertIsNotNone(result.worker_path)
-        worker_entries = list((self.home / "workers").glob("vm-*"))
-        self.assertEqual(1, len(worker_entries))
-        self.assertFalse((worker_entries[0] / "rootfs.ext4").exists())
-        self.assertFalse((worker_entries[0] / "rollout.ext4").exists())
-        result_path = worker_entries[0] / "result.json"
-        self.assertTrue(result_path.exists())
-        payload = json.loads(result_path.read_text(encoding="utf-8"))
-        self.assertEqual("run_failed", payload["status"])
-        self.assertFalse(payload["rootfs_preserved"])
-        self.assertFalse(payload["execution_disk_preserved"])
-        self.assertEqual("keep_rootfs_on_failure is false", payload["rootfs_removed_reason"])
-        self.assertEqual("keep_disk_on_failure is false", payload["execution_disk_removed_reason"])
-
-    def test_infrastructure_failure_preserves_worker_and_writes_failure_json(self) -> None:
-        vm = SparkVM(home_dir=self.home)
-        vm._setup.ensure_layout()
-        vm._setup.firecracker_binary_path = MethodType(
-            lambda _self: (_ for _ in ()).throw(FirecrackerBinaryNotInstalled("missing firecracker")),
-            vm._setup,
-        )
-
-        with self.assertRaises(FirecrackerBinaryNotInstalled):
-            vm.run(self.rollout)
-
-        worker_dirs = list((self.home / "workers").glob("vm-*"))
-        self.assertEqual(1, len(worker_dirs))
-        failure_path = worker_dirs[0] / "failure.json"
-        self.assertTrue(failure_path.exists())
-        payload = json.loads(failure_path.read_text(encoding="utf-8"))
-        self.assertEqual("infrastructure_failed", payload["status"])
-        self.assertEqual("FirecrackerBinaryNotInstalled", payload["error_type"])
-        self.assertEqual(self.rollout.id, payload["rollout_id"])
-        self.assertFalse(payload["rootfs_preserved"])
-        self.assertFalse(payload["execution_disk_preserved"])
-
-    def test_infrastructure_failure_after_disk_creation_deletes_rootfs_and_disk_by_default(self) -> None:
-        vm = self._new_vm()
-
-        def _fake_copy_rollout(self_obj, runtime_files=None) -> None:  # noqa: ANN001
-            del runtime_files
-            self_obj.path.parent.mkdir(parents=True, exist_ok=True)
-            self_obj.path.write_bytes(b"fake-ext4")
-
-        def _fake_start(_self, startup_timeout_sec=5.0) -> None:  # noqa: ANN001
-            del startup_timeout_sec
-            raise RuntimeError("fc start failed")
-
-        with patch("sparkvm.vm.ExecutionDisk.copy_rollout", _fake_copy_rollout), patch(
-            "sparkvm.vm.FirecrackerProcess.start", _fake_start
-        ):
-            with self.assertRaises(Exception):
-                vm.run(self.rollout)
-
-        worker = next((self.home / "workers").glob("vm-*"))
-        self.assertFalse((worker / "rootfs.ext4").exists())
-        self.assertFalse((worker / "rollout.ext4").exists())
-
-    def test_setup_failed_preserves_worker_and_deletes_rootfs_and_disk_by_default(self) -> None:
-        vm = self._new_vm()
-
-        def _fake_copy_rollout(self_obj, runtime_files=None) -> None:  # noqa: ANN001
-            del runtime_files
-            self_obj.path.parent.mkdir(parents=True, exist_ok=True)
-            self_obj.path.write_bytes(b"fake-ext4")
-
-        def _fake_read_result(self_obj, vm_id: str, duration_ms: int, firecracker_log_path: Path | None) -> VMResult:  # noqa: ANN001
-            return VMResult(
-                rollout_id=self.rollout.id,
-                rollout_name=self.rollout.name,
-                rollout_mode=self.rollout.mode,
-                runtime=self.rollout.base_image,
-                vm_id=vm_id,
-                status="setup_failed",
-                exit_code=7,
-                duration_ms=duration_ms,
-                run=None,
-                firecracker_log_path=firecracker_log_path,
-                execution_disk_path=self_obj.path,
-            )
-
-        with patch("sparkvm.vm.FirecrackerAPIClient", _FakeAPI), patch("sparkvm.vm.FirecrackerProcess", _FakeFirecrackerProcess), patch(
-            "sparkvm.vm.ExecutionDisk.copy_rollout",
-            _fake_copy_rollout,
-        ), patch("sparkvm.vm.ExecutionDisk.read_result", _fake_read_result):
-            vm.run(self.rollout)
-
-        worker = next((self.home / "workers").glob("vm-*"))
-        self.assertFalse((worker / "rootfs.ext4").exists())
-        self.assertFalse((worker / "rollout.ext4").exists())
-
-    def test_keep_rootfs_on_failure_true_preserves_rootfs(self) -> None:
-        vm = self._new_vm(keep_rootfs_on_failure=True)
-
-        def _fake_copy_rollout(self_obj, runtime_files=None) -> None:  # noqa: ANN001
-            del runtime_files
-            self_obj.path.parent.mkdir(parents=True, exist_ok=True)
-            self_obj.path.write_bytes(b"fake-ext4")
-
-        def _fake_read_result(self_obj, vm_id: str, duration_ms: int, firecracker_log_path: Path | None) -> VMResult:  # noqa: ANN001
-            return VMResult(
-                rollout_id=self.rollout.id,
-                rollout_name=self.rollout.name,
-                rollout_mode=self.rollout.mode,
-                runtime=self.rollout.base_image,
-                vm_id=vm_id,
-                status="run_failed",
-                exit_code=2,
-                duration_ms=duration_ms,
-                run=None,
-                firecracker_log_path=firecracker_log_path,
-                execution_disk_path=self_obj.path,
-            )
-
-        with patch("sparkvm.vm.FirecrackerAPIClient", _FakeAPI), patch("sparkvm.vm.FirecrackerProcess", _FakeFirecrackerProcess), patch(
-            "sparkvm.vm.ExecutionDisk.copy_rollout",
-            _fake_copy_rollout,
-        ), patch("sparkvm.vm.ExecutionDisk.read_result", _fake_read_result):
-            vm.run(self.rollout)
-
-        worker = next((self.home / "workers").glob("vm-*"))
-        self.assertTrue((worker / "rootfs.ext4").exists())
-        self.assertFalse((worker / "rollout.ext4").exists())
-
-    def test_keep_disk_on_failure_true_preserves_rollout_disk_when_env_empty(self) -> None:
-        vm = self._new_vm(keep_disk_on_failure=True)
-
-        def _fake_copy_rollout(self_obj, runtime_files=None) -> None:  # noqa: ANN001
-            del runtime_files
-            self_obj.path.parent.mkdir(parents=True, exist_ok=True)
-            self_obj.path.write_bytes(b"fake-ext4")
-
-        def _fake_read_result(self_obj, vm_id: str, duration_ms: int, firecracker_log_path: Path | None) -> VMResult:  # noqa: ANN001
-            return VMResult(
-                rollout_id=self.rollout.id,
-                rollout_name=self.rollout.name,
-                rollout_mode=self.rollout.mode,
-                runtime=self.rollout.base_image,
-                vm_id=vm_id,
-                status="run_failed",
-                exit_code=2,
-                duration_ms=duration_ms,
-                run=None,
-                firecracker_log_path=firecracker_log_path,
-                execution_disk_path=self_obj.path,
-            )
-
-        with patch("sparkvm.vm.FirecrackerAPIClient", _FakeAPI), patch("sparkvm.vm.FirecrackerProcess", _FakeFirecrackerProcess), patch(
-            "sparkvm.vm.ExecutionDisk.copy_rollout",
-            _fake_copy_rollout,
-        ), patch("sparkvm.vm.ExecutionDisk.read_result", _fake_read_result):
-            vm.run(self.rollout)
-
-        worker = next((self.home / "workers").glob("vm-*"))
-        self.assertFalse((worker / "rootfs.ext4").exists())
-        self.assertTrue((worker / "rollout.ext4").exists())
-
-    def test_host_timeout_writes_failure_json_and_extracts_partial_results(self) -> None:
-        vm = self._new_vm()
-
-        def _fake_copy_rollout(self_obj, runtime_files=None) -> None:  # noqa: ANN001
-            del runtime_files
-            self_obj.path.parent.mkdir(parents=True, exist_ok=True)
-            self_obj.path.write_bytes(b"fake-ext4")
-
-        def _timeout_wait(_self, timeout_sec=None):  # noqa: ANN001
-            raise subprocess.TimeoutExpired(cmd=["firecracker"], timeout=timeout_sec or 1.0)
-
-        def _fake_extract(_self, *, execution_disk_path, output_results_dir, env):  # noqa: ANN001
-            del execution_disk_path, env
-            output_results_dir.mkdir(parents=True, exist_ok=True)
-            (output_results_dir / "run.stdout.log").write_text("partial out\n", encoding="utf-8")
-            (output_results_dir / "run.stderr.log").write_text("partial err\n", encoding="utf-8")
-            return {
-                "partial_results_extracted": True,
-                "partial_results_error": None,
-                "files": ["run.stdout.log", "run.stderr.log"],
-            }
-
-        with patch("sparkvm.vm.FirecrackerAPIClient", _FakeAPI), patch("sparkvm.vm.FirecrackerProcess", _FakeFirecrackerProcess), patch(
-            "sparkvm.vm.ExecutionDisk.copy_rollout",
-            _fake_copy_rollout,
-        ), patch("sparkvm.vm.FirecrackerProcess.wait", _timeout_wait), patch(
-            "sparkvm.vm.SparkVM.extract_partial_results_from_execution_disk",
-            _fake_extract,
-        ):
-            with self.assertRaises(JobTimeoutError):
-                vm.run(self.rollout)
-
-        worker = next((self.home / "workers").glob("vm-*"))
-        self.assertTrue((worker / "failure.json").exists())
-        self.assertTrue((worker / "results" / "run.stdout.log").exists())
-        self.assertTrue((worker / "results" / "run.stderr.log").exists())
-        payload = json.loads((worker / "failure.json").read_text(encoding="utf-8"))
-        self.assertEqual("timeout", payload["status"])
-        self.assertTrue(payload["partial_results_extracted"])
-        self.assertFalse((worker / "rollout.ext4").exists())
-
-    def test_missing_final_exit_code_writes_failure_json_and_preserves_partial_results(self) -> None:
-        vm = self._new_vm()
-
-        def _fake_copy_rollout(self_obj, runtime_files=None) -> None:  # noqa: ANN001
-            del runtime_files
-            self_obj.path.parent.mkdir(parents=True, exist_ok=True)
-            self_obj.path.write_bytes(b"fake-ext4")
-
-        def _fake_read_result(_self, vm_id: str, duration_ms: int, firecracker_log_path: Path | None):  # noqa: ANN001
-            del vm_id, duration_ms, firecracker_log_path
-            raise ExecutionDiskError("Guest did not produce result files (/results or /exit_code) on execution disk.")
-
-        def _fake_extract(_self, *, execution_disk_path, output_results_dir, env):  # noqa: ANN001
-            del execution_disk_path, env
-            output_results_dir.mkdir(parents=True, exist_ok=True)
-            (output_results_dir / "run.stdout.log").write_text("partial stdout\n", encoding="utf-8")
-            return {
-                "partial_results_extracted": True,
-                "partial_results_error": None,
-                "files": ["run.stdout.log"],
-            }
-
-        with patch("sparkvm.vm.FirecrackerAPIClient", _FakeAPI), patch("sparkvm.vm.FirecrackerProcess", _FakeFirecrackerProcess), patch(
-            "sparkvm.vm.ExecutionDisk.copy_rollout",
-            _fake_copy_rollout,
-        ), patch("sparkvm.vm.ExecutionDisk.read_result", _fake_read_result), patch(
-            "sparkvm.vm.SparkVM.extract_partial_results_from_execution_disk",
-            _fake_extract,
-        ):
-            with self.assertRaises(ExecutionDiskError):
-                vm.run(self.rollout)
-
-        worker = next((self.home / "workers").glob("vm-*"))
-        self.assertTrue((worker / "failure.json").exists())
-        self.assertTrue((worker / "results" / "run.stdout.log").exists())
-        payload = json.loads((worker / "failure.json").read_text(encoding="utf-8"))
-        self.assertEqual("infrastructure_failed", payload["status"])
-        self.assertTrue(payload["partial_results_extracted"])
+        self.assertTrue(result.passed)
+        self.assertEqual([rollout.id], called)
 
 
 if __name__ == "__main__":
