@@ -15,6 +15,13 @@ from .errors import RolloutConfigError, RolloutError, RolloutMetadataError, Roll
 from .fsops import ensure_dir, read_json, remove_file, remove_tree, write_json_atomic, write_text
 from .image_builder import RolloutImageBuilder, image_id_for_rollout
 from .logger import create_flow_logger, configure_logging
+from .state_store import (
+    get_rollout,
+    load_rollouts_metadata,
+    rollout_metadata_lock,
+    save_rollout,
+    save_rollouts_metadata,
+)
 from .utils import now_utc_iso, shell_quote
 
 
@@ -55,6 +62,17 @@ class Rollout:
             "runtime_image": dict(self.runtime_image),
             "dockerfile": self.dockerfile,
             "resolved_run_command": dict(self.resolved_run_command),
+        }
+
+    def to_index_entry(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "status": "scheduled",
+            "priority": 100,
+            "retry_count": 0,
+            "max_retries": 3,
+            "created_at": self.created_at,
+            "updated_at": self.created_at,
         }
 
     @classmethod
@@ -155,20 +173,20 @@ class Rollouts:
             dockerfile_path = (source_dir / dockerfile_candidate).resolve()
         if not dockerfile_path.is_file():
             raise RolloutConfigError(f"Dockerfile not found at: {dockerfile_path}")
-        flow.event(state=f"[Rollout] validated dockerfile={dockerfile_path}")
+        flow.event(state=f"[Docker] validated dockerfile={dockerfile_path}")
 
         ensure_dir(self.rollouts_dir, exist_ok=True)
-        metadata = self.load_metadata()
-        existing = self.find_existing_rollout_by_name(metadata=metadata, rollout_name=rollout_name)
+        with rollout_metadata_lock(self.home_dir):
+            metadata = self.load_metadata()
+            existing = self.find_existing_rollout_by_name(metadata=metadata, rollout_name=rollout_name)
+            existing_ids = set(metadata.get("rollouts", {}).keys()) if isinstance(metadata.get("rollouts"), dict) else set()
         if existing is not None:
             flow.event(state=f"[Rollout] reused existing rollout_id={existing.id}")
-            flow.close()
             return existing
-        metadata = self.drop_existing_rollouts_with_same_name(metadata=metadata, rollout_name=rollout_name)
 
         rollout_id = self.generate_rollout_id(
             rollout_name=rollout_name,
-            existing_ids={entry.get("id") for entry in metadata["rollouts"] if isinstance(entry, dict)},
+            existing_ids=existing_ids,
         )
         rollout_path = self.rollouts_dir / rollout_id
         created_at = now_utc_iso()
@@ -185,10 +203,9 @@ class Rollouts:
                 name=f"sparkvm.rollouts.create.{rollout_id}",
                 home_dir=self.home_dir,
                 context={"op": "rollout_create", "rollout_id": rollout_id},
-                file_path=rollout_path / "create.log",
             )
             create_flow.event(state="[Rollout] prepare complete")
-            create_flow.event(state="[Rollout] docker build started")
+            create_flow.event(state="[Docker] build started")
             built_image = RolloutImageBuilder().build_from_dockerfile(
                 rollout_id=rollout_id,
                 source_dir=source_dir,
@@ -198,7 +215,7 @@ class Rollouts:
                 image_metadata_path=image_metadata_path,
                 build_dir=build_dir,
             )
-            create_flow.event(state=f"[Rollout] image processed path={built_image.path}")
+            create_flow.event(state=f"[Docker] image processed path={built_image.path}")
 
             resolved_payload = {
                 "source": built_image.resolved_run_command.source,
@@ -229,6 +246,7 @@ class Rollouts:
                 "id": rollout_id,
                 "name": rollout_name,
                 "runtime": "Dockerfile",
+                "path": str(rollout_path),
                 "image_path": str(built_image.path),
                 "deleteOnSuccess": deleteOnSuccess,
                 "created_at": created_at,
@@ -236,74 +254,54 @@ class Rollouts:
                 "runtime_image": runtime_image_payload,
                 "resolved_run_command": resolved_payload,
             }
-            self.write_rollout_json(rollout_path / "rollout.json", rollout_json)
+            save_rollout(rollout_json, self.home_dir)
             rollout = Rollout.from_payload(rollout_json, rollout_path=rollout_path)
 
-            metadata["rollouts"].append(rollout.to_metadata_entry())
-            self.write_metadata(metadata)
+            with rollout_metadata_lock(self.home_dir):
+                metadata = self.load_metadata()
+                existing = self.find_existing_rollout_by_name(metadata=metadata, rollout_name=rollout_name)
+                if existing is not None and existing.id != rollout.id:
+                    self._delete_rollout_artifacts(rollout.to_metadata_entry())
+                    flow.event(state=f"[Rollout] reused concurrent rollout_id={existing.id}")
+                    return existing
+                rollouts_index = metadata.get("rollouts", {})
+                if not isinstance(rollouts_index, dict):
+                    rollouts_index = {}
+                rollouts_index[rollout.id] = rollout.to_index_entry()
+                metadata["rollouts"] = rollouts_index
+                self.write_metadata(metadata)
             create_flow.event(state=f"[Rollout] created duration_ms={int((time.monotonic() - create_started_at) * 1000)}")
-            create_flow.close()
-            flow.close()
             return rollout
         except Exception as exc:
             if create_flow is not None:
                 create_flow.exception(state=f"[Rollout] create failed error={exc}")
-                create_flow.close()
             else:
                 flow.exception(state=f"[Rollout] create failed name={rollout_name} error={exc}")
-            flow.close()
             remove_tree(rollout_path, ignore_errors=True)
             raise
-
-    def drop_existing_rollouts_with_same_name(self, *, metadata: dict[str, Any], rollout_name: str) -> dict[str, Any]:
-        rollouts_raw = metadata.get("rollouts", [])
-        if not isinstance(rollouts_raw, list):
-            return metadata
-
-        kept: list[dict[str, Any]] = []
-        removed_any = False
-
-        for entry in rollouts_raw:
-            if not isinstance(entry, dict):
-                continue
-            if entry.get("name") != rollout_name:
-                kept.append(entry)
-                continue
-
-            removed_any = True
-            try:
-                self._delete_rollout_artifacts(entry)
-            except OSError as exc:
-                raise RolloutError("Could not replace existing rollout directory.") from exc
-
-        if not removed_any:
-            return metadata
-
-        updated = dict(metadata)
-        updated["rollouts"] = kept
-        self.write_metadata(updated)
-        return updated
+        finally:
+            if create_flow is not None:
+                create_flow.close()
+            flow.close()
 
     def find_existing_rollout_by_name(self, *, metadata: dict[str, Any], rollout_name: str) -> Rollout | None:
-        rollouts_raw = metadata.get("rollouts", [])
-        if not isinstance(rollouts_raw, list):
+        rollouts_raw = metadata.get("rollouts", {})
+        if not isinstance(rollouts_raw, dict):
             return None
 
-        for entry in rollouts_raw:
+        for rollout_id, entry in rollouts_raw.items():
+            if not isinstance(rollout_id, str):
+                continue
             if not isinstance(entry, dict):
                 continue
-            if entry.get("name") != rollout_name:
+            try:
+                payload = get_rollout(rollout_id, self.home_dir)
+            except Exception:
                 continue
-
-            path_raw = entry.get("path")
-            if not isinstance(path_raw, str) or not path_raw.strip():
-                continue
-
-            rollout_json_path = Path(path_raw) / "rollout.json"
-            if not rollout_json_path.is_file():
+            if payload.get("name") != rollout_name:
                 continue
             try:
-                return self.load_rollout_json(rollout_json_path)
+                return Rollout.from_payload(payload, rollout_path=(self.rollouts_dir / rollout_id))
             except RolloutMetadataError:
                 continue
 
@@ -337,38 +335,38 @@ class Rollouts:
     def list(self) -> list[Rollout]:
         metadata = self.load_metadata()
         items: list[Rollout] = []
-        for entry in metadata["rollouts"]:
-            if not isinstance(entry, dict):
+        rollouts = metadata.get("rollouts", {})
+        if not isinstance(rollouts, dict):
+            return items
+        for rollout_id in rollouts.keys():
+            if not isinstance(rollout_id, str):
                 continue
-            path_raw = entry.get("path")
-            if not isinstance(path_raw, str) or not path_raw.strip():
+            try:
+                payload = get_rollout(rollout_id, self.home_dir)
+            except Exception:
                 continue
-            rollout_path = Path(path_raw)
-            rollout_json_path = rollout_path / "rollout.json"
-            if not rollout_json_path.is_file():
+            rollout_path = self.rollouts_dir / rollout_id
+            try:
+                items.append(Rollout.from_payload(payload, rollout_path=rollout_path))
+            except RolloutMetadataError:
                 continue
-            items.append(self.load_rollout_json(rollout_json_path))
         return items
 
     def get_by_id(self, rollout_id: str) -> Rollout:
         candidate_id = validate_rollout_id(rollout_id)
         metadata = self.load_metadata()
-        for entry in metadata["rollouts"]:
-            if not isinstance(entry, dict):
-                continue
-            if entry.get("id") != candidate_id:
-                continue
-
-            path_raw = entry.get("path")
-            if not isinstance(path_raw, str) or not path_raw.strip():
-                break
-            rollout_path = Path(path_raw)
-            rollout_json_path = rollout_path / "rollout.json"
-            if not rollout_json_path.is_file():
-                raise RolloutNotFoundError(f"rollout.json missing for id '{candidate_id}'.")
-            return self.load_rollout_json(rollout_json_path)
-
-        raise RolloutNotFoundError(f"Rollout not found: {candidate_id}")
+        rollouts = metadata.get("rollouts", {})
+        if not isinstance(rollouts, dict):
+            raise RolloutNotFoundError(f"Rollout not found: {candidate_id}")
+        if candidate_id not in rollouts:
+            raise RolloutNotFoundError(f"Rollout not found: {candidate_id}")
+        try:
+            payload = get_rollout(candidate_id, self.home_dir)
+        except FileNotFoundError as exc:
+            raise RolloutNotFoundError(f"rollout.json missing for id '{candidate_id}'.") from exc
+        except Exception as exc:
+            raise RolloutMetadataError(f"Could not read rollout file for id '{candidate_id}'.") from exc
+        return Rollout.from_payload(payload, rollout_path=self.rollouts_dir / candidate_id)
 
     def delete_by_id(self, rollout_id: str) -> None:
         candidate_id = validate_rollout_id(rollout_id)
@@ -378,24 +376,23 @@ class Rollouts:
             context={"op": "rollout_delete", "rollout_id": candidate_id},
         )
         flow.event(state=f"[Rollout] delete started rollout_id={candidate_id}")
-        metadata = self.load_metadata()
+        with rollout_metadata_lock(self.home_dir):
+            metadata = self.load_metadata()
+            rollouts = metadata.get("rollouts", {})
+            if not isinstance(rollouts, dict) or candidate_id not in rollouts:
+                flow.error(state=f"[Rollout] delete failed rollout_id={candidate_id} reason=not_found")
+                flow.close()
+                raise RolloutNotFoundError(f"Rollout not found: {candidate_id}")
 
-        target_index = -1
-        target_entry: dict[str, Any] | None = None
-        for index, entry in enumerate(metadata["rollouts"]):
-            if isinstance(entry, dict) and entry.get("id") == candidate_id:
-                target_index = index
-                target_entry = entry
-                break
-
-        if target_index < 0 or target_entry is None:
-            flow.error(state=f"[Rollout] delete failed rollout_id={candidate_id} reason=not_found")
-            flow.close()
-            raise RolloutNotFoundError(f"Rollout not found: {candidate_id}")
-
-        self._delete_rollout_artifacts(target_entry)
-        del metadata["rollouts"][target_index]
-        self.write_metadata(metadata)
+            try:
+                rollout_payload = get_rollout(candidate_id, self.home_dir)
+                rollout = Rollout.from_payload(rollout_payload, rollout_path=self.rollouts_dir / candidate_id)
+                self._delete_rollout_artifacts(rollout.to_metadata_entry())
+            except Exception:
+                self._delete_rollout_artifacts({"id": candidate_id, "path": str(self.rollouts_dir / candidate_id)})
+            del rollouts[candidate_id]
+            metadata["rollouts"] = rollouts
+            self.write_metadata(metadata)
         flow.event(state=f"[Rollout] delete finished rollout_id={candidate_id}")
         flow.close()
 
@@ -427,26 +424,23 @@ class Rollouts:
         return Rollout.from_payload(payload, rollout_path=rollout_json_path.parent)
 
     def load_metadata(self) -> dict[str, Any]:
-        if not self.metadata_path.exists():
-            ensure_dir(self.rollouts_dir, exist_ok=True)
-            return {"version": METADATA_VERSION, "rollouts": []}
-
         try:
-            raw = read_json(self.metadata_path, encoding="utf-8")
+            raw = load_rollouts_metadata(self.home_dir)
         except json.JSONDecodeError as exc:
             raise RolloutMetadataError(f"Corrupt metadata file: {self.metadata_path}") from exc
         except OSError as exc:
             raise RolloutMetadataError(f"Could not read metadata file: {self.metadata_path}") from exc
+        except Exception as exc:
+            raise RolloutMetadataError(f"Could not load rollout metadata: {exc}") from exc
 
         if not isinstance(raw, dict):
             raise RolloutMetadataError("metadata.json must contain a JSON object.")
-
         version = raw.get("version", METADATA_VERSION)
-        rollouts = raw.get("rollouts", [])
+        rollouts = raw.get("rollouts", {})
         if not isinstance(version, int):
             raise RolloutMetadataError("metadata.json field 'version' must be an integer.")
-        if not isinstance(rollouts, list):
-            raise RolloutMetadataError("metadata.json field 'rollouts' must be a list.")
+        if not isinstance(rollouts, dict):
+            raise RolloutMetadataError("metadata.json field 'rollouts' must be a dict.")
         return {"version": version, "rollouts": rollouts}
 
     def write_rollout_json(self, path: Path, payload: dict[str, Any]) -> None:
@@ -454,7 +448,7 @@ class Rollouts:
 
     def write_metadata(self, metadata: dict[str, Any]) -> None:
         ensure_dir(self.rollouts_dir, exist_ok=True)
-        write_json_atomic(self.metadata_path, metadata, pretty=True)
+        save_rollouts_metadata(metadata, self.home_dir)
 
 
 __all__ = [

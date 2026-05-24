@@ -15,6 +15,29 @@ from pathlib import Path
 from typing import Any
 
 
+def _prefix_for_logger(logger_name: str) -> str:
+    if logger_name.startswith("sparkvm.vm"):
+        return "[Firecracker vm]"
+    if logger_name.startswith("sparkvm.rollouts"):
+        return "[Rollout]"
+    if logger_name.startswith("sparkvm.image_builder"):
+        return "[Docker]"
+    if logger_name.startswith("sparkvm"):
+        return "[SparkVM]"
+    return ""
+
+
+class SparkVMLogFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        message = record.getMessage()
+        if message.startswith("["):
+            return message
+        prefix = _prefix_for_logger(record.name)
+        if prefix:
+            return f"{prefix} {message}"
+        return message
+
+
 def _normalize_level(level: str | int | None) -> int:
     if isinstance(level, int):
         return level
@@ -45,6 +68,15 @@ def configure_logging(
     base_logger = logging.getLogger("sparkvm")
     base_logger.setLevel(_normalize_level(level))
 
+    # Ensure SparkVM never writes file logs such as sparkvm.log.
+    for handler in list(base_logger.handlers):
+        if isinstance(handler, logging.FileHandler):
+            try:
+                handler.flush()
+                handler.close()
+            finally:
+                base_logger.removeHandler(handler)
+
     if console is None:
         console = os.getenv("SPARKVM_LOG_CONSOLE", "1").strip() not in {"0", "false", "False"}
 
@@ -54,10 +86,19 @@ def configure_logging(
             stream_handler = logging.StreamHandler(sys.stderr)
             stream_handler._sparkvm_console = True  # type: ignore[attr-defined]
             stream_handler.setLevel(_normalize_level(level))
-            stream_handler.setFormatter(logging.Formatter(fmt="%(message)s"))
+            stream_handler.setFormatter(SparkVMLogFormatter())
             base_logger.addHandler(stream_handler)
 
-    del home_dir
+    # Remove old sparkvm.log artifacts if present.
+    paths_to_remove: list[Path] = [Path.cwd() / "sparkvm.log"]
+    if home_dir is not None:
+        paths_to_remove.append(home_dir / "sparkvm.log")
+    for path in paths_to_remove:
+        try:
+            if path.exists() and path.is_file():
+                path.unlink()
+        except OSError:
+            pass
 
 
 def _fmt_fields(fields: dict[str, Any]) -> str:
@@ -83,7 +124,10 @@ class FlowLogger:
 
     def _message(self, *, state: str, fields: dict[str, Any]) -> str:
         payload = self._payload(fields)
-        message = f"state={state}"
+        state_text = state.strip()
+        if not state_text.startswith("["):
+            state_text = f"[{state_text}]"
+        message = state_text
         if payload:
             message += " " + _fmt_fields(payload)
         return message

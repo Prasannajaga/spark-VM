@@ -15,7 +15,7 @@ DEFAULT_HOME_DIR = Path.home() / ".sparkvm"
 # --- Regex Patterns ---
 MEMORY_RE = re.compile(r"^(?P<amount>\d+)\s*(?P<unit>m|mb|mib|g|gb|gib)?$", re.IGNORECASE)
 ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-WORKER_ID_RE = re.compile(r"^vm-[A-Za-z0-9]+$")
+WORKER_ID_RE = re.compile(r"^(vm|worker)-[A-Za-z0-9]+$")
 ROLLOUT_ID_RE = re.compile(r"^rollout-[A-Za-z0-9_-]+$")
 
 # --- Rollouts ---

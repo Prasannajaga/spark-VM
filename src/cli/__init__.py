@@ -1,5 +1,3 @@
 """CLI package for SparkVM."""
 
-from .main import main
-
-__all__ = ["main"]
+__all__: list[str] = []

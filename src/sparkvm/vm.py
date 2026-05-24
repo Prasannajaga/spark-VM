@@ -242,7 +242,7 @@ class SparkVM:
         vm_id = f"vm-{uuid4().hex[:12]}"
         worker_dir = self.config.workers_dir / vm_id
         ensure_dir(worker_dir, exist_ok=False)
-        run_logger = self._create_run_logger(vm_id=vm_id, worker_dir=worker_dir)
+        run_logger = self._create_run_logger(vm_id=vm_id)
         run_logger.info(
             "run_started rollout_id=%s rollout_name=%s runtime=%s worker_dir=%s",
             rollout_obj.id,
@@ -494,12 +494,12 @@ class SparkVM:
         self._close_run_logger(run_logger)
         return final_result
 
-    def _create_run_logger(self, *, vm_id: str, worker_dir: Path) -> logging.Logger:
+    def _create_run_logger(self, *, vm_id: str) -> logging.Logger:
         logger = logging.getLogger(f"sparkvm.vm.run.{vm_id}")
         logger.setLevel(logging.INFO)
         logger.propagate = True
         logger.handlers.clear()
-        LOGGER.info("run_logger_created vm_id=%s", vm_id)
+        LOGGER.info("run_logger_ready vm_id=%s", vm_id)
         return logger
 
     def _close_run_logger(self, logger: logging.Logger) -> None:

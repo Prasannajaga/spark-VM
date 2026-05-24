@@ -6,7 +6,7 @@ import argparse
 import json
 import sys
 
-from cli.cleanup import run_cleanup_command, run_reset_command
+from cli.cleanup import run_cleanup_command
 from sparkvm.errors import SparkVMError
 from cli.setup import (
     doctor_status,
@@ -64,32 +64,31 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Delete rollout artifacts after a passed run",
     )
-
-    run_parser = subparsers.add_parser("run", help="Run a rollout id")
-    run_parser.add_argument("rollout_id", help="Rollout id")
-    run_parser.add_argument("--vcpu", type=int, default=2, help="vCPU count")
-    run_parser.add_argument("--memory", default="2G", help="Memory (e.g. 2G)")
-    run_parser.add_argument("--disk", default="4G", help="Execution disk (e.g. 4G)")
-    run_parser.add_argument("--timeout", type=float, default=60.0, help="Timeout seconds")
-    run_parser.add_argument("--network", action="store_true", help="Enable network")
-    run_parser.add_argument(
-        "--env",
-        action="append",
-        default=None,
-        help="Environment variable KEY=VALUE (repeatable)",
-    )
+    rollout_subparsers.add_parser("list", help="List rollouts")
+    rollout_view = rollout_subparsers.add_parser("view", help="View one rollout by id")
+    rollout_view.add_argument("rollout_id", help="Rollout id")
 
     cleanup_parser = subparsers.add_parser("cleanup", help="Cleanup rollouts and/or preserved failed worker folders")
     cleanup_parser.add_argument("target", choices=["rollouts", "workers", "all"], help="Cleanup target")
     cleanup_parser.add_argument("--force", action="store_true", help="Skip confirmation prompt before deleting files")
 
-    reset_parser = subparsers.add_parser("reset", help="Delete all files under SparkVM home directory")
-    reset_parser.add_argument("--force", action="store_true", help="Skip confirmation prompt before deleting files")
-
-    workers_parser = subparsers.add_parser("workers", help="Inspect and manage preserved workers")
+    workers_parser = subparsers.add_parser("workers", help="Run and inspect workers")
     workers_subparsers = workers_parser.add_subparsers(dest="workers_command", required=True)
 
     workers_subparsers.add_parser("list", help="List preserved workers")
+    workers_run = workers_subparsers.add_parser("run", help="Run a rollout id")
+    workers_run.add_argument("rollout_id", help="Rollout id")
+    workers_run.add_argument("--vcpu", type=int, default=2, help="vCPU count")
+    workers_run.add_argument("--memory", default="2G", help="Memory (e.g. 2G)")
+    workers_run.add_argument("--disk", default="4G", help="Execution disk (e.g. 4G)")
+    workers_run.add_argument("--timeout", type=float, default=60.0, help="Timeout seconds")
+    workers_run.add_argument("--network", action="store_true", help="Enable network")
+    workers_run.add_argument(
+        "--env",
+        action="append",
+        default=None,
+        help="Environment variable KEY=VALUE (repeatable)",
+    )
 
     workers_view = workers_subparsers.add_parser("view", help="View worker details/log")
     workers_view.add_argument("vm_id", help="Worker vm id (e.g. vm-02e67edfc7a0)")
@@ -100,9 +99,7 @@ def build_parser() -> argparse.ArgumentParser:
     workers_view.add_argument("--results", action="store_true", help="Print sanitized worker result logs")
     workers_view.add_argument("--path", action="store_true", help="Print worker directory path")
 
-    workers_delete = workers_subparsers.add_parser("delete", help="Delete one preserved worker")
-    workers_delete.add_argument("vm_id", help="Worker vm id (e.g. vm-02e67edfc7a0)")
-    workers_delete.add_argument("--force", action="store_true", help="Skip confirmation prompt")
+    subparsers.add_parser("start", help="Start rollout scheduler loop")
 
     return parser
 
@@ -168,6 +165,21 @@ def run_rollout_execute(
             sort_keys=True,
         )
     )
+    return 0
+
+
+def run_rollout_list(home_dir: str | None) -> int:
+    manager = Rollouts(home_dir=home_dir)
+    rollouts = manager.list()
+    payload = [item.to_metadata_entry() for item in rollouts]
+    print(json.dumps(payload, indent=2, sort_keys=True))
+    return 0
+
+
+def run_rollout_view(home_dir: str | None, rollout_id: str) -> int:
+    manager = Rollouts(home_dir=home_dir)
+    rollout = manager.get_by_id(rollout_id)
+    print(json.dumps(rollout.to_metadata_entry(), indent=2, sort_keys=True))
     return 0
 
 
@@ -256,22 +268,61 @@ def run_workers_view(
     return 0
 
 
-def run_workers_delete(home_dir: str | None, vm_id: str, *, force: bool) -> int:
-    if not force:
-        response = input(f"Delete worker {vm_id}? [y/N] ").strip().lower()
-        if response not in {"y", "yes"}:
-            print("Aborted.")
-            return 0
+def run_start_scheduler(home_dir: str | None) -> int:
+    from sparkvm.scheduler import Scheduler
 
-    workers = Workers(home_dir=home_dir)
-    workers.delete_by_id(vm_id, force=force)
-    print(f"Deleted worker: {vm_id}")
+    scheduler = Scheduler(home_dir=home_dir)
+    try:
+        scheduler.start_loop()
+    except KeyboardInterrupt:
+        return 0
     return 0
 
 
+def run_worker_execute(home_dir: str | None, worker_id: str) -> int:
+    from sparkvm.worker_runner import WorkerRunner
+
+    runner = WorkerRunner(worker_id, home_dir=home_dir)
+    return runner.run()
+
+
+def _extract_internal_worker_run(argv: list[str]) -> tuple[str | None, str | None]:
+    if "__worker-run" not in argv:
+        return (None, None)
+    idx = argv.index("__worker-run")
+    if idx + 1 >= len(argv):
+        raise SparkVMError("Missing worker id for internal command __worker-run.")
+    worker_id = argv[idx + 1]
+    home_dir: str | None = None
+    if "--home-dir" in argv:
+        home_idx = argv.index("--home-dir")
+        if home_idx + 1 < len(argv):
+            home_dir = argv[home_idx + 1]
+    return (home_dir, worker_id)
+
+
 def main(argv: list[str] | None = None) -> int:
+    raw_argv = list(argv) if argv is not None else sys.argv[1:]
+    internal_home_dir, internal_worker_id = _extract_internal_worker_run(raw_argv)
+    if internal_worker_id is not None:
+        if internal_home_dir is not None:
+            import os
+
+            os.environ["SPARKVM_HOME"] = internal_home_dir
+        return run_worker_execute(internal_home_dir, internal_worker_id)
+
+    # Normalize `sparkvm rollout <id>` -> `sparkvm rollout view <id>`.
+    normalized_argv = list(raw_argv)
+    if (
+        len(normalized_argv) >= 2
+        and normalized_argv[0] == "rollout"
+        and not normalized_argv[1].startswith("-")
+        and normalized_argv[1] not in {"create", "list", "view"}
+    ):
+        normalized_argv.insert(1, "view")
+
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(normalized_argv)
 
     try:
         if args.home_dir is not None:
@@ -294,30 +345,30 @@ def main(argv: list[str] | None = None) -> int:
                     dockerfile=args.dockerfile,
                     delete_on_success=args.delete_on_success,
                 )
+            if args.rollout_command == "list":
+                return run_rollout_list(args.home_dir)
+            if args.rollout_command == "view":
+                return run_rollout_view(args.home_dir, args.rollout_id)
             parser.error(f"Unknown rollout command: {args.rollout_command}")
             return 2
-
-        if args.command == "run":
-            return run_rollout_execute(
-                args.home_dir,
-                rollout_id=args.rollout_id,
-                vcpu=args.vcpu,
-                memory=args.memory,
-                disk=args.disk,
-                timeout=args.timeout,
-                network=args.network,
-                env_pairs=args.env,
-            )
 
         if args.command == "cleanup":
             return run_cleanup_command(args.home_dir, args.target, args.force)
 
-        if args.command == "reset":
-            return run_reset_command(args.home_dir, args.force)
-
         if args.command == "workers":
             if args.workers_command == "list":
                 return run_workers_list(args.home_dir)
+            if args.workers_command == "run":
+                return run_rollout_execute(
+                    args.home_dir,
+                    rollout_id=args.rollout_id,
+                    vcpu=args.vcpu,
+                    memory=args.memory,
+                    disk=args.disk,
+                    timeout=args.timeout,
+                    network=args.network,
+                    env_pairs=args.env,
+                )
             if args.workers_command == "view":
                 return run_workers_view(
                     args.home_dir,
@@ -329,10 +380,11 @@ def main(argv: list[str] | None = None) -> int:
                     show_results=args.results,
                     show_path=args.path,
                 )
-            if args.workers_command == "delete":
-                return run_workers_delete(args.home_dir, args.vm_id, force=args.force)
             parser.error(f"Unknown workers command: {args.workers_command}")
             return 2
+
+        if args.command == "start":
+            return run_start_scheduler(args.home_dir)
 
         parser.error(f"Unknown command: {args.command}")
         return 2

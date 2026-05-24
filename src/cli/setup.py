@@ -276,12 +276,12 @@ def initialize_rollouts_metadata(paths: SparkVMPaths) -> None:
     if metadata_path.exists():
         try:
             payload = read_json(metadata_path, encoding="utf-8")
-            if isinstance(payload, dict) and isinstance(payload.get("rollouts", []), list):
+            if isinstance(payload, dict) and isinstance(payload.get("rollouts", {}), (dict, list)):
                 return
         except Exception:
             pass
 
-    write_json_atomic(metadata_path, {"version": 1, "rollouts": []}, encoding="utf-8", pretty=True)
+    write_json_atomic(metadata_path, {"version": 1, "rollouts": {}}, encoding="utf-8", pretty=True)
 
 
 def run_setup(

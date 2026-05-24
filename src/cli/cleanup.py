@@ -34,7 +34,7 @@ def workers_dir(config: SparkVMConfig) -> Path:
 
 
 def metadata_payload() -> dict[str, object]:
-    return {"version": ROLLOUT_METADATA_VERSION, "rollouts": []}
+    return {"version": ROLLOUT_METADATA_VERSION, "rollouts": {}}
 
 
 def write_rollout_metadata_reset(rollouts_dir_path: Path) -> None:

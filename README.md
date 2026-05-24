@@ -29,16 +29,46 @@ result = vm.run(rollout.id)
 print(result.status, result.exit_code)
 ```
 
-## Canonical CLI
+## CLI Usage (All Available Args)
 
 ```bash
-sparkvm setup
-sparkvm rollout create --name my-agent --runtime Dockerfile
-sparkvm run <rollout-id> --vcpu 2 --memory 2G --disk 4G --timeout 60 --network
+# Global option (available on every command)
+sparkvm [--home-dir <path>] <command> ...
+
+# Setup / diagnostics
+sparkvm setup [--force] [--owner <user>]
+sparkvm doctor
+sparkvm rollout list
+sparkvm start
+sparkvm cleanup {rollouts|workers|all} [--force]
+
+# Rollouts
+sparkvm rollout create \
+  --name <name> \
+  [--runtime Dockerfile] \
+  [--dockerfile Dockerfile] \
+  [--delete-on-success]
+sparkvm rollout view <rollout-id>
+sparkvm rollout <rollout-id>   # alias for: sparkvm rollout view <rollout-id>
+
+# Workers
+sparkvm workers run <rollout-id> \
+  [--vcpu 2] \
+  [--memory 2G] \
+  [--disk 4G] \
+  [--timeout 60.0] \
+  [--network] \
+  [--env KEY=VALUE --env KEY2=VALUE2]
+sparkvm workers list
+sparkvm workers view <worker-id>
+# Optional worker view flags:
+#   [--tail <n>] [--live] [--result] [--failure] [--results] [--path]
 ```
 
 ## Notes
 
 - SparkVM supports only Dockerfile-backed rollouts.
 - `rollout create` builds the Docker image, exports filesystem, injects `/init`, and stores rollout ext4 artifacts.
-- `sparkvm run` and `SparkVM.run()` execute by rollout id only.
+- `sparkvm start` runs the scheduler loop.
+- `sparkvm workers run <rollout-id>` executes one rollout directly and blocks.
+- `SparkVM.run(<rollout-id>)` is still the canonical blocking SDK run path.

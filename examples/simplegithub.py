@@ -17,7 +17,7 @@ def main() -> int:
         name="simplegithub-version2",
         runtime="Dockerfile",
         dockerfile=str(TEMPLATE_DOCKERFILE),
-        deleteOnSuccess=False,
+        deleteOnSuccess=True,
     )
 
     vm = SparkVM(
