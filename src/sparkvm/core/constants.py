@@ -15,8 +15,25 @@ DEFAULT_HOME_DIR = Path.home() / ".sparkvm"
 # --- Regex Patterns ---
 MEMORY_RE = re.compile(r"^(?P<amount>\d+)\s*(?P<unit>m|mb|mib|g|gb|gib)?$", re.IGNORECASE)
 ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-WORKER_ID_RE = re.compile(r"^(vm|worker)-[A-Za-z0-9]+$")
+WORKER_ID_RE = re.compile(r"^worker-[A-Za-z0-9]+$")
 ROLLOUT_ID_RE = re.compile(r"^rollout-[A-Za-z0-9_-]+$")
+
+# --- Machine Policy ---
+DEFAULT_MACHINE_POLICY = {
+    "host_reserved_memory": "2G",
+    "host_reserved_memory_bytes": 2 * 1024 * 1024 * 1024,
+    "host_reserved_disk": "20G",
+    "host_reserved_disk_bytes": 20 * 1024 * 1024 * 1024,
+    "max_memory_percent": 80,
+    "max_disk_percent": 80,
+    "max_concurrent_vms": 4,
+    "vm_memory_overhead": "256M",
+    "vm_memory_overhead_bytes": 256 * 1024 * 1024,
+    "vm_disk_overhead": "2G",
+    "vm_disk_overhead_bytes": 2 * 1024 * 1024 * 1024,
+    "poll_interval": 5.0,
+    "cooldown_after_vm": 5.0,
+}
 
 # --- Rollouts ---
 METADATA_VERSION = 1

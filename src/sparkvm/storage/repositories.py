@@ -7,26 +7,10 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from ..core.config import resolve_home_dir
+from ..core.constants import DEFAULT_MACHINE_POLICY
 from ..storage.db import connect_db
 from ..storage.query_builder import QueryBuilder
 from ..core.utils import now_utc_iso
-
-
-DEFAULT_MACHINE_POLICY: dict[str, Any] = {
-    "host_reserved_memory": "2G",
-    "host_reserved_memory_bytes": 2 * 1024 * 1024 * 1024,
-    "host_reserved_disk": "20G",
-    "host_reserved_disk_bytes": 20 * 1024 * 1024 * 1024,
-    "max_memory_percent": 80,
-    "max_disk_percent": 80,
-    "max_concurrent_vms": 4,
-    "vm_memory_overhead": "256M",
-    "vm_memory_overhead_bytes": 256 * 1024 * 1024,
-    "vm_disk_overhead": "2G",
-    "vm_disk_overhead_bytes": 2 * 1024 * 1024 * 1024,
-    "poll_interval": 5.0,
-    "cooldown_after_vm": 5.0,
-}
 
 
 def _json_dumps(value: Any) -> str:
@@ -50,7 +34,8 @@ class BaseRepository:
 class RolloutRepository(BaseRepository):
     def create(self, rollout: dict[str, Any]) -> None:
         with connect_db(self.home_dir) as conn:
-            QueryBuilder(conn).insert("rollouts", rollout)
+            qb = QueryBuilder(conn)
+            qb.insert("rollouts", rollout)
             conn.commit()
 
     def upsert(self, rollout: dict[str, Any]) -> None:
@@ -59,28 +44,34 @@ class RolloutRepository(BaseRepository):
         updates = ", ".join(f"{col}=excluded.{col}" for col in cols if col != "id")
         sql = f"INSERT INTO rollouts ({', '.join(cols)}) VALUES ({placeholders}) ON CONFLICT(id) DO UPDATE SET {updates}"
         with connect_db(self.home_dir) as conn:
-            conn.execute(sql, tuple(rollout[col] for col in cols))
+            qb = QueryBuilder(conn)
+            qb.execute(sql, tuple(rollout[col] for col in cols))
             conn.commit()
 
     def get(self, rollout_id: str) -> dict[str, Any] | None:
         with connect_db(self.home_dir) as conn:
-            row = QueryBuilder(conn).select_one("rollouts", where={"id": rollout_id})
-            return row
+            qb = QueryBuilder(conn)
+            return qb.from_table("rollouts").where(id=rollout_id).fetch_one()
 
     def get_by_name(self, name: str) -> dict[str, Any] | None:
         with connect_db(self.home_dir) as conn:
-            return QueryBuilder(conn).select_one("rollouts", where={"name": name}, order_by=[("created_at", "ASC")])
+            qb = QueryBuilder(conn)
+            return qb.from_table("rollouts").where(name=name).order_by("created_at", "ASC").fetch_one()
 
     def list_all(self) -> list[dict[str, Any]]:
         with connect_db(self.home_dir) as conn:
-            return QueryBuilder(conn).select_many("rollouts", order_by=[("created_at", "ASC")])
+            qb = QueryBuilder(conn)
+            return qb.from_table("rollouts").order_by("created_at", "ASC").fetch_all()
 
     def list_by_status(self, statuses: Sequence[str]) -> list[dict[str, Any]]:
         with connect_db(self.home_dir) as conn:
-            return QueryBuilder(conn).select_many(
-                "rollouts",
-                where_in={"status": list(statuses)},
-                order_by=[("priority", "DESC"), ("created_at", "ASC")],
+            qb = QueryBuilder(conn)
+            return (
+                qb.from_table("rollouts")
+                .where_in("status", list(statuses))
+                .order_by("priority", "DESC")
+                .order_by("created_at", "ASC")
+                .fetch_all()
             )
 
     def update(self, rollout_id: str, patch: dict[str, Any]) -> dict[str, Any] | None:
@@ -89,13 +80,15 @@ class RolloutRepository(BaseRepository):
         data = dict(patch)
         data["updated_at"] = now_utc_iso()
         with connect_db(self.home_dir) as conn:
-            QueryBuilder(conn).update("rollouts", data, where={"id": rollout_id})
+            qb = QueryBuilder(conn)
+            qb.update("rollouts", data, where={"id": rollout_id})
             conn.commit()
-            return QueryBuilder(conn).select_one("rollouts", where={"id": rollout_id})
+            return qb.from_table("rollouts").where(id=rollout_id).fetch_one()
 
     def delete(self, rollout_id: str) -> None:
         with connect_db(self.home_dir) as conn:
-            QueryBuilder(conn).delete("rollouts", where={"id": rollout_id})
+            qb = QueryBuilder(conn)
+            qb.delete("rollouts", where={"id": rollout_id})
             conn.commit()
 
     def set_status(self, rollout_id: str, status: str) -> dict[str, Any] | None:
@@ -110,12 +103,13 @@ class RolloutRepository(BaseRepository):
     def increment_retry_count(self, rollout_id: str) -> dict[str, Any] | None:
         now = now_utc_iso()
         with connect_db(self.home_dir) as conn:
-            conn.execute(
+            qb = QueryBuilder(conn)
+            qb.execute(
                 "UPDATE rollouts SET retry_count = COALESCE(retry_count, 0) + 1, updated_at = ? WHERE id = ?",
                 (now, rollout_id),
             )
             conn.commit()
-            return QueryBuilder(conn).select_one("rollouts", where={"id": rollout_id})
+            return qb.from_table("rollouts").where(id=rollout_id).fetch_one()
 
 
 class RuntimeImageRepository(BaseRepository):
@@ -125,32 +119,38 @@ class RuntimeImageRepository(BaseRepository):
         updates = ", ".join(f"{col}=excluded.{col}" for col in cols if col != "id")
         sql = f"INSERT INTO runtime_images ({', '.join(cols)}) VALUES ({placeholders}) ON CONFLICT(id) DO UPDATE SET {updates}"
         with connect_db(self.home_dir) as conn:
-            conn.execute(sql, tuple(image[col] for col in cols))
+            qb = QueryBuilder(conn)
+            qb.execute(sql, tuple(image[col] for col in cols))
             conn.commit()
 
     def get(self, image_id: str) -> dict[str, Any] | None:
         with connect_db(self.home_dir) as conn:
-            return QueryBuilder(conn).select_one("runtime_images", where={"id": image_id})
+            qb = QueryBuilder(conn)
+            return qb.from_table("runtime_images").where(id=image_id).fetch_one()
 
     def get_by_rollout(self, rollout_id: str) -> dict[str, Any] | None:
         with connect_db(self.home_dir) as conn:
-            return QueryBuilder(conn).select_one("runtime_images", where={"rollout_id": rollout_id})
+            qb = QueryBuilder(conn)
+            return qb.from_table("runtime_images").where(rollout_id=rollout_id).fetch_one()
 
     def delete_by_rollout(self, rollout_id: str) -> None:
         with connect_db(self.home_dir) as conn:
-            QueryBuilder(conn).delete("runtime_images", where={"rollout_id": rollout_id})
+            qb = QueryBuilder(conn)
+            qb.delete("runtime_images", where={"rollout_id": rollout_id})
             conn.commit()
 
 
 class WorkerRepository(BaseRepository):
     def create(self, worker: dict[str, Any]) -> None:
         with connect_db(self.home_dir) as conn:
-            QueryBuilder(conn).insert("workers", worker)
+            qb = QueryBuilder(conn)
+            qb.insert("workers", worker)
             conn.commit()
 
     def get(self, worker_id: str) -> dict[str, Any] | None:
         with connect_db(self.home_dir) as conn:
-            return QueryBuilder(conn).select_one("workers", where={"id": worker_id})
+            qb = QueryBuilder(conn)
+            return qb.from_table("workers").where(id=worker_id).fetch_one()
 
     def update(self, worker_id: str, patch: dict[str, Any]) -> dict[str, Any] | None:
         if not patch:
@@ -158,26 +158,31 @@ class WorkerRepository(BaseRepository):
         data = dict(patch)
         data["updated_at"] = now_utc_iso()
         with connect_db(self.home_dir) as conn:
-            QueryBuilder(conn).update("workers", data, where={"id": worker_id})
+            qb = QueryBuilder(conn)
+            qb.update("workers", data, where={"id": worker_id})
             conn.commit()
-            return QueryBuilder(conn).select_one("workers", where={"id": worker_id})
+            return qb.from_table("workers").where(id=worker_id).fetch_one()
 
     def delete(self, worker_id: str) -> None:
         with connect_db(self.home_dir) as conn:
-            QueryBuilder(conn).delete("workers", where={"id": worker_id})
+            qb = QueryBuilder(conn)
+            qb.delete("workers", where={"id": worker_id})
             conn.commit()
 
     def list_by_status(self, statuses: Sequence[str]) -> list[dict[str, Any]]:
         with connect_db(self.home_dir) as conn:
-            return QueryBuilder(conn).select_many(
-                "workers",
-                where_in={"status": list(statuses)},
-                order_by=[("created_at", "ASC")],
+            qb = QueryBuilder(conn)
+            return (
+                qb.from_table("workers")
+                .where_in("status", list(statuses))
+                .order_by("created_at", "ASC")
+                .fetch_all()
             )
 
     def list_all(self) -> list[dict[str, Any]]:
         with connect_db(self.home_dir) as conn:
-            return QueryBuilder(conn).select_many("workers", order_by=[("created_at", "ASC")])
+            qb = QueryBuilder(conn)
+            return qb.from_table("workers").order_by("created_at", "ASC").fetch_all()
 
     def set_status(self, worker_id: str, status: str) -> dict[str, Any] | None:
         return self.update(worker_id, {"status": status})
@@ -186,12 +191,12 @@ class WorkerRepository(BaseRepository):
         return self.update(worker_id, {"pid": int(pid)})
 
     def mark_passed(self, worker_id: str, result: dict[str, Any]) -> dict[str, Any] | None:
+        del result
         return self.update(
             worker_id,
             {
                 "status": "passed",
                 "completed_at": now_utc_iso(),
-                "result_json": _json_dumps(result),
             },
         )
 
@@ -221,24 +226,29 @@ class ReservationRepository(BaseRepository):
 
     def create(self, reservation: dict[str, Any]) -> None:
         with connect_db(self.home_dir) as conn:
-            QueryBuilder(conn).insert("reservations", reservation)
+            qb = QueryBuilder(conn)
+            qb.insert("reservations", reservation)
             conn.commit()
 
     def get(self, reservation_id: str) -> dict[str, Any] | None:
         with connect_db(self.home_dir) as conn:
-            return QueryBuilder(conn).select_one("reservations", where={"id": reservation_id})
+            qb = QueryBuilder(conn)
+            return qb.from_table("reservations").where(id=reservation_id).fetch_one()
 
     def active(self) -> list[dict[str, Any]]:
         with connect_db(self.home_dir) as conn:
-            return QueryBuilder(conn).select_many(
-                "reservations",
-                where_in={"status": sorted(self.ACTIVE_STATUSES)},
-                order_by=[("created_at", "ASC")],
+            qb = QueryBuilder(conn)
+            return (
+                qb.from_table("reservations")
+                .where_in("status", sorted(self.ACTIVE_STATUSES))
+                .order_by("created_at", "ASC")
+                .fetch_all()
             )
 
     def list_all(self) -> list[dict[str, Any]]:
         with connect_db(self.home_dir) as conn:
-            return QueryBuilder(conn).select_many("reservations", order_by=[("created_at", "ASC")])
+            qb = QueryBuilder(conn)
+            return qb.from_table("reservations").order_by("created_at", "ASC").fetch_all()
 
     def update(self, reservation_id: str, patch: dict[str, Any]) -> dict[str, Any] | None:
         if not patch:
@@ -246,9 +256,10 @@ class ReservationRepository(BaseRepository):
         data = dict(patch)
         data["updated_at"] = now_utc_iso()
         with connect_db(self.home_dir) as conn:
-            QueryBuilder(conn).update("reservations", data, where={"id": reservation_id})
+            qb = QueryBuilder(conn)
+            qb.update("reservations", data, where={"id": reservation_id})
             conn.commit()
-            return QueryBuilder(conn).select_one("reservations", where={"id": reservation_id})
+            return qb.from_table("reservations").where(id=reservation_id).fetch_one()
 
     def attach_pid(self, reservation_id: str, pid: int) -> dict[str, Any] | None:
         return self.update(reservation_id, {"pid": int(pid)})
@@ -263,7 +274,8 @@ class ReservationRepository(BaseRepository):
 class MachinePolicyRepository(BaseRepository):
     def get(self) -> dict[str, Any] | None:
         with connect_db(self.home_dir) as conn:
-            row = QueryBuilder(conn).select_one("machine_policy", where={"id": 1})
+            qb = QueryBuilder(conn)
+            row = qb.from_table("machine_policy").where(id=1).fetch_one()
         if row is None:
             return None
         payload = dict(row)
@@ -292,7 +304,8 @@ class MachinePolicyRepository(BaseRepository):
             "cooldown_after_vm",
         ]
         with connect_db(self.home_dir) as conn:
-            conn.execute(
+            qb = QueryBuilder(conn)
+            qb.execute(
                 """
                 INSERT INTO machine_policy(
                     id,
@@ -360,15 +373,18 @@ class EventRepository(BaseRepository):
             "created_at": created_at,
         }
         with connect_db(self.home_dir) as conn:
-            QueryBuilder(conn).insert("events", payload)
+            qb = QueryBuilder(conn)
+            qb.insert("events", payload)
             conn.commit()
 
     def list_for_entity(self, entity_type: str, entity_id: str) -> list[dict[str, Any]]:
         with connect_db(self.home_dir) as conn:
-            rows = QueryBuilder(conn).select_many(
-                "events",
-                where={"entity_type": entity_type, "entity_id": entity_id},
-                order_by=[("created_at", "DESC")],
+            qb = QueryBuilder(conn)
+            rows = (
+                qb.from_table("events")
+                .where(entity_type=entity_type, entity_id=entity_id)
+                .order_by("created_at", "DESC")
+                .fetch_all()
             )
         for row in rows:
             row["data"] = _json_loads(row.get("data_json"), fallback=None)

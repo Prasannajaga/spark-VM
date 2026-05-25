@@ -11,10 +11,10 @@ from typing import Any
 from ..core.config import resolve_home_dir
 from ..core.errors import CleanupError, WorkerMetadataError, WorkerNotFoundError
 from ..core.fsops import ensure_dir, list_dirs_with_prefix, read_text, remove_tree, write_json_atomic
+from ..core.utils import now_utc_iso, parse_size_to_bytes
 from ..storage.repositories import WorkerRepository
 
 from ..core.constants import WORKER_ID_RE
-from ..core.utils import now_utc_iso
 
 
 def validate_worker_id(vm_id: str) -> str:
@@ -62,7 +62,7 @@ class Workers:
 
     def list(self) -> list[Worker]:
         items: list[Worker] = []
-        candidates = list_dirs_with_prefix(self.workers_dir, "vm-") + list_dirs_with_prefix(self.workers_dir, "worker-")
+        candidates = list_dirs_with_prefix(self.workers_dir, "worker-")
         seen: set[str] = set()
         for candidate in sorted(candidates):
             if candidate.name in seen:
@@ -287,11 +287,20 @@ class Workers:
             "env": dict(vm_config.get("env", {})),
             "status": status,
             "pid": pid,
+            "worker_dir": str(worker_dir),
+            "rootfs_path": str(worker_dir / "rootfs.ext4"),
+            "execution_disk_path": str(worker_dir / "execution.ext4"),
+            "firecracker_sock_path": str(worker_dir / "firecracker.sock"),
+            "firecracker_log_path": str(worker_dir / "firecracker.log"),
+            "result_path": str(worker_dir / "result.json"),
+            "failure_path": str(worker_dir / "failure.json"),
             "created_at": now,
             "started_at": None,
             "completed_at": None,
             "updated_at": now,
         }
+        memory = str(vm_config.get("memory", "2G"))
+        disk = str(vm_config.get("disk", "4G"))
         self.repo.create(
             {
                 "id": worker_id,
@@ -300,16 +309,24 @@ class Workers:
                 "attempt": int(attempt),
                 "retry_of": retry_of,
                 "vcpu": int(vm_config.get("vcpu", 2)),
-                "memory": str(vm_config.get("memory", "2G")),
-                "disk": str(vm_config.get("disk", "4G")),
-                "timeout": float(vm_config.get("timeout", 60.0)),
+                "memory": memory,
+                "memory_bytes": parse_size_to_bytes(memory),
+                "disk": disk,
+                "disk_bytes": parse_size_to_bytes(disk),
+                "timeout_seconds": float(vm_config.get("timeout", 60.0)),
                 "network": 1 if bool(vm_config.get("network", True)) else 0,
                 "env_json": json.dumps(dict(vm_config.get("env", {})), sort_keys=True),
+                "worker_dir": str(worker_dir),
+                "rootfs_path": str(worker_dir / "rootfs.ext4"),
+                "execution_disk_path": str(worker_dir / "execution.ext4"),
+                "firecracker_sock_path": str(worker_dir / "firecracker.sock"),
+                "firecracker_log_path": str(worker_dir / "firecracker.log"),
+                "result_path": str(worker_dir / "result.json"),
+                "failure_path": str(worker_dir / "failure.json"),
                 "status": status,
                 "pid": pid,
                 "started_at": None,
                 "completed_at": None,
-                "result_json": None,
                 "failure_json": None,
                 "created_at": now,
                 "updated_at": now,
@@ -339,7 +356,7 @@ class Workers:
             "vcpu": int(row.get("vcpu", 2)),
             "memory": str(row.get("memory", "2G")),
             "disk": str(row.get("disk", "4G")),
-            "timeout": float(row.get("timeout", 60.0)),
+            "timeout": float(row.get("timeout_seconds", row.get("timeout", 60.0))),
             "network": bool(int(row.get("network", 1))),
             "env": env,
             "status": str(row.get("status", "unknown")),
@@ -359,6 +376,8 @@ class Workers:
             repo_patch["env_json"] = json.dumps(repo_patch.pop("env"), sort_keys=True)
         if "network" in repo_patch:
             repo_patch["network"] = 1 if bool(repo_patch["network"]) else 0
+        if "timeout" in repo_patch:
+            repo_patch["timeout_seconds"] = float(repo_patch.pop("timeout"))
         row = self.repo.update(worker_id, repo_patch)
         if row is None:
             raise WorkerNotFoundError(f"Worker metadata missing: {worker_id}")

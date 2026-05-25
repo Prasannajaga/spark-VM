@@ -1,23 +1,22 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-"""Minimal SparkVM run using a fixed simple Dockerfile example."""
+"""Single-rollout SparkVM example using a fixed Dockerfile."""
 
 from pathlib import Path
 
-from sparkvm import SparkVM
-from sparkvm.rollouts import Rollouts
+from sparkvm import Rollouts, SparkVM
 
 
-TEMPLATE_DOCKERFILE = (Path(__file__).resolve().parent / "simplegithub.Dockerfile").resolve()
+TEMPLATE_DOCKERFILE = (Path(__file__).resolve().parent / "simple_app/simplegithub.Dockerfile").resolve()
 
 
 def main() -> int:
     rollout = Rollouts().create(
-        name="simplegithub-version2",
+        name="simplegithub-single-rollout",
         runtime="Dockerfile",
-        dockerfile=str(TEMPLATE_DOCKERFILE),
-        deleteOnSuccess=True,
+        dockerfile="examples/simple_app/simplegithub.Dockerfile",    
+        deleteOnSuccess=False,
     )
 
     vm = SparkVM(
@@ -28,9 +27,10 @@ def main() -> int:
         network=False,
         env={},
     )
+
     result = vm.run(rollout.id)
 
-    print("Created rollout:", rollout.id)
+    print("Single rollout created:", rollout.id)
     print("VM status:", result.status)
     print("Exit code:", result.exit_code)
     print("Passed:", result.passed)

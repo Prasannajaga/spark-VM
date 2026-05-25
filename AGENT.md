@@ -330,6 +330,19 @@
   - directory scaffolding
   - host tool checks
 
+## IMPLEMENTATION CONSTRAINTS
+
+- These rules are project-wide and mandatory across all modules.
+- Each concern must have one owner module. Do not duplicate logic across layers.
+- Keep API modules as API boundaries only; keep parsing/normalization/helpers in shared utility modules.
+- Keep constants/defaults in `core/constants.py` only.
+- Keep reusable helper logic in `core/utils.py` only.
+- Repository/storage modules may persist and fetch data, but must not define domain semantics, defaults, or normalization rules.
+- Orchestration/API/CLI modules must consume shared APIs/utilities; they must not re-implement shared logic locally.
+- If a helper or constant is needed in multiple modules, move it to the owning shared module instead of copying.
+- When refactoring, update all call sites project-wide to the shared owner; do not leave mixed patterns.
+ 
+
 ## Testing Rules
 
 - Tests must protect the architecture.

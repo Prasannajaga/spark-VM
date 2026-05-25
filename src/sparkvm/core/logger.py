@@ -53,6 +53,81 @@ def _verbose_enabled() -> bool:
     return os.getenv("SPARKVM_LOG_VERBOSE", "0").strip() in {"1", "true", "True"}
 
 
+def _log_mode() -> str:
+    mode = os.getenv("SPARKVM_LOG_MODE", "concise").strip().lower()
+    if mode in {"concise", "normal", "debug"}:
+        return mode
+    return "concise"
+
+
+def _should_emit_detail() -> bool:
+    return _log_mode() == "debug"
+
+
+def _format_component(component: str) -> str:
+    value = (component or "sparkvm").strip().lower()
+    return value
+
+
+def _format_event_line(component: str, event: str, fields: dict[str, Any] | None = None) -> str:
+    base = f"[{_format_component(component)}] {event.strip()}"
+    if not fields:
+        return base
+    parts: list[str] = []
+    for key, value in fields.items():
+        parts.append(f"{key}={value}")
+    return f"{base} | " + " | ".join(parts)
+
+
+def log_event(
+    logger: logging.Logger,
+    *,
+    component: str,
+    event: str,
+    fields: dict[str, Any] | None = None,
+    level: str = "info",
+    detail: bool = False,
+) -> None:
+    if detail and not _should_emit_detail():
+        return
+    line = _format_event_line(component, event, fields)
+    level_name = level.strip().lower()
+    if level_name == "debug":
+        logger.debug(line)
+    elif level_name == "warning":
+        logger.warning(line)
+    elif level_name == "error":
+        logger.error(line)
+    else:
+        logger.info(line)
+
+
+def log_failure(
+    logger: logging.Logger,
+    *,
+    component: str,
+    event: str,
+    error: BaseException | str,
+    fields: dict[str, Any] | None = None,
+    level: str = "error",
+) -> None:
+    payload = dict(fields or {})
+    if isinstance(error, BaseException):
+        payload["error_type"] = type(error).__name__
+        payload["error"] = str(error)
+    else:
+        payload["error_type"] = "Error"
+        payload["error"] = str(error)
+    log_event(
+        logger,
+        component=component,
+        event=event,
+        fields=payload,
+        level=level,
+        detail=False,
+    )
+
+
 def configure_logging(
     *,
     home_dir: Path | None = None,
@@ -171,4 +246,10 @@ def create_flow_logger(
     return FlowLogger(logger=logger, context=context or {}, _handler=None)
 
 
-__all__ = ["configure_logging", "FlowLogger", "create_flow_logger"]
+__all__ = [
+    "configure_logging",
+    "FlowLogger",
+    "create_flow_logger",
+    "log_event",
+    "log_failure",
+]

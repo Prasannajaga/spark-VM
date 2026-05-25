@@ -93,7 +93,8 @@ class WorkerRunner:
     def run(self) -> int:
         worker = self.workers.load_worker(self.worker_id)
         rollout_id = str(worker["rollout_id"])
-        reservation_id = str(worker["reservation_id"])
+        reservation_raw = worker.get("reservation_id")
+        reservation_id = str(reservation_raw) if isinstance(reservation_raw, str) and reservation_raw else None
         if self.rollout_repo.get(rollout_id) is None:
             raise WorkerNotFoundError(f"Rollout not found for worker: {rollout_id}")
 
@@ -112,7 +113,7 @@ class WorkerRunner:
         )
 
         try:
-            result = vm.run(rollout_id)
+            result = vm.run_as_worker(rollout_id, self.worker_id)
             result_payload = {
                 "worker_id": self.worker_id,
                 "rollout_id": rollout_id,
@@ -124,12 +125,48 @@ class WorkerRunner:
                 "created_at": now_utc_iso(),
             }
             self._write_json(self._worker_dir() / "result.json", result_payload)
-            self.worker_repo.mark_passed(self.worker_id, result_payload)
-            self._release_reservation(reservation_id)
-            self._finalize_rollout_on_success(rollout_id, self.worker_id)
-            self.events.add("worker", self.worker_id, "worker_passed", data={"rollout_id": rollout_id})
-            self.events.add("rollout", rollout_id, "rollout_passed", data={"worker_id": self.worker_id})
-            return 0
+            if result.passed:
+                self.worker_repo.mark_passed(self.worker_id, result_payload)
+                if reservation_id is not None:
+                    self._release_reservation(reservation_id)
+                self._finalize_rollout_on_success(rollout_id, self.worker_id)
+                self.events.add("worker", self.worker_id, "worker_passed", data={"rollout_id": rollout_id})
+                self.events.add("rollout", rollout_id, "rollout_passed", data={"worker_id": self.worker_id})
+                return 0
+
+            failed_status = "timeout" if str(result.status) == "timeout" else "failed"
+            failure_payload = {
+                "worker_id": self.worker_id,
+                "rollout_id": rollout_id,
+                "status": failed_status,
+                "error_type": "VMRunFailed",
+                "error_message": f"VM returned status={result.status} exit_code={result.exit_code}",
+                "exit_code": result.exit_code,
+                "duration_ms": result.duration_ms,
+                "created_at": now_utc_iso(),
+            }
+            self._write_json(self._worker_dir() / "failure.json", failure_payload)
+            if failed_status == "timeout":
+                self.worker_repo.mark_timeout(self.worker_id, failure_payload)
+            else:
+                self.worker_repo.mark_failed(self.worker_id, failure_payload)
+
+            if reservation_id is not None:
+                self._release_reservation(reservation_id)
+            self._finalize_rollout_on_failure(rollout_id, self.worker_id)
+            self.events.add(
+                "worker",
+                self.worker_id,
+                "worker_failed",
+                data={"rollout_id": rollout_id, "status": failed_status, "error_type": "VMRunFailed"},
+            )
+            self.events.add(
+                "rollout",
+                rollout_id,
+                "rollout_failed",
+                data={"worker_id": self.worker_id, "status": failed_status, "error_type": "VMRunFailed"},
+            )
+            return 1
         except Exception as exc:
             failed_status = "timeout" if isinstance(exc, JobTimeoutError) else "failed"
             failure_payload = {
@@ -146,7 +183,8 @@ class WorkerRunner:
             else:
                 self.worker_repo.mark_failed(self.worker_id, failure_payload)
 
-            self._release_reservation(reservation_id)
+            if reservation_id is not None:
+                self._release_reservation(reservation_id)
             self._finalize_rollout_on_failure(rollout_id, self.worker_id)
             self.events.add(
                 "worker",

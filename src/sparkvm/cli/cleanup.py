@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 from sparkvm.core.config import DEFAULT_MEMORY, DEFAULT_RUNTIME, DEFAULT_TIMEOUT_SEC, DEFAULT_VCPU, SparkVMConfig, build_config
 from sparkvm.core.constants import KERNEL_FILENAME
 from sparkvm.storage.db import connect_db
 from sparkvm.core.errors import SparkVMError
+from sparkvm.core.logger import configure_logging, log_event
 from sparkvm.core.fsops import (
     ensure_dir,
     list_dirs_with_prefix,
@@ -156,6 +158,8 @@ def run_cleanup_command(home_dir: str | None, target: str, force: bool) -> int:
         runtime=DEFAULT_RUNTIME,
         home_dir=home_dir,
     )
+    configure_logging(home_dir=config.home_dir)
+    logger = logging.getLogger("sparkvm.cleanup")
 
     if target == "rollouts":
         cleanup_rollouts(config, force=force, dry_run=False)
@@ -166,6 +170,7 @@ def run_cleanup_command(home_dir: str | None, target: str, force: bool) -> int:
     else:
         raise SparkVMError(f"Unsupported cleanup target: {target}")
 
+    log_event(logger, component="cleanup", event="done", fields={"target": target})
     print(f"SparkVM cleanup complete: {target}")
     return 0
 
@@ -178,7 +183,7 @@ def reset_home(config: SparkVMConfig, *, dry_run: bool = False) -> None:
     # Ensure mounted worker subpaths are unmounted before deleting home contents.
     workers_dir_path = config.workers_dir
     if workers_dir_path.exists():
-        for vm_dir in list_dirs_with_prefix(workers_dir_path, "vm-"):
+        for vm_dir in list_dirs_with_prefix(workers_dir_path, "worker-"):
             if not dry_run:
                 unmount_under(vm_dir)
 
