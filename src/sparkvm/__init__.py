@@ -1,10 +1,7 @@
 """SparkVM public API."""
 
-from .errors import SparkVMError
-from .result import VMResult
-from .rollouts import Rollout, Rollouts
-from .vm import SparkVM
-from .workers import Worker, Workers
+from .api import Rollout, Rollouts, SparkVM, VMResult, Worker, Workers
+from .core.errors import SparkVMError
 
 __all__ = [
     "SparkVM",

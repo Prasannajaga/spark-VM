@@ -8,9 +8,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO
 
-from sparkvm.commands import popen_checked
-from sparkvm.errors import FirecrackerProcessError
-from sparkvm.fsops import ensure_dir, open_text_append, read_text, remove_file
+from sparkvm.core.commands import popen_checked
+from sparkvm.core.errors import FirecrackerProcessError
+from sparkvm.core.fsops import ensure_dir, open_text_append, read_text, remove_file
 
 
 @dataclass

@@ -11,15 +11,15 @@ import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
-from cli.setup import ensure_directories, get_sparkvm_paths
-from sparkvm.commands import popen_checked, run_checked as _run_checked
-from sparkvm.errors import SparkVMSetupError
-from sparkvm.fsops import ensure_dir, read_json, remove_file, write_json_atomic, write_text
-from sparkvm.image import normalize_runtime_name
-from sparkvm.runtime_store import list_runtime_records, runtime_paths
+from sparkvm.cli.setup import ensure_directories, get_sparkvm_paths
+from sparkvm.core.commands import popen_checked, run_checked as _run_checked
+from sparkvm.core.errors import SparkVMSetupError
+from sparkvm.core.fsops import ensure_dir, read_json, remove_file, write_json_atomic, write_text
+from sparkvm.machine.image import normalize_runtime_name
+from sparkvm.storage.runtime_store import list_runtime_records, runtime_paths
 from sparkvm.runtimes.debian import SPARKVM_INIT_TEMPLATE
 
-from sparkvm.constants import BUSYBOX_CANDIDATE_PATHS, IP_CANDIDATE_PATHS, SHUTDOWN_FALLBACK_PATHS
+from sparkvm.core.constants import BUSYBOX_CANDIDATE_PATHS, IP_CANDIDATE_PATHS, SHUTDOWN_FALLBACK_PATHS
 
 
 def utc_now_iso() -> str:

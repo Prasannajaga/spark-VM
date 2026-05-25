@@ -1,6 +1,6 @@
 # SparkVM
 
-SparkVM is a Firecracker microVM runner for Dockerfile-backed rollouts.
+SparkVM is a Firecracker microVM runner for Dockerfile rollouts usefull for agents long running task and inspired by composer-2 Async RL.  
 
 ## Canonical Python API
 
@@ -64,11 +64,3 @@ sparkvm workers view <worker-id>
 # Optional worker view flags:
 #   [--tail <n>] [--live] [--result] [--failure] [--results] [--path]
 ```
-
-## Notes
-
-- SparkVM supports only Dockerfile-backed rollouts.
-- `rollout create` builds the Docker image, exports filesystem, injects `/init`, and stores rollout ext4 artifacts.
-- `sparkvm start` runs the scheduler loop.
-- `sparkvm workers run <rollout-id>` executes one rollout directly and blocks.
-- `SparkVM.run(<rollout-id>)` is still the canonical blocking SDK run path.

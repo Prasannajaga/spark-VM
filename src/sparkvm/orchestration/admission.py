@@ -7,8 +7,9 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from .config import resolve_home_dir
-from .machine_config import MachineConfig, parse_size_to_bytes
+from ..core.config import resolve_home_dir
+from ..machine.machine_config import MachineConfig, parse_size_to_bytes
+from ..storage.repositories import ReservationRepository
 
 
 def _read_total_memory_bytes() -> int:
@@ -71,54 +72,50 @@ def _sum_reserved_bytes(reservations: list[dict[str, Any]]) -> tuple[int, int, i
 class AdmissionController:
     def __init__(self, *, home_dir: str | Path | None = None) -> None:
         self.home_dir = resolve_home_dir(home_dir)
-        self.policy = MachineConfig(self.home_dir).get_policy()
 
-    def check(self, vm_config: dict[str, Any], reservations: list[dict[str, Any]]) -> dict[str, Any]:
+    def check(self, vm_config: dict[str, Any], reservations: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         total_memory = _read_total_memory_bytes()
         total_disk = shutil.disk_usage(self.home_dir).total
-        free_disk = shutil.disk_usage(self.home_dir).free
-        available_memory_live = _read_available_memory_bytes()
+        policy = MachineConfig(self.home_dir).get_policy()
+        active_reservations = reservations if reservations is not None else ReservationRepository(self.home_dir).active()
 
-        host_reserved_memory = parse_size_to_bytes(str(self.policy["host_reserved_memory"]))
-        host_reserved_disk = parse_size_to_bytes(str(self.policy["host_reserved_disk"]))
+        host_reserved_memory = int(policy.get("host_reserved_memory_bytes", parse_size_to_bytes(str(policy["host_reserved_memory"]))))
+        host_reserved_disk = int(policy.get("host_reserved_disk_bytes", parse_size_to_bytes(str(policy["host_reserved_disk"]))))
 
         usable_memory = min(
             max(0, total_memory - host_reserved_memory),
-            int(total_memory * (float(self.policy["max_memory_percent"]) / 100.0)),
+            int(total_memory * (float(policy["max_memory_percent"]) / 100.0)),
         )
         usable_disk = min(
             max(0, total_disk - host_reserved_disk),
-            int(total_disk * (float(self.policy["max_disk_percent"]) / 100.0)),
+            int(total_disk * (float(policy["max_disk_percent"]) / 100.0)),
         )
 
-        requested_memory = parse_size_to_bytes(str(vm_config.get("memory", "2G"))) + parse_size_to_bytes(
-            str(self.policy["vm_memory_overhead"])
+        requested_memory = parse_size_to_bytes(str(vm_config.get("memory", "2G"))) + int(
+            policy.get("vm_memory_overhead_bytes", parse_size_to_bytes(str(policy["vm_memory_overhead"])))
         )
-        requested_disk = parse_size_to_bytes(str(vm_config.get("disk", "4G"))) + parse_size_to_bytes(
-            str(self.policy["vm_disk_overhead"])
+        requested_disk = parse_size_to_bytes(str(vm_config.get("disk", "4G"))) + int(
+            policy.get("vm_disk_overhead_bytes", parse_size_to_bytes(str(policy["vm_disk_overhead"])))
         )
 
-        reserved_memory, reserved_disk, active_vm_count = _sum_reserved_bytes(reservations)
+        reserved_memory, reserved_disk, active_vm_count = _sum_reserved_bytes(active_reservations)
 
-        available_memory_budget = max(0, usable_memory - reserved_memory)
-        available_memory = min(available_memory_budget, max(0, available_memory_live)) if available_memory_live > 0 else available_memory_budget
-
-        available_disk_budget = max(0, usable_disk - reserved_disk)
-        available_disk = min(available_disk_budget, max(0, free_disk))
+        remaining_memory_budget = max(0, usable_memory - reserved_memory)
+        remaining_disk_budget = max(0, usable_disk - reserved_disk)
 
         allowed = (
-            requested_memory <= available_memory
-            and requested_disk <= available_disk
-            and active_vm_count < int(self.policy["max_concurrent_vms"])
+            requested_memory <= remaining_memory_budget
+            and requested_disk <= remaining_disk_budget
+            and active_vm_count < int(policy["max_concurrent_vms"])
         )
 
         reason: str | None = None
         if not allowed:
-            if active_vm_count >= int(self.policy["max_concurrent_vms"]):
+            if active_vm_count >= int(policy["max_concurrent_vms"]):
                 reason = "max_concurrent_vms reached"
-            elif requested_memory > available_memory:
+            elif requested_memory > remaining_memory_budget:
                 reason = "insufficient_memory"
-            elif requested_disk > available_disk:
+            elif requested_disk > remaining_disk_budget:
                 reason = "insufficient_disk"
             else:
                 reason = "rejected"
@@ -126,10 +123,18 @@ class AdmissionController:
         return {
             "allowed": allowed,
             "reason": reason,
+            "total_memory_bytes": total_memory,
+            "total_disk_bytes": total_disk,
+            "usable_memory_bytes": usable_memory,
+            "usable_disk_bytes": usable_disk,
+            "reserved_memory_bytes": reserved_memory,
+            "reserved_disk_bytes": reserved_disk,
+            "remaining_memory_bytes": remaining_memory_budget,
+            "remaining_disk_bytes": remaining_disk_budget,
+            "active_vm_count": active_vm_count,
+            "max_concurrent_vms": int(policy["max_concurrent_vms"]),
             "requested_memory_bytes": requested_memory,
             "requested_disk_bytes": requested_disk,
-            "available_memory_bytes": available_memory,
-            "available_disk_bytes": available_disk,
         }
 
 

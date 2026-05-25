@@ -11,14 +11,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from sparkvm.config import SparkVMConfig, resolve_home_dir
-from sparkvm.commands import run_checked
-from sparkvm.errors import FirecrackerBinaryNotInstalled, KVMUnavailableError, SparkVMSetupError
-from sparkvm.fsops import ensure_dir, read_json, write_json_atomic
-from sparkvm.runtime_store import RuntimeRecord, list_runtime_records
-from sparkvm.utils import has_cap_net_admin, has_network_privileges as network_privileges_ok
+from sparkvm.core.config import SparkVMConfig, resolve_home_dir
+from sparkvm.core.commands import run_checked
+from sparkvm.storage.db import init_db
+from sparkvm.core.errors import FirecrackerBinaryNotInstalled, KVMUnavailableError, SparkVMSetupError
+from sparkvm.core.fsops import ensure_dir, read_json, write_json_atomic
+from sparkvm.storage.migrations import migrate_json_rollouts_to_sqlite
+from sparkvm.storage.repositories import MachinePolicyRepository
+from sparkvm.storage.runtime_store import RuntimeRecord, list_runtime_records
+from sparkvm.core.utils import has_cap_net_admin, has_network_privileges as network_privileges_ok
 
-from sparkvm.constants import (
+from sparkvm.core.constants import (
     ARCH_ALIASES as _ARCH_ALIASES,
     DOCTOR_NETWORK_TOOLS as _DOCTOR_NETWORK_TOOLS,
     DOCTOR_TOOLS as _DOCTOR_TOOLS,
@@ -36,6 +39,7 @@ class SparkVMPaths:
     bin_dir: Path
     image_dir: Path
     workers_dir: Path
+    scheduler_dir: Path
     cache_dir: Path
     rollouts_dir: Path
     firecracker_bin: Path
@@ -72,6 +76,7 @@ def get_sparkvm_paths(home_dir: str | Path | None = None) -> SparkVMPaths:
     bin_dir = resolved_home / "bin"
     image_dir = resolved_home / "images"
     workers_dir = resolved_home / "workers"
+    scheduler_dir = resolved_home / "scheduler"
     cache_dir = resolved_home / "cache"
     rollouts_dir = resolved_home / "rollouts"
 
@@ -80,6 +85,7 @@ def get_sparkvm_paths(home_dir: str | Path | None = None) -> SparkVMPaths:
         bin_dir=bin_dir,
         image_dir=image_dir,
         workers_dir=workers_dir,
+        scheduler_dir=scheduler_dir,
         cache_dir=cache_dir,
         rollouts_dir=rollouts_dir,
         firecracker_bin=bin_dir / "firecracker",
@@ -94,6 +100,7 @@ def paths_from_config(config: SparkVMConfig) -> SparkVMPaths:
         bin_dir=config.bin_dir,
         image_dir=config.image_dir,
         workers_dir=config.workers_dir,
+        scheduler_dir=config.home_dir / "scheduler",
         cache_dir=config.cache_dir,
         rollouts_dir=config.home_dir / "rollouts",
         firecracker_bin=config.bin_dir / "firecracker",
@@ -109,6 +116,7 @@ def ensure_directories(paths: SparkVMPaths) -> None:
         paths.image_dir,
         paths.rollouts_dir,
         paths.workers_dir,
+        paths.scheduler_dir,
         paths.cache_dir,
     ):
         ensure_dir(directory, exist_ok=True)
@@ -309,7 +317,9 @@ def run_setup(
     ensure_kernel_image(paths, force=force, progress=progress)
     emit_progress(progress, f"Kernel ready: {paths.kernel_image}")
 
-    initialize_rollouts_metadata(paths)
+    init_db(paths.home_dir)
+    MachinePolicyRepository(paths.home_dir).ensure_default()
+    migrate_json_rollouts_to_sqlite(paths.home_dir)
 
     if owner is not None:
         if os.geteuid() != 0:
