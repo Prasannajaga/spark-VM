@@ -131,7 +131,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     workers_view = workers_subparsers.add_parser("view", help="View worker details/log")
-    workers_view.add_argument("vm_id", help="Worker vm id (e.g. vm-02e67edfc7a0)")
+    workers_view.add_argument("vm_id", help="Worker id (e.g. worker-02e67edfc7a0)")
     workers_view.add_argument("--tail", type=int, default=None, help="Show only last N log lines")
     workers_view.add_argument("--live", action="store_true", help="Stream firecracker.log updates live")
     workers_view.add_argument("--result", action="store_true", help="Print result.json for the worker")
@@ -229,8 +229,36 @@ def run_rollout_execute(
 def run_rollout_list(home_dir: str | None) -> int:
     repo = RolloutRepository(home_dir=home_dir)
     rows = repo.list_all()
-    payload = [_format_rollout_db_row(row) for row in rows]
-    print(json.dumps(payload, indent=2, sort_keys=True))
+    if not rows:
+        print("No rollouts found.")
+        return 0
+
+    headers = ["Rollout ID", "Name", "Status", "Priority", "Retry", "Active Worker", "Created At"]
+    table_rows: list[list[str]] = []
+    for row in rows:
+        table_rows.append(
+            [
+                str(row.get("id", "-")),
+                str(row.get("name", "-")),
+                str(row.get("status", "-")),
+                str(row.get("priority", "-")),
+                f"{int(row.get('retry_count', 0))}/{int(row.get('max_retries', 0))}",
+                str(row.get("active_worker_id") or "-"),
+                str(row.get("created_at") or "-"),
+            ]
+        )
+
+    widths = [len(header) for header in headers]
+    for table_row in table_rows:
+        for idx, col in enumerate(table_row):
+            widths[idx] = max(widths[idx], len(col))
+
+    header_line = " | ".join(headers[i].ljust(widths[i]) for i in range(len(headers)))
+    sep_line = "-+-".join("-" * widths[i] for i in range(len(headers)))
+    print(header_line)
+    print(sep_line)
+    for table_row in table_rows:
+        print(" | ".join(table_row[i].ljust(widths[i]) for i in range(len(headers))))
     return 0
 
 

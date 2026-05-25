@@ -186,12 +186,12 @@ class WorkerRepository(BaseRepository):
         return self.update(worker_id, {"pid": int(pid)})
 
     def mark_passed(self, worker_id: str, result: dict[str, Any]) -> dict[str, Any] | None:
+        del result
         return self.update(
             worker_id,
             {
                 "status": "passed",
                 "completed_at": now_utc_iso(),
-                "result_json": _json_dumps(result),
             },
         )
 

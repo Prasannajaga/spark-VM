@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -13,6 +14,7 @@ from uuid import uuid4
 
 from ..orchestration.admission import AdmissionController
 from ..core.config import resolve_home_dir
+from ..core.logger import configure_logging, log_event
 from ..storage.db import connect_db
 from ..machine.machine_config import MachineConfig, parse_size_to_bytes
 from ..storage.query_builder import QueryBuilder
@@ -31,6 +33,18 @@ DEFAULT_VM_CONFIG = {
 class Scheduler:
     def __init__(self, *, home_dir: str | Path | None = None) -> None:
         self.home_dir = resolve_home_dir(home_dir)
+        configure_logging(home_dir=self.home_dir)
+        self.logger = logging.getLogger("sparkvm.scheduler")
+
+    def _log_scheduler(self, event: str, *, fields: dict[str, Any], level: str = "info", detail: bool = False) -> None:
+        log_event(
+            self.logger,
+            component="scheduler",
+            event=event,
+            fields=fields,
+            level=level,
+            detail=detail,
+        )
 
     def _pid_alive(self, pid: int | None) -> bool:
         if pid is None or pid <= 0:
@@ -94,7 +108,7 @@ class Scheduler:
             where={"id": str(rollout["id"])},
         )
 
-    def _reconcile_unlocked(self, qb: QueryBuilder) -> None:
+    def _reconcile_unlocked(self, qb: QueryBuilder, *, tick_id: str | None = None) -> None:
         workers = {str(item["id"]): item for item in qb.table("workers").select_many()}
 
         # reservation exists but worker row is gone
@@ -135,6 +149,20 @@ class Scheduler:
                 rollout = qb.table("rollouts").select_one(where={"id": rollout_id})
                 if isinstance(rollout, dict) and rollout.get("status") in {"running", "retrying"}:
                     self._fail_rollout(qb, rollout, worker_id=worker_id)
+            if tick_id is not None:
+                self._log_scheduler(
+                    "rollout_terminal",
+                    fields={
+                        "tick": tick_id,
+                        "rollout": rollout_id or "-",
+                        "worker": worker_id,
+                        "status": "FAILED",
+                        "exit": "-",
+                        "dur": "-",
+                        "err": "lost_pid",
+                    },
+                    level="warning",
+                )
 
         # rollout consistency from worker terminal states
         for rollout in qb.table("rollouts").select_many(where_in={"status": ["running", "retrying"]}):
@@ -158,6 +186,19 @@ class Scheduler:
                         {"status": "released", "updated_at": now_utc_iso()},
                         where={"id": reservation_id},
                     )
+                if tick_id is not None:
+                    self._log_scheduler(
+                        "rollout_terminal",
+                        fields={
+                            "tick": tick_id,
+                            "rollout": rollout_id,
+                            "worker": active_worker_id,
+                            "status": "PASSED",
+                            "exit": worker.get("exit_code") if worker.get("exit_code") is not None else "-",
+                            "dur": "-",
+                            "err": "-",
+                        },
+                    )
                 continue
 
             if worker_status in {"failed", "timeout", "lost"}:
@@ -166,6 +207,20 @@ class Scheduler:
                     qb.table("reservations").update(
                         {"status": "released", "updated_at": now_utc_iso()},
                         where={"id": reservation_id},
+                    )
+                if tick_id is not None:
+                    self._log_scheduler(
+                        "rollout_terminal",
+                        fields={
+                            "tick": tick_id,
+                            "rollout": rollout_id,
+                            "worker": active_worker_id,
+                            "status": "FAILED",
+                            "exit": worker.get("exit_code") if worker.get("exit_code") is not None else "-",
+                            "dur": "-",
+                            "err": worker_status,
+                        },
+                        level="warning",
                     )
 
     def _spawn_worker_process(self, worker_id: str) -> int | None:
@@ -187,16 +242,38 @@ class Scheduler:
 
     def start_loop(self) -> None:
         while True:
+            tick_started = time.monotonic()
+            tick_id = f"tick-{time.strftime('%H%M%S')}-{uuid4().hex[:4]}"
             policy = MachineConfig(self.home_dir).get_policy()
             poll_interval = float(policy.get("poll_interval", 5.0))
+            self._log_scheduler(
+                "tick_start",
+                fields={
+                    "tick": tick_id,
+                    "ts": now_utc_iso(),
+                    "poll": f"{poll_interval:.1f}s",
+                },
+                detail=True,
+            )
 
             to_spawn: list[dict[str, Any]] = []
+            candidates_count = 0
+            admitted_count = 0
+            spawn_success = 0
+            status_counts = {
+                "running": 0,
+                "passed": 0,
+                "failed": 0,
+                "retry_pending": 0,
+                "exhausted": 0,
+                "lost": 0,
+            }
 
             with connect_db(self.home_dir) as conn:
                 qb = QueryBuilder(conn)
                 qb.execute("BEGIN IMMEDIATE")
                 try:
-                    self._reconcile_unlocked(qb)
+                    self._reconcile_unlocked(qb, tick_id=tick_id)
 
                     candidates = qb.fetch_all(
                         """
@@ -213,6 +290,7 @@ class Scheduler:
                             created_at ASC
                         """
                     )
+                    candidates_count = len(candidates)
 
                     admission = AdmissionController(home_dir=self.home_dir)
 
@@ -223,6 +301,7 @@ class Scheduler:
                         decision = admission.check(vm_config, reservations=live_reservations)
                         if not bool(decision.get("allowed")):
                             continue
+                        admitted_count += 1
 
                         worker_id = f"worker-{uuid4().hex[:12]}"
                         now = now_utc_iso()
@@ -299,7 +378,19 @@ class Scheduler:
                             (next_status, worker_id, worker_id, now, now, rollout_id),
                         )
 
-                        to_spawn.append({"worker_id": worker_id, "reservation_id": reservation_id, "rollout_id": rollout_id})
+                        to_spawn.append(
+                            {
+                                "worker_id": worker_id,
+                                "reservation_id": reservation_id,
+                                "rollout_id": rollout_id,
+                                "vm_vcpu": int(vm_config.get("vcpu", 2)),
+                                "vm_memory": memory,
+                                "vm_disk": disk,
+                                "vm_timeout": float(vm_config.get("timeout", 60.0)),
+                                "vm_network": bool(vm_config.get("network", True)),
+                                "vm_env_keys": ",".join(sorted(dict(vm_config.get("env", {})).keys())) or "-",
+                            }
+                        )
 
                     conn.commit()
                 except Exception:
@@ -329,6 +420,19 @@ class Scheduler:
                             rollout = qb.table("rollouts").select_one(where={"id": rollout_id})
                             if isinstance(rollout, dict):
                                 self._fail_rollout(qb, rollout, worker_id=worker_id)
+                            self._log_scheduler(
+                                "rollout_terminal",
+                                fields={
+                                    "tick": tick_id,
+                                    "rollout": rollout_id,
+                                    "worker": worker_id,
+                                    "status": "FAILED",
+                                    "exit": "-",
+                                    "dur": "-",
+                                    "err": "spawn_failed",
+                                },
+                                level="warning",
+                            )
                             conn.commit()
                             continue
 
@@ -340,10 +444,54 @@ class Scheduler:
                             {"pid": pid, "status": "starting", "updated_at": now},
                             where={"id": reservation_id},
                         )
+                        spawn_success += 1
+                        self._log_scheduler(
+                            "spawn_result",
+                            fields={
+                                "tick": tick_id,
+                                "rollout": rollout_id,
+                                "worker": worker_id,
+                                "pid": pid,
+                                "vm": (
+                                    f"{item.get('vm_vcpu', 2)}cpu "
+                                    f"{item.get('vm_memory', '2G')} "
+                                    f"{item.get('vm_disk', '4G')} "
+                                    f"t={item.get('vm_timeout', 60.0)}s "
+                                    f"net={'on' if item.get('vm_network', True) else 'off'} "
+                                    f"env={item.get('vm_env_keys', '-')}"
+                                ),
+                            },
+                        )
                         conn.commit()
                     except Exception:
                         conn.rollback()
                         raise
+
+            with connect_db(self.home_dir) as conn:
+                qb = QueryBuilder(conn)
+                for row in qb.table("rollouts").select_many():
+                    status = str(row.get("status", ""))
+                    if status in status_counts:
+                        status_counts[status] += 1
+
+            tick_duration_ms = int((time.monotonic() - tick_started) * 1000)
+            self._log_scheduler(
+                "tick_summary",
+                fields={
+                    "tick": tick_id,
+                    "cand": candidates_count,
+                    "admit": admitted_count,
+                    "spawn": spawn_success,
+                    "run": status_counts["running"],
+                    "pass": status_counts["passed"],
+                    "fail": status_counts["failed"],
+                    "retry": status_counts["retry_pending"],
+                    "exhst": status_counts["exhausted"],
+                    "lost": status_counts["lost"],
+                    "dur": f"{tick_duration_ms}ms",
+                },
+                detail=True,
+            )
 
             time.sleep(max(0.1, poll_interval))
 

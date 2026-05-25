@@ -31,6 +31,17 @@ def _ensure_rollouts_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE rollouts ADD COLUMN vm_config_json TEXT")
 
 
+def _ensure_workers_columns(conn: sqlite3.Connection) -> None:
+    cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(workers)").fetchall()}
+    if "timeout_seconds" not in cols:
+        conn.execute("ALTER TABLE workers ADD COLUMN timeout_seconds REAL")
+        if "timeout" in cols:
+            conn.execute("UPDATE workers SET timeout_seconds = timeout WHERE timeout_seconds IS NULL")
+        conn.execute("UPDATE workers SET timeout_seconds = 60.0 WHERE timeout_seconds IS NULL")
+    if "failure_json" not in cols:
+        conn.execute("ALTER TABLE workers ADD COLUMN failure_json TEXT DEFAULT '{}'")
+
+
 def init_db(home_dir: str | Path | None = None) -> Path:
     db_path = state_db_path(home_dir)
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -39,6 +50,7 @@ def init_db(home_dir: str | Path | None = None) -> Path:
         _apply_pragmas(conn)
         conn.executescript(schema)
         _ensure_rollouts_columns(conn)
+        _ensure_workers_columns(conn)
         conn.commit()
     return db_path
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import secrets
 import time
 from dataclasses import dataclass
@@ -14,7 +15,7 @@ from ..core.constants import ROLLOUT_ID_RE
 from ..core.errors import RolloutConfigError, RolloutError, RolloutMetadataError, RolloutNotFoundError
 from ..core.fsops import ensure_dir, read_json, remove_file, remove_tree, write_json_atomic, write_text
 from ..machine.image_builder import RolloutImageBuilder, image_id_for_rollout
-from ..core.logger import create_flow_logger, configure_logging
+from ..core.logger import configure_logging, log_event, log_failure
 from ..storage.repositories import RolloutRepository, RuntimeImageRepository
 from ..storage.state_store import (
     get_rollout,
@@ -168,6 +169,7 @@ class Rollouts:
     def __init__(self, home_dir: str | Path | None = None) -> None:
         self.home_dir = resolve_home_dir(home_dir)
         configure_logging(home_dir=self.home_dir)
+        self.logger = logging.getLogger("sparkvm.rollouts")
         self.rollouts_dir = self.home_dir / "rollouts"
         self.metadata_path = self.rollouts_dir / "metadata.json"
         self.rollout_repo = RolloutRepository(self.home_dir)
@@ -184,11 +186,6 @@ class Rollouts:
         **kwargs: Any,
     ) -> Rollout:
         create_started_at = time.monotonic()
-        flow = create_flow_logger(
-            name="sparkvm.rollouts.create",
-            home_dir=self.home_dir,
-            context={"op": "rollout_create"},
-        )
         if kwargs:
             unexpected = ", ".join(sorted(str(key) for key in kwargs))
             raise RolloutConfigError(f"Unsupported rollout create parameter(s): {unexpected}")
@@ -196,7 +193,12 @@ class Rollouts:
         if not isinstance(name, str) or not name.strip():
             raise RolloutConfigError("name must be a non-empty string.")
         rollout_name = name.strip()
-        flow.event(state=f"[Rollout] create started name={rollout_name} runtime={runtime}")
+        log_event(
+            self.logger,
+            component="rollout",
+            event="create_started",
+            fields={"name": rollout_name, "runtime": runtime},
+        )
 
         if not isinstance(runtime, str) or runtime.strip().lower() != "dockerfile":
             raise RolloutConfigError("runtime must be 'Dockerfile'.")
@@ -213,13 +215,24 @@ class Rollouts:
             dockerfile_path = (source_dir / dockerfile_candidate).resolve()
         if not dockerfile_path.is_file():
             raise RolloutConfigError(f"Dockerfile not found at: {dockerfile_path}")
-        flow.event(state=f"[Docker] validated dockerfile={dockerfile_path}")
+        log_event(
+            self.logger,
+            component="docker",
+            event="validated",
+            fields={"dockerfile": dockerfile_path},
+            detail=True,
+        )
 
         ensure_dir(self.rollouts_dir, exist_ok=True)
         existing = self.find_existing_rollout_by_name(metadata={}, rollout_name=rollout_name)
         existing_ids = {str(row.get("id")) for row in self.rollout_repo.list_all() if isinstance(row.get("id"), str)}
         if existing is not None:
-            flow.event(state=f"[Rollout] reused existing rollout_id={existing.id}")
+            log_event(
+                self.logger,
+                component="rollout",
+                event="create_reused",
+                fields={"rollout": existing.id},
+            )
             return existing
 
         rollout_id = self.generate_rollout_id(
@@ -233,17 +246,21 @@ class Rollouts:
         image_path = self.home_dir / "images" / f"{image_id}.ext4"
         image_metadata_path = self.home_dir / "images" / f"{image_id}.json"
         build_dir = rollout_path / "build"
-        create_flow = None
-
         try:
             ensure_dir(rollout_path, exist_ok=False)
-            create_flow = create_flow_logger(
-                name=f"sparkvm.rollouts.create.{rollout_id}",
-                home_dir=self.home_dir,
-                context={"op": "rollout_create", "rollout_id": rollout_id},
+            log_event(
+                self.logger,
+                component="rollout",
+                event="prepare_complete",
+                fields={"rollout": rollout_id},
+                detail=True,
             )
-            create_flow.event(state="[Rollout] prepare complete")
-            create_flow.event(state="[Docker] build started")
+            log_event(
+                self.logger,
+                component="docker",
+                event="build_started",
+                fields={"rollout": rollout_id},
+            )
             built_image = RolloutImageBuilder().build_from_dockerfile(
                 rollout_id=rollout_id,
                 source_dir=source_dir,
@@ -253,7 +270,17 @@ class Rollouts:
                 image_metadata_path=image_metadata_path,
                 build_dir=build_dir,
             )
-            create_flow.event(state=f"[Docker] image processed path={built_image.path}")
+            log_event(
+                self.logger,
+                component="docker",
+                event="build_ok",
+                fields={
+                    "rollout": rollout_id,
+                    "image": built_image.id,
+                    "path": built_image.path,
+                    "dur": f"{int((time.monotonic() - create_started_at) * 1000)}ms",
+                },
+            )
 
             resolved_payload = {
                 "source": built_image.resolved_run_command.source,
@@ -299,22 +326,40 @@ class Rollouts:
             existing = self.find_existing_rollout_by_name(metadata={}, rollout_name=rollout_name)
             if existing is not None and existing.id != rollout.id:
                 self._delete_rollout_artifacts(rollout.to_metadata_entry())
-                flow.event(state=f"[Rollout] reused concurrent rollout_id={existing.id}")
+                log_event(
+                    self.logger,
+                    component="rollout",
+                    event="create_reused",
+                    fields={"rollout": existing.id, "reason": "concurrent_duplicate"},
+                )
                 return existing
             self.rollout_repo.update(rollout.id, rollout.to_index_entry())
-            create_flow.event(state=f"[Rollout] created duration_ms={int((time.monotonic() - create_started_at) * 1000)}")
+            log_event(
+                self.logger,
+                component="rollout",
+                event="create_ok",
+                fields={
+                    "rollout": rollout.id,
+                    "runtime": "Dockerfile",
+                    "vm": (
+                        f"{normalized_vm_config['vcpu']}cpu "
+                        f"{normalized_vm_config['memory']} "
+                        f"t={normalized_vm_config['timeout']}s"
+                    ),
+                    "dur": f"{int((time.monotonic() - create_started_at) * 1000)}ms",
+                },
+            )
             return rollout
         except Exception as exc:
-            if create_flow is not None:
-                create_flow.exception(state=f"[Rollout] create failed error={exc}")
-            else:
-                flow.exception(state=f"[Rollout] create failed name={rollout_name} error={exc}")
+            log_failure(
+                self.logger,
+                component="rollout",
+                event="create_failed",
+                error=exc,
+                fields={"name": rollout_name},
+            )
             remove_tree(rollout_path, ignore_errors=True)
             raise
-        finally:
-            if create_flow is not None:
-                create_flow.close()
-            flow.close()
 
     def find_existing_rollout_by_name(self, *, metadata: dict[str, Any], rollout_name: str) -> Rollout | None:
         del metadata
@@ -333,15 +378,21 @@ class Rollouts:
         if isinstance(rollout_path_raw, str) and rollout_path_raw.strip():
             rollout_path = Path(rollout_path_raw)
             if rollout_path.exists():
-                delete_flow = create_flow_logger(
-                    name="sparkvm.rollouts.delete",
-                    home_dir=self.home_dir,
-                    context={"op": "rollout_delete"},
+                log_event(
+                    self.logger,
+                    component="rollout",
+                    event="cleanup_started",
+                    fields={"path": rollout_path},
+                    detail=True,
                 )
-                delete_flow.event(state=f"[Rollout] cleanup started path={rollout_path}")
                 remove_tree(rollout_path, ignore_errors=False)
-                delete_flow.event(state=f"[Rollout] cleanup finished path={rollout_path}")
-                delete_flow.close()
+                log_event(
+                    self.logger,
+                    component="rollout",
+                    event="cleanup_finished",
+                    fields={"path": rollout_path},
+                    detail=True,
+                )
 
         image_path_raw = entry.get("image_path")
         if isinstance(image_path_raw, str) and image_path_raw.strip():
@@ -384,16 +435,16 @@ class Rollouts:
 
     def delete_by_id(self, rollout_id: str) -> None:
         candidate_id = validate_rollout_id(rollout_id)
-        flow = create_flow_logger(
-            name="sparkvm.rollouts.delete",
-            home_dir=self.home_dir,
-            context={"op": "rollout_delete", "rollout_id": candidate_id},
-        )
-        flow.event(state=f"[Rollout] delete started rollout_id={candidate_id}")
+        log_event(self.logger, component="rollout", event="delete_started", fields={"rollout": candidate_id})
         row = self.rollout_repo.get(candidate_id)
         if row is None:
-            flow.error(state=f"[Rollout] delete failed rollout_id={candidate_id} reason=not_found")
-            flow.close()
+            log_event(
+                self.logger,
+                component="rollout",
+                event="delete_failed",
+                fields={"rollout": candidate_id, "reason": "not_found"},
+                level="error",
+            )
             raise RolloutNotFoundError(f"Rollout not found: {candidate_id}")
 
         try:
@@ -404,8 +455,7 @@ class Rollouts:
             self._delete_rollout_artifacts({"id": candidate_id, "path": str(self.rollouts_dir / candidate_id)})
         self.runtime_image_repo.delete_by_rollout(candidate_id)
         self.rollout_repo.delete(candidate_id)
-        flow.event(state=f"[Rollout] delete finished rollout_id={candidate_id}")
-        flow.close()
+        log_event(self.logger, component="rollout", event="delete_ok", fields={"rollout": candidate_id})
 
     def exists(self, rollout_id: str) -> bool:
         try:
