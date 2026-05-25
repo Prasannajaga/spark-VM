@@ -49,6 +49,7 @@ from .logger import configure_logging
 from .network import NetworkConfig, NetworkManager, render_network_env_file
 from .result import VMResult
 from .resource_policy import assert_resource_capacity
+from .repositories import WorkerRepository
 from .rollouts import Rollout, Rollouts
 from .utils import shell_quote
 from cli.setup import ManagedSetup
@@ -133,7 +134,7 @@ def validate_env_mapping(env: Mapping[str, str] | None) -> dict[str, str]:
 
 
 def scrub_sensitive_execution_files(worker_dir: Path) -> None:
-    execution_disk_path = worker_dir / "rollout.ext4"
+    execution_disk_path = worker_dir / "execution.ext4"
     if not execution_disk_path.exists():
         return
 
@@ -203,6 +204,7 @@ class SparkVM:
         self._setup = ManagedSetup(self.config)
         self._images = ManagedImageResolver(self.config)
         self._rollouts = Rollouts(home_dir=self.config.home_dir)
+        self._worker_repo = WorkerRepository(home_dir=self.config.home_dir)
         self._network = NetworkManager(home_dir=self.config.home_dir)
 
     def __enter__(self) -> SparkVM:
@@ -263,7 +265,7 @@ class SparkVM:
         socket_path = worker_dir / "firecracker.sock"
         firecracker_log_path = worker_dir / "firecracker.log"
         worker_rootfs_path = worker_dir / "rootfs.ext4"
-        execution_disk_path = worker_dir / "rollout.ext4"
+        execution_disk_path = worker_dir / "execution.ext4"
         mount_base = worker_dir / "mnt"
 
         execution_disk = ExecutionDisk(
@@ -734,7 +736,38 @@ class SparkVM:
             "created_at": created_at,
             "completed_at": completed_at,
         }
-        self.write_worker_json(path=path, payload=payload)
+        existing = self._worker_repo.get(vm_id)
+        if existing is None:
+            self._worker_repo.create(
+                {
+                    "id": vm_id,
+                    "rollout_id": rollout.id,
+                    "reservation_id": None,
+                    "attempt": 1,
+                    "retry_of": None,
+                    "vcpu": int(machine_specs["vcpu"]),
+                    "memory": str(machine_specs["memory"]),
+                    "disk": str(machine_specs["disk"]),
+                    "timeout": float(machine_specs["timeout"]),
+                    "network": 1 if bool(machine_specs["network"]) else 0,
+                    "env_json": json.dumps(dict(self._env), sort_keys=True),
+                    "status": status,
+                    "pid": None,
+                    "started_at": created_at if status in {"starting", "running"} else None,
+                    "completed_at": completed_at,
+                    "result_json": None,
+                    "failure_json": None,
+                    "created_at": created_at,
+                    "updated_at": created_at,
+                }
+            )
+            return
+        patch: dict[str, object] = {"status": status}
+        if status in {"starting", "running"}:
+            patch["started_at"] = existing.get("started_at") or created_at
+        if completed_at is not None:
+            patch["completed_at"] = completed_at
+        self._worker_repo.update(vm_id, patch)
 
     def append_worker_note(self, *, worker_dir: Path, filename: str, note: str) -> None:
         record_path = worker_dir / filename
@@ -782,7 +815,7 @@ class SparkVM:
             "results_path": str(results_path) if results_path is not None else None,
             "rootfs_preserved": bool(prune.get("rootfs_preserved", False)),
             "rootfs_removed_reason": prune.get("rootfs_removed_reason"),
-            "execution_disk_path": str(worker_dir / "rollout.ext4") if bool(prune.get("execution_disk_preserved", False)) else None,
+            "execution_disk_path": str(worker_dir / "execution.ext4") if bool(prune.get("execution_disk_preserved", False)) else None,
             "execution_disk_preserved": bool(prune.get("execution_disk_preserved", False)),
             "execution_disk_removed_reason": prune.get("execution_disk_removed_reason"),
             "secret_scrubbed": bool(prune.get("secret_scrubbed", True)),
@@ -831,7 +864,7 @@ class SparkVM:
             "results_path": str(results_path) if results_path is not None else None,
             "rootfs_preserved": bool(prune.get("rootfs_preserved", False)),
             "rootfs_removed_reason": prune.get("rootfs_removed_reason"),
-            "execution_disk_path": str(worker_dir / "rollout.ext4") if bool(prune.get("execution_disk_preserved", False)) else None,
+            "execution_disk_path": str(worker_dir / "execution.ext4") if bool(prune.get("execution_disk_preserved", False)) else None,
             "execution_disk_preserved": bool(prune.get("execution_disk_preserved", False)),
             "execution_disk_removed_reason": prune.get("execution_disk_removed_reason"),
             "secret_scrubbed": bool(prune.get("secret_scrubbed", True)),
@@ -1002,7 +1035,7 @@ class SparkVM:
         env: Mapping[str, str],
     ) -> dict[str, Any]:
         rootfs_path = worker_dir / "rootfs.ext4"
-        execution_disk_path = worker_dir / "rollout.ext4"
+        execution_disk_path = worker_dir / "execution.ext4"
         secrets = list(env.values())
 
         rootfs_preserved = rootfs_path.exists()
@@ -1029,7 +1062,7 @@ class SparkVM:
                 remove_file(execution_disk_path, missing_ok=True)
             except OSError:
                 execution_disk_preserved = execution_disk_path.exists()
-                execution_disk_removed_reason = "failed to remove rollout.ext4"
+                execution_disk_removed_reason = "failed to remove execution.ext4"
             else:
                 execution_disk_preserved = False
                 execution_disk_removed_reason = "keep_disk_on_failure is false"
@@ -1045,7 +1078,7 @@ class SparkVM:
                 secret_scrub_failed = True
                 execution_disk_removed_reason = None
         elif not execution_disk_preserved:
-            execution_disk_removed_reason = "rollout.ext4 not present"
+            execution_disk_removed_reason = "execution.ext4 not present"
 
         return {
             "rootfs_preserved": rootfs_preserved,
@@ -1144,7 +1177,7 @@ class SparkVM:
 
         redact_file_in_place(firecracker_log_path, list(env.values()))
         partial = self.copy_sanitized_results_from_execution_disk(
-            execution_disk_path=worker_dir / "rollout.ext4",
+            execution_disk_path=worker_dir / "execution.ext4",
             worker_dir=worker_dir,
             env=env,
         )
@@ -1173,7 +1206,7 @@ class SparkVM:
                 result,
                 worker_path=worker_dir,
                 firecracker_log_path=firecracker_log_path,
-                execution_disk_path=(worker_dir / "rollout.ext4") if bool(prune.get("execution_disk_preserved")) else None,
+                execution_disk_path=(worker_dir / "execution.ext4") if bool(prune.get("execution_disk_preserved")) else None,
             )
             self.write_result_record(
                 worker_dir=worker_dir,

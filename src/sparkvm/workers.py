@@ -11,6 +11,7 @@ from typing import Any
 from .config import resolve_home_dir
 from .errors import CleanupError, WorkerMetadataError, WorkerNotFoundError
 from .fsops import ensure_dir, list_dirs_with_prefix, read_text, remove_tree, write_json_atomic
+from .repositories import WorkerRepository
 
 from .constants import WORKER_ID_RE
 from .utils import now_utc_iso
@@ -54,6 +55,7 @@ class Workers:
     def __init__(self, home_dir: str | Path | None = None) -> None:
         self.home_dir = resolve_home_dir(home_dir)
         self.workers_dir = self.home_dir / "workers"
+        self.repo = WorkerRepository(self.home_dir)
 
     def path(self, vm_id: str) -> Path:
         return self.workers_dir / validate_worker_id(vm_id)
@@ -71,7 +73,8 @@ class Workers:
 
     def get_by_id(self, vm_id: str) -> Worker:
         worker_path = self.path(vm_id)
-        if not worker_path.is_dir():
+        row = self.repo.get(validate_worker_id(vm_id))
+        if not worker_path.is_dir() and row is None:
             raise WorkerNotFoundError(f"Worker not found: {validate_worker_id(vm_id)}")
         return self.build_worker(worker_path)
 
@@ -79,10 +82,12 @@ class Workers:
         del force  # CLI handles prompt semantics.
         worker = self.get_by_id(vm_id)
         unmount_under(worker.path)
-        try:
-            remove_tree(worker.path, ignore_errors=False)
-        except OSError as exc:
-            raise CleanupError(f"Could not delete worker directory: {worker.path}") from exc
+        if worker.path.exists():
+            try:
+                remove_tree(worker.path, ignore_errors=False)
+            except OSError as exc:
+                raise CleanupError(f"Could not delete worker directory: {worker.path}") from exc
+        self.repo.delete(worker.vm_id)
 
     def log_text(self, vm_id: str, *, tail: int | None = None) -> str:
         worker = self.get_by_id(vm_id)
@@ -183,21 +188,24 @@ class Workers:
 
     def build_worker(self, worker_path: Path) -> Worker:
         vm_id = worker_path.name
+        db_row = self.repo.get(vm_id)
         result_path = worker_path / "result.json"
         failure_path = worker_path / "failure.json"
-        worker_json_path = worker_path / "worker.json"
         firecracker_log_path = worker_path / "firecracker.log"
 
-        status = "unknown"
+        status = optional_str(db_row.get("status")) if isinstance(db_row, dict) else "unknown"
         rollout_id: str | None = None
         rollout_name: str | None = None
         exit_code: int | None = None
         error_type: str | None = None
         error_message: str | None = None
         duration_ms: int | None = None
-        created_at: str | None = None
+        created_at: str | None = optional_str(db_row.get("created_at")) if isinstance(db_row, dict) else None
         result_path_value: Path | None = None
         failure_path_value: Path | None = None
+
+        if isinstance(db_row, dict):
+            rollout_id = optional_str(db_row.get("rollout_id"))
 
         if result_path.exists():
             result_path_value = result_path
@@ -232,15 +240,6 @@ class Workers:
                 log_from_json = optional_str(data.get("firecracker_log_path"))
                 if log_from_json:
                     firecracker_log_path = Path(log_from_json)
-        elif worker_json_path.exists():
-            try:
-                data = read_worker_json(worker_json_path)
-            except WorkerMetadataError:
-                status = "unknown"
-            else:
-                status = optional_str(data.get("status")) or "unknown"
-                rollout_id = optional_str(data.get("rollout_id"))
-                created_at = optional_str(data.get("created_at"))
 
         return Worker(
             vm_id=vm_id,
@@ -293,37 +292,80 @@ class Workers:
             "completed_at": None,
             "updated_at": now,
         }
-        write_json_atomic(worker_dir / "worker.json", payload, pretty=True)
+        self.repo.create(
+            {
+                "id": worker_id,
+                "rollout_id": rollout_id,
+                "reservation_id": reservation_id,
+                "attempt": int(attempt),
+                "retry_of": retry_of,
+                "vcpu": int(vm_config.get("vcpu", 2)),
+                "memory": str(vm_config.get("memory", "2G")),
+                "disk": str(vm_config.get("disk", "4G")),
+                "timeout": float(vm_config.get("timeout", 60.0)),
+                "network": 1 if bool(vm_config.get("network", True)) else 0,
+                "env_json": json.dumps(dict(vm_config.get("env", {})), sort_keys=True),
+                "status": status,
+                "pid": pid,
+                "started_at": None,
+                "completed_at": None,
+                "result_json": None,
+                "failure_json": None,
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
         return payload
 
     def load_worker(self, worker_id: str) -> dict[str, Any]:
-        worker_path = self.path(worker_id)
-        worker_json = worker_path / "worker.json"
-        if not worker_json.exists():
+        row = self.repo.get(validate_worker_id(worker_id))
+        if row is None:
             raise WorkerNotFoundError(f"Worker metadata missing: {worker_id}")
-        return read_worker_json(worker_json)
+        env_raw = row.get("env_json")
+        env = {}
+        if isinstance(env_raw, str) and env_raw:
+            try:
+                parsed = json.loads(env_raw)
+                if isinstance(parsed, dict):
+                    env = {str(k): str(v) for k, v in parsed.items()}
+            except Exception:
+                env = {}
+        return {
+            "id": str(row["id"]),
+            "rollout_id": str(row["rollout_id"]),
+            "reservation_id": str(row["reservation_id"]),
+            "attempt": int(row.get("attempt", 1)),
+            "retry_of": optional_str(row.get("retry_of")),
+            "vcpu": int(row.get("vcpu", 2)),
+            "memory": str(row.get("memory", "2G")),
+            "disk": str(row.get("disk", "4G")),
+            "timeout": float(row.get("timeout", 60.0)),
+            "network": bool(int(row.get("network", 1))),
+            "env": env,
+            "status": str(row.get("status", "unknown")),
+            "pid": row.get("pid"),
+            "created_at": optional_str(row.get("created_at")),
+            "started_at": optional_str(row.get("started_at")),
+            "completed_at": optional_str(row.get("completed_at")),
+            "updated_at": optional_str(row.get("updated_at")),
+        }
 
     def update_worker(self, worker_id: str, patch: dict[str, Any]) -> dict[str, Any]:
-        worker_path = self.path(worker_id)
-        worker_json = worker_path / "worker.json"
-        if not worker_json.exists():
+        worker_id = validate_worker_id(worker_id)
+        if self.repo.get(worker_id) is None:
             raise WorkerNotFoundError(f"Worker metadata missing: {worker_id}")
-        payload = read_worker_json(worker_json)
-        payload.update(patch)
-        payload["updated_at"] = now_utc_iso()
-        write_json_atomic(worker_json, payload, pretty=True)
-        return payload
+        repo_patch = dict(patch)
+        if "env" in repo_patch and isinstance(repo_patch["env"], dict):
+            repo_patch["env_json"] = json.dumps(repo_patch.pop("env"), sort_keys=True)
+        if "network" in repo_patch:
+            repo_patch["network"] = 1 if bool(repo_patch["network"]) else 0
+        row = self.repo.update(worker_id, repo_patch)
+        if row is None:
+            raise WorkerNotFoundError(f"Worker metadata missing: {worker_id}")
+        return self.load_worker(worker_id)
 
     def list_workers(self) -> list[dict[str, Any]]:
-        payloads: list[dict[str, Any]] = []
-        for candidate in list_dirs_with_prefix(self.workers_dir, "worker-"):
-            worker_json = candidate / "worker.json"
-            if not worker_json.exists():
-                continue
-            try:
-                payloads.append(read_worker_json(worker_json))
-            except WorkerMetadataError:
-                continue
+        payloads = [self.load_worker(str(row["id"])) for row in self.repo.list_all() if isinstance(row, dict) and row.get("id")]
         payloads.sort(key=lambda item: str(item.get("created_at", "")))
         return payloads
 

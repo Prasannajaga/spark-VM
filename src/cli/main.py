@@ -6,7 +6,7 @@ import argparse
 import json
 import sys
 
-from cli.cleanup import run_cleanup_command
+from cli.cleanup import run_cleanup_command, run_reset_command
 from sparkvm.errors import SparkVMError
 from cli.setup import (
     doctor_status,
@@ -72,6 +72,9 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup_parser.add_argument("target", choices=["rollouts", "workers", "all"], help="Cleanup target")
     cleanup_parser.add_argument("--force", action="store_true", help="Skip confirmation prompt before deleting files")
 
+    reset_parser = subparsers.add_parser("reset", help="Delete all data inside SparkVM home directory")
+    reset_parser.add_argument("--force", action="store_true", help="Skip confirmation prompt before deleting files")
+
     workers_parser = subparsers.add_parser("workers", help="Run and inspect workers")
     workers_subparsers = workers_parser.add_subparsers(dest="workers_command", required=True)
 
@@ -98,6 +101,11 @@ def build_parser() -> argparse.ArgumentParser:
     workers_view.add_argument("--failure", action="store_true", help="Print failure.json for the worker")
     workers_view.add_argument("--results", action="store_true", help="Print sanitized worker result logs")
     workers_view.add_argument("--path", action="store_true", help="Print worker directory path")
+
+    worker_parser = subparsers.add_parser("worker", help="Internal worker execution")
+    worker_subparsers = worker_parser.add_subparsers(dest="worker_command", required=True)
+    worker_run = worker_subparsers.add_parser("run", help="Run one worker id")
+    worker_run.add_argument("worker_id", help="Worker id")
 
     subparsers.add_parser("start", help="Start rollout scheduler loop")
 
@@ -355,6 +363,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "cleanup":
             return run_cleanup_command(args.home_dir, args.target, args.force)
 
+        if args.command == "reset":
+            return run_reset_command(args.home_dir, args.force)
+
         if args.command == "workers":
             if args.workers_command == "list":
                 return run_workers_list(args.home_dir)
@@ -385,6 +396,12 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "start":
             return run_start_scheduler(args.home_dir)
+
+        if args.command == "worker":
+            if args.worker_command == "run":
+                return run_worker_execute(args.home_dir, args.worker_id)
+            parser.error(f"Unknown worker command: {args.worker_command}")
+            return 2
 
         parser.error(f"Unknown command: {args.command}")
         return 2

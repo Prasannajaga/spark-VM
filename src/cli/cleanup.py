@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from sparkvm.config import DEFAULT_MEMORY, DEFAULT_RUNTIME, DEFAULT_TIMEOUT_SEC, DEFAULT_VCPU, SparkVMConfig, build_config
+from sparkvm.db import connect_db
 from sparkvm.errors import SparkVMError
 from sparkvm.fsops import (
     ensure_dir,
@@ -41,6 +42,9 @@ def cleanup_rollouts(config: SparkVMConfig, *, force: bool = False, dry_run: boo
     if dry_run:
         return
     clear_dir_contents(rollouts_dir_path)
+    with connect_db(config.home_dir) as conn:
+        conn.execute("DELETE FROM rollouts")
+        conn.commit()
 
 
 def cleanup_workers(config: SparkVMConfig, *, force: bool = False, dry_run: bool = False) -> None:
@@ -57,6 +61,10 @@ def cleanup_workers(config: SparkVMConfig, *, force: bool = False, dry_run: bool
             remove_tree(child, ignore_errors=False)
         else:
             remove_file(child, missing_ok=True)
+    with connect_db(config.home_dir) as conn:
+        conn.execute("DELETE FROM reservations")
+        conn.execute("DELETE FROM workers")
+        conn.commit()
 
 
 def cleanup_all(config: SparkVMConfig, *, force: bool = False, dry_run: bool = False) -> None:
