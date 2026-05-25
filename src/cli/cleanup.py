@@ -4,23 +4,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sparkvm.commands import run_checked
 from sparkvm.config import DEFAULT_MEMORY, DEFAULT_RUNTIME, DEFAULT_TIMEOUT_SEC, DEFAULT_VCPU, SparkVMConfig, build_config
-from sparkvm.errors import CleanupError, SparkVMError
+from sparkvm.errors import SparkVMError
 from sparkvm.fsops import (
     ensure_dir,
     list_dirs_with_prefix,
-    read_text,
     remove_file,
     remove_tree,
-    write_json_atomic,
 )
-
-from sparkvm.constants import ROLLOUT_METADATA_VERSION
 from sparkvm.utils import (
-    mount_points_under,
-    path_within,
-    unescape_mount_path,
     unmount_under,
 )
 
@@ -33,53 +25,38 @@ def workers_dir(config: SparkVMConfig) -> Path:
     return config.workers_dir
 
 
-def metadata_payload() -> dict[str, object]:
-    return {"version": ROLLOUT_METADATA_VERSION, "rollouts": []}
-
-
-def write_rollout_metadata_reset(rollouts_dir_path: Path) -> None:
-    metadata_path = rollouts_dir_path / "metadata.json"
-    try:
-        write_json_atomic(metadata_path, metadata_payload(), encoding="utf-8", pretty=True)
-    except OSError as exc:
-        raise CleanupError(f"Could not reset rollout metadata at {metadata_path}") from exc
+def clear_dir_contents(path: Path) -> None:
+    ensure_dir(path, exist_ok=True)
+    for child in path.iterdir():
+        if child.is_dir():
+            remove_tree(child, ignore_errors=False)
+        else:
+            remove_file(child, missing_ok=True)
 
 
 def cleanup_rollouts(config: SparkVMConfig, *, force: bool = False, dry_run: bool = False) -> None:
     del force  # CLI handles user confirmation before calling this function.
 
     rollouts_dir_path = rollouts_dir(config)
-    for child in list_dirs_with_prefix(rollouts_dir_path, "rollout-"):
-        if not dry_run:
-            remove_tree(child, ignore_errors=False)
-
-    if not dry_run:
-        write_rollout_metadata_reset(rollouts_dir_path)
+    if dry_run:
+        return
+    clear_dir_contents(rollouts_dir_path)
 
 
 def cleanup_workers(config: SparkVMConfig, *, force: bool = False, dry_run: bool = False) -> None:
     del force  # CLI handles user confirmation before calling this function.
 
     workers_dir_path = workers_dir(config)
-    if not workers_dir_path.exists():
-        return
-
-    for vm_dir in list_dirs_with_prefix(workers_dir_path, "vm-"):
-        if dry_run:
-            continue
-        remove_tree(vm_dir, ignore_errors=False)
-
     if dry_run:
         return
 
-    # Remove stale socket/image files left behind outside vm-* directories.
-    for candidate in workers_dir_path.rglob("*"):
-        if candidate.name not in {"firecracker.sock", "rollout.ext4"}:
-            continue
-        try:
-            remove_file(candidate, missing_ok=True)
-        except OSError:
-            continue
+    ensure_dir(workers_dir_path, exist_ok=True)
+    for child in workers_dir_path.iterdir():
+        if child.is_dir():
+            unmount_under(child)
+            remove_tree(child, ignore_errors=False)
+        else:
+            remove_file(child, missing_ok=True)
 
 
 def cleanup_all(config: SparkVMConfig, *, force: bool = False, dry_run: bool = False) -> None:

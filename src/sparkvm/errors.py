@@ -41,10 +41,6 @@ class WorkerRootfsError(SparkVMSetupError):
     """Per-worker runtime rootfs copy creation/permission failure."""
 
 
-class BaseImageNotFound(SparkVMSetupError):
-    """Managed base image could not be found."""
-
-
 class KVMUnavailableError(SparkVMSetupError):
     """KVM is unavailable on the host."""
 
@@ -113,14 +109,6 @@ class RolloutMetadataError(RolloutError):
     """Rollout metadata file is missing/corrupt/invalid."""
 
 
-class InvalidRepoError(RolloutError):
-    """Repo-mode rollout source is invalid or Git operations failed."""
-
-
-class InvalidRolloutModeError(RolloutError):
-    """Rollout mode is unsupported."""
-
-
 class WorkerError(SparkVMError):
     """Worker persistence/listing/deletion failure."""
 
@@ -148,7 +136,6 @@ __all__ = [
     "KernelImageNotFound",
     "RuntimeImagePermissionError",
     "WorkerRootfsError",
-    "BaseImageNotFound",
     "KVMUnavailableError",
     "FirecrackerProcessError",
     "FirecrackerAPIError",
@@ -166,8 +153,6 @@ __all__ = [
     "RolloutBuildError",
     "RolloutNotFoundError",
     "RolloutMetadataError",
-    "InvalidRepoError",
-    "InvalidRolloutModeError",
     "WorkerError",
     "WorkerNotFoundError",
     "WorkerMetadataError",

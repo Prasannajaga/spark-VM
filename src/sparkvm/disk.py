@@ -193,17 +193,7 @@ class ExecutionDisk:
         with tempfile.TemporaryDirectory(prefix="sparkvm-execution-disk-") as tmp_dir_str:
             tmp_dir = Path(tmp_dir_str)
             staged_root = tmp_dir / "job"
-            if self.rollout.mode == "repo" and (self.rollout.runtime_image is not None or self.rollout.rootfs_path is not None):
-                ensure_dir(staged_root, exist_ok=True)
-                run_sh = self.rollout.path / "run.sh"
-                if not run_sh.is_file():
-                    raise ExecutionDiskError(f"Rollout run.sh missing: {run_sh}")
-                shutil.copy2(run_sh, staged_root / "run.sh")
-                rollout_json = self.rollout.path / "rollout.json"
-                if rollout_json.is_file():
-                    shutil.copy2(rollout_json, staged_root / "rollout.json")
-            else:
-                shutil.copytree(self.rollout.path, staged_root, symlinks=True)
+            shutil.copytree(self.rollout.path, staged_root, symlinks=True)
             if runtime_files:
                 copy_files_into_mount(runtime_files, staged_root)
             create_ext4_image(self.path, self.size_mb, source_dir=staged_root)
@@ -273,18 +263,14 @@ class ExecutionDisk:
                     )
 
                 status = "passed"
-                if setup is not None and setup.exit_code == 124:
-                    status = "setup_timeout"
-                elif setup is not None and setup.exit_code != 0:
-                    status = "setup_failed"
-                elif run is not None and run.exit_code == 124:
-                    status = "run_timeout"
-                elif run is not None and run.exit_code != 0:
-                    status = "run_failed"
-                elif final_exit_code == 124:
-                    status = "run_timeout"
-                elif final_exit_code != 0:
-                    status = "run_failed"
+                if (
+                    (setup is not None and setup.exit_code == 124)
+                    or (run is not None and run.exit_code == 124)
+                    or final_exit_code == 124
+                ):
+                    status = "timeout"
+                elif (setup is not None and setup.exit_code != 0) or (run is not None and run.exit_code != 0) or final_exit_code != 0:
+                    status = "failed"
             else:
                 output_log_path = tmp_dir / "output.log"
                 error_log_path = tmp_dir / "error.log"
@@ -306,9 +292,9 @@ class ExecutionDisk:
                 if final_exit_code == 0:
                     status = "passed"
                 elif final_exit_code == 124:
-                    status = "run_timeout"
+                    status = "timeout"
                 else:
-                    status = "run_failed"
+                    status = "failed"
 
             return VMResult(
                 rollout_id=self.rollout.id,

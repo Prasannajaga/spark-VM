@@ -44,12 +44,6 @@ class RuntimeImage:
     boot_args: str = BOOT_ARGS
     metadata_path: Path | None = None
 
-    @property
-    def base_image(self) -> str:
-        """Backward compatibility alias for older callers."""
-        return self.name
-
-
 def resolve_runtime_image(runtime: str, config: SparkVMConfig) -> RuntimeImage:
     raw_runtime = runtime or config.runtime
     normalized_runtime = normalize_runtime_name(raw_runtime)
@@ -65,7 +59,7 @@ def resolve_runtime_image(runtime: str, config: SparkVMConfig) -> RuntimeImage:
         suggestion = suggest_docker_image(raw_runtime, normalized_runtime)
         raise RuntimeImageNotFound(
             f"Runtime image '{normalized_runtime}' not found. "
-            f"Create a repo rollout with dockerfile support that produces runtime '{suggestion}'."
+            f"Create a Dockerfile rollout that produces runtime '{suggestion}'."
         )
 
     return RuntimeImage(
@@ -78,7 +72,7 @@ def resolve_runtime_image(runtime: str, config: SparkVMConfig) -> RuntimeImage:
 
 
 class ManagedImageResolver:
-    """Compatibility wrapper for staged VM orchestration."""
+    """Managed runtime image resolver."""
 
     def __init__(self, config: SparkVMConfig) -> None:
         self._config = config
@@ -87,9 +81,6 @@ class ManagedImageResolver:
         return resolve_runtime_image(runtime or self._config.runtime, self._config)
 
 
-# Backward compatibility aliases.
-BaseImage = RuntimeImage
-resolve_base_image = resolve_runtime_image
 from .constants import DEBIAN_BOOT_ARGS
 
 
@@ -97,9 +88,7 @@ __all__ = [
     "BOOT_ARGS",
     "DEBIAN_BOOT_ARGS",
     "RuntimeImage",
-    "BaseImage",
     "normalize_runtime_name",
     "resolve_runtime_image",
-    "resolve_base_image",
     "ManagedImageResolver",
 ]

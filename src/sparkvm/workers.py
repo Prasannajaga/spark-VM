@@ -3,18 +3,17 @@
 from __future__ import annotations
 
 import json
-import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .commands import run_checked
 from .config import resolve_home_dir
 from .errors import CleanupError, WorkerMetadataError, WorkerNotFoundError
-from .fsops import list_dirs_with_prefix, read_text, remove_tree
+from .fsops import ensure_dir, list_dirs_with_prefix, read_text, remove_tree, write_json_atomic
 
 from .constants import WORKER_ID_RE
+from .utils import now_utc_iso
 
 
 def validate_worker_id(vm_id: str) -> str:
@@ -61,7 +60,12 @@ class Workers:
 
     def list(self) -> list[Worker]:
         items: list[Worker] = []
-        for candidate in list_dirs_with_prefix(self.workers_dir, "vm-"):
+        candidates = list_dirs_with_prefix(self.workers_dir, "vm-") + list_dirs_with_prefix(self.workers_dir, "worker-")
+        seen: set[str] = set()
+        for candidate in sorted(candidates):
+            if candidate.name in seen:
+                continue
+            seen.add(candidate.name)
             items.append(self.build_worker(candidate))
         return items
 
@@ -181,6 +185,7 @@ class Workers:
         vm_id = worker_path.name
         result_path = worker_path / "result.json"
         failure_path = worker_path / "failure.json"
+        worker_json_path = worker_path / "worker.json"
         firecracker_log_path = worker_path / "firecracker.log"
 
         status = "unknown"
@@ -227,6 +232,15 @@ class Workers:
                 log_from_json = optional_str(data.get("firecracker_log_path"))
                 if log_from_json:
                     firecracker_log_path = Path(log_from_json)
+        elif worker_json_path.exists():
+            try:
+                data = read_worker_json(worker_json_path)
+            except WorkerMetadataError:
+                status = "unknown"
+            else:
+                status = optional_str(data.get("status")) or "unknown"
+                rollout_id = optional_str(data.get("rollout_id"))
+                created_at = optional_str(data.get("created_at"))
 
         return Worker(
             vm_id=vm_id,
@@ -243,6 +257,84 @@ class Workers:
             result_path=result_path_value,
             failure_path=failure_path_value,
         )
+
+    def create_worker(
+        self,
+        *,
+        worker_id: str,
+        rollout_id: str,
+        reservation_id: str,
+        attempt: int,
+        retry_of: str | None,
+        vm_config: dict[str, Any],
+        status: str = "reserved",
+        pid: int | None = None,
+    ) -> dict[str, Any]:
+        worker_id = validate_worker_id(worker_id)
+        worker_dir = self.path(worker_id)
+        ensure_dir(worker_dir, exist_ok=False)
+        now = now_utc_iso()
+        payload: dict[str, Any] = {
+            "id": worker_id,
+            "rollout_id": rollout_id,
+            "reservation_id": reservation_id,
+            "attempt": int(attempt),
+            "retry_of": retry_of,
+            "vcpu": int(vm_config.get("vcpu", 2)),
+            "memory": str(vm_config.get("memory", "2G")),
+            "disk": str(vm_config.get("disk", "4G")),
+            "timeout": float(vm_config.get("timeout", 60.0)),
+            "network": bool(vm_config.get("network", True)),
+            "env": dict(vm_config.get("env", {})),
+            "status": status,
+            "pid": pid,
+            "created_at": now,
+            "started_at": None,
+            "completed_at": None,
+            "updated_at": now,
+        }
+        write_json_atomic(worker_dir / "worker.json", payload, pretty=True)
+        return payload
+
+    def load_worker(self, worker_id: str) -> dict[str, Any]:
+        worker_path = self.path(worker_id)
+        worker_json = worker_path / "worker.json"
+        if not worker_json.exists():
+            raise WorkerNotFoundError(f"Worker metadata missing: {worker_id}")
+        return read_worker_json(worker_json)
+
+    def update_worker(self, worker_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+        worker_path = self.path(worker_id)
+        worker_json = worker_path / "worker.json"
+        if not worker_json.exists():
+            raise WorkerNotFoundError(f"Worker metadata missing: {worker_id}")
+        payload = read_worker_json(worker_json)
+        payload.update(patch)
+        payload["updated_at"] = now_utc_iso()
+        write_json_atomic(worker_json, payload, pretty=True)
+        return payload
+
+    def list_workers(self) -> list[dict[str, Any]]:
+        payloads: list[dict[str, Any]] = []
+        for candidate in list_dirs_with_prefix(self.workers_dir, "worker-"):
+            worker_json = candidate / "worker.json"
+            if not worker_json.exists():
+                continue
+            try:
+                payloads.append(read_worker_json(worker_json))
+            except WorkerMetadataError:
+                continue
+        payloads.sort(key=lambda item: str(item.get("created_at", "")))
+        return payloads
+
+    def mark_worker_status(self, worker_id: str, status: str, **extra: Any) -> dict[str, Any]:
+        patch: dict[str, Any] = {"status": status}
+        patch.update(extra)
+        if status in {"starting", "running"}:
+            patch.setdefault("started_at", now_utc_iso())
+        if status in {"passed", "failed", "timeout", "lost"}:
+            patch.setdefault("completed_at", now_utc_iso())
+        return self.update_worker(worker_id, patch)
 
 
 def read_failure_json(failure_path: Path) -> dict[str, Any]:
