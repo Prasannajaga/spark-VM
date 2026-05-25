@@ -25,6 +25,12 @@ def _apply_pragmas(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA synchronous = NORMAL;")
 
 
+def _ensure_rollouts_columns(conn: sqlite3.Connection) -> None:
+    cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(rollouts)").fetchall()}
+    if "vm_config_json" not in cols:
+        conn.execute("ALTER TABLE rollouts ADD COLUMN vm_config_json TEXT")
+
+
 def init_db(home_dir: str | Path | None = None) -> Path:
     db_path = state_db_path(home_dir)
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -32,6 +38,7 @@ def init_db(home_dir: str | Path | None = None) -> Path:
     with sqlite3.connect(db_path) as conn:
         _apply_pragmas(conn)
         conn.executescript(schema)
+        _ensure_rollouts_columns(conn)
         conn.commit()
     return db_path
 

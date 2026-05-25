@@ -35,6 +35,7 @@ class Rollout:
     runtime_image: dict[str, Any]
     dockerfile: str
     resolved_run_command: dict[str, Any]
+    vm_config: dict[str, Any]
 
     @property
     def mode(self) -> str:
@@ -60,6 +61,7 @@ class Rollout:
             "runtime_image": dict(self.runtime_image),
             "dockerfile": self.dockerfile,
             "resolved_run_command": dict(self.resolved_run_command),
+            "vm_config": dict(self.vm_config),
         }
 
     def to_index_entry(self) -> dict[str, Any]:
@@ -69,6 +71,7 @@ class Rollout:
             "priority": 100,
             "retry_count": 0,
             "max_retries": 3,
+            "vm_config_json": json.dumps(self.vm_config, sort_keys=True),
             "created_at": self.created_at,
             "updated_at": self.created_at,
         }
@@ -97,6 +100,7 @@ class Rollout:
         resolved_run_command = payload.get("resolved_run_command")
         if not isinstance(resolved_run_command, dict):
             raise RolloutMetadataError("rollout metadata missing resolved_run_command object.")
+        vm_config = payload.get("vm_config") if isinstance(payload.get("vm_config"), dict) else {}
 
         try:
             return cls(
@@ -110,6 +114,7 @@ class Rollout:
                 runtime_image=runtime_image,
                 dockerfile=dockerfile,
                 resolved_run_command=resolved_run_command,
+                vm_config=vm_config,
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise RolloutMetadataError("rollout metadata is invalid.") from exc
@@ -122,6 +127,39 @@ def validate_rollout_id(rollout_id: str) -> str:
     if not ROLLOUT_ID_RE.fullmatch(candidate):
         raise RolloutError("Invalid rollout_id format. Expected values like 'rollout-abc123'.")
     return candidate
+
+
+def _normalize_vm_config(raw: dict[str, Any] | None) -> dict[str, Any]:
+    data = raw or {}
+    if not isinstance(data, dict):
+        raise RolloutConfigError("vm_config must be an object.")
+    try:
+        vcpu = int(data.get("vcpu", 2))
+    except (TypeError, ValueError) as exc:
+        raise RolloutConfigError("vm_config.vcpu must be an integer.") from exc
+    if vcpu <= 0:
+        raise RolloutConfigError("vm_config.vcpu must be > 0.")
+    memory = str(data.get("memory", "2G"))
+    disk = str(data.get("disk", "4G"))
+    try:
+        timeout = float(data.get("timeout", 60.0))
+    except (TypeError, ValueError) as exc:
+        raise RolloutConfigError("vm_config.timeout must be a number.") from exc
+    if timeout <= 0:
+        raise RolloutConfigError("vm_config.timeout must be > 0.")
+    network = bool(data.get("network", True))
+    env_raw = data.get("env", {})
+    if not isinstance(env_raw, dict):
+        raise RolloutConfigError("vm_config.env must be an object.")
+    env = {str(k): str(v) for k, v in env_raw.items()}
+    return {
+        "vcpu": vcpu,
+        "memory": memory,
+        "disk": disk,
+        "timeout": timeout,
+        "network": network,
+        "env": env,
+    }
 
 
 class Rollouts:
@@ -142,6 +180,7 @@ class Rollouts:
         runtime: str = DEFAULT_RUNTIME,
         deleteOnSuccess: bool = False,
         dockerfile: str | Path = "Dockerfile",
+        vm_config: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> Rollout:
         create_started_at = time.monotonic()
@@ -164,6 +203,7 @@ class Rollouts:
 
         if not isinstance(deleteOnSuccess, bool):
             raise RolloutConfigError("deleteOnSuccess must be a boolean.")
+        normalized_vm_config = _normalize_vm_config(vm_config)
 
         source_dir = Path.cwd().resolve()
         dockerfile_candidate = Path(dockerfile).expanduser()
@@ -251,6 +291,7 @@ class Rollouts:
                 "dockerfile": str(dockerfile_path),
                 "runtime_image": runtime_image_payload,
                 "resolved_run_command": resolved_payload,
+                "vm_config": normalized_vm_config,
             }
             save_rollout(rollout_json, self.home_dir)
             rollout = Rollout.from_payload(rollout_json, rollout_path=rollout_path)

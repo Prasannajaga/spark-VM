@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS rollouts (
 
     resolved_run_command_json TEXT,
     runtime_image_json TEXT,
+    vm_config_json TEXT,
 
     status TEXT NOT NULL DEFAULT 'scheduled'
         CHECK (status IN (
@@ -117,7 +118,7 @@ CREATE TABLE IF NOT EXISTS workers (
         )),
 
     exit_code INTEGER,
-    failure_json JSON DEFAULT '{}',
+    failure_json TEXT DEFAULT '{}',
     failure_phase TEXT,
 
     created_at TEXT NOT NULL,

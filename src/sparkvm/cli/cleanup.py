@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from sparkvm.core.config import DEFAULT_MEMORY, DEFAULT_RUNTIME, DEFAULT_TIMEOUT_SEC, DEFAULT_VCPU, SparkVMConfig, build_config
+from sparkvm.core.constants import KERNEL_FILENAME
 from sparkvm.storage.db import connect_db
 from sparkvm.core.errors import SparkVMError
 from sparkvm.core.fsops import (
@@ -30,6 +31,17 @@ def workers_dir(config: SparkVMConfig) -> Path:
 def clear_dir_contents(path: Path) -> None:
     ensure_dir(path, exist_ok=True)
     for child in path.iterdir():
+        if child.is_dir():
+            remove_tree(child, ignore_errors=False)
+        else:
+            remove_file(child, missing_ok=True)
+
+
+def clear_dir_contents_except(path: Path, *, keep_files: set[str]) -> None:
+    ensure_dir(path, exist_ok=True)
+    for child in path.iterdir():
+        if child.is_file() and child.name in keep_files:
+            continue
         if child.is_dir():
             remove_tree(child, ignore_errors=False)
         else:
@@ -110,8 +122,9 @@ def cleanup_all(config: SparkVMConfig, *, force: bool = False, dry_run: bool = F
     cleanup_rollouts(config, force=force, dry_run=False)
     cleanup_workers(config, force=force, dry_run=False)
 
-    # Remove any remaining image artifacts not tied to current rollout rows.
-    clear_dir_contents(config.home_dir / "images")
+    # Remove any remaining image artifacts not tied to current rollout rows,
+    # but keep the managed kernel image.
+    clear_dir_contents_except(config.home_dir / "images", keep_files={KERNEL_FILENAME})
 
     # Clear runtime DB state.
     with connect_db(config.home_dir) as conn:

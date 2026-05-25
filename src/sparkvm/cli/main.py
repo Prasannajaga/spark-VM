@@ -54,7 +54,6 @@ def build_parser() -> argparse.ArgumentParser:
     rollout_subparsers = rollout_parser.add_subparsers(dest="rollout_command", required=True)
     rollout_create = rollout_subparsers.add_parser("create", help="Create Dockerfile-backed rollout")
     rollout_create.add_argument("--name", required=True, help="Rollout name")
-    rollout_create.add_argument("--runtime", default="Dockerfile", help="Runtime value (must be Dockerfile)")
     rollout_create.add_argument(
         "--dockerfile",
         default="Dockerfile",
@@ -64,6 +63,30 @@ def build_parser() -> argparse.ArgumentParser:
         "--delete-on-success",
         action="store_true",
         help="Delete rollout artifacts after a passed run",
+    )
+    rollout_create.add_argument("--vcpu", type=int, default=2, help="Default worker vCPU count")
+    rollout_create.add_argument("--memory", default="2G", help="Default worker memory (e.g. 2G)")
+    rollout_create.add_argument("--disk", default="4G", help="Default worker execution disk (e.g. 4G)")
+    rollout_create.add_argument("--timeout", type=float, default=60.0, help="Default worker timeout seconds")
+    rollout_network_group = rollout_create.add_mutually_exclusive_group()
+    rollout_network_group.add_argument(
+        "--network",
+        dest="network",
+        action="store_true",
+        default=True,
+        help="Enable network for workers spawned from this rollout (default: enabled)",
+    )
+    rollout_network_group.add_argument(
+        "--no-network",
+        dest="network",
+        action="store_false",
+        help="Disable network for workers spawned from this rollout",
+    )
+    rollout_create.add_argument(
+        "--env",
+        action="append",
+        default=None,
+        help="Default worker environment variable KEY=VALUE (repeatable)",
     )
     rollout_subparsers.add_parser("list", help="List rollouts")
     rollout_view = rollout_subparsers.add_parser("view", help="View one rollout by id")
@@ -86,7 +109,20 @@ def build_parser() -> argparse.ArgumentParser:
     workers_run.add_argument("--memory", default="2G", help="Memory (e.g. 2G)")
     workers_run.add_argument("--disk", default="4G", help="Execution disk (e.g. 4G)")
     workers_run.add_argument("--timeout", type=float, default=60.0, help="Timeout seconds")
-    workers_run.add_argument("--network", action="store_true", help="Enable network")
+    workers_network_group = workers_run.add_mutually_exclusive_group()
+    workers_network_group.add_argument(
+        "--network",
+        dest="network",
+        action="store_true",
+        default=True,
+        help="Enable network (default: enabled)",
+    )
+    workers_network_group.add_argument(
+        "--no-network",
+        dest="network",
+        action="store_false",
+        help="Disable network",
+    )
     workers_run.add_argument(
         "--env",
         action="append",
@@ -124,16 +160,29 @@ def run_rollout_create(
     home_dir: str | None,
     *,
     name: str,
-    runtime: str,
     dockerfile: str,
     delete_on_success: bool,
+    vcpu: int,
+    memory: str,
+    disk: str,
+    timeout: float,
+    network: bool,
+    env_pairs: list[str] | None,
 ) -> int:
     manager = Rollouts(home_dir=home_dir)
+    env = parse_env_vars(env_pairs)
     rollout = manager.create(
         name=name,
-        runtime=runtime,
         dockerfile=dockerfile,
         deleteOnSuccess=delete_on_success,
+        vm_config={
+            "vcpu": vcpu,
+            "memory": memory,
+            "disk": disk,
+            "timeout": timeout,
+            "network": network,
+            "env": env,
+        },
     )
     print(json.dumps(rollout.to_metadata_entry(), indent=2, sort_keys=True))
     return 0
@@ -197,7 +246,7 @@ def run_rollout_view(home_dir: str | None, rollout_id: str) -> int:
 
 def _format_rollout_db_row(row: dict[str, object]) -> dict[str, object]:
     payload = dict(row)
-    for key in ("resolved_run_command_json", "runtime_image_json"):
+    for key in ("resolved_run_command_json", "runtime_image_json", "vm_config_json"):
         value = payload.get(key)
         if isinstance(value, str) and value.strip():
             try:
@@ -311,30 +360,8 @@ def run_worker_execute(home_dir: str | None, worker_id: str) -> int:
     return runner.run()
 
 
-def _extract_internal_worker_run(argv: list[str]) -> tuple[str | None, str | None]:
-    if "__worker-run" not in argv:
-        return (None, None)
-    idx = argv.index("__worker-run")
-    if idx + 1 >= len(argv):
-        raise SparkVMError("Missing worker id for internal command __worker-run.")
-    worker_id = argv[idx + 1]
-    home_dir: str | None = None
-    if "--home-dir" in argv:
-        home_idx = argv.index("--home-dir")
-        if home_idx + 1 < len(argv):
-            home_dir = argv[home_idx + 1]
-    return (home_dir, worker_id)
-
-
 def main(argv: list[str] | None = None) -> int:
     raw_argv = list(argv) if argv is not None else sys.argv[1:]
-    internal_home_dir, internal_worker_id = _extract_internal_worker_run(raw_argv)
-    if internal_worker_id is not None:
-        if internal_home_dir is not None:
-            import os
-
-            os.environ["SPARKVM_HOME"] = internal_home_dir
-        return run_worker_execute(internal_home_dir, internal_worker_id)
 
     # Normalize `sparkvm rollout <id>` -> `sparkvm rollout view <id>`.
     normalized_argv = list(raw_argv)
@@ -367,9 +394,14 @@ def main(argv: list[str] | None = None) -> int:
                 return run_rollout_create(
                     args.home_dir,
                     name=args.name,
-                    runtime=args.runtime,
                     dockerfile=args.dockerfile,
                     delete_on_success=args.delete_on_success,
+                    vcpu=args.vcpu,
+                    memory=args.memory,
+                    disk=args.disk,
+                    timeout=args.timeout,
+                    network=args.network,
+                    env_pairs=args.env,
                 )
             if args.rollout_command == "list":
                 return run_rollout_list(args.home_dir)

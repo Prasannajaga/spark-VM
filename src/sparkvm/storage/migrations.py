@@ -78,6 +78,7 @@ def migrate_json_rollouts_to_sqlite(home_dir: str | Path | None = None) -> int:
         delete_on_success = 1 if bool(entry.get("deleteOnSuccess", False)) else 0
         resolved_run_command = entry.get("resolved_run_command") if isinstance(entry.get("resolved_run_command"), dict) else {}
         runtime_image = entry.get("runtime_image") if isinstance(entry.get("runtime_image"), dict) else {}
+        vm_config = entry.get("vm_config") if isinstance(entry.get("vm_config"), dict) else {}
 
         rollout_row = {
             "id": rollout_id,
@@ -89,6 +90,7 @@ def migrate_json_rollouts_to_sqlite(home_dir: str | Path | None = None) -> int:
             "delete_on_success": delete_on_success,
             "resolved_run_command_json": json.dumps(resolved_run_command, sort_keys=True),
             "runtime_image_json": json.dumps(runtime_image, sort_keys=True),
+            "vm_config_json": json.dumps(vm_config, sort_keys=True),
             "status": str(entry.get("status") or "scheduled"),
             "priority": int(entry.get("priority") or 100),
             "retry_count": int(entry.get("retry_count") or 0),
