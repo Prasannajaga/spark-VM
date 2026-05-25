@@ -75,9 +75,11 @@ class SparkScheduler:
         return resolved
 
     def _current_active_reservations(self, qb: QueryBuilder) -> list[dict[str, Any]]:
-        return qb.table("reservations").select_many(
-            where_in={"status": ["reserved", "starting", "running"]},
-            order_by=[("created_at", "ASC")],
+        return (
+            qb.from_table("reservations")
+            .where_in("status", ["reserved", "starting", "running"])
+            .order_by("created_at", "ASC")
+            .fetch_all()
         )
 
     def _fail_rollout(self, qb: QueryBuilder, rollout: dict[str, Any], *, worker_id: str | None) -> None:
@@ -85,7 +87,8 @@ class SparkScheduler:
         max_retries = int(rollout.get("max_retries", 3))
         status = "retry_pending" if retry_count < max_retries else "exhausted"
         now = now_utc_iso()
-        qb.table("rollouts").update(
+        qb.update(
+            "rollouts",
             {
                 "retry_count": retry_count,
                 "status": status,
@@ -99,7 +102,8 @@ class SparkScheduler:
 
     def _pass_rollout(self, qb: QueryBuilder, rollout: dict[str, Any], *, worker_id: str | None) -> None:
         now = now_utc_iso()
-        qb.table("rollouts").update(
+        qb.update(
+            "rollouts",
             {
                 "status": "passed",
                 "active_worker_id": None,
@@ -111,16 +115,17 @@ class SparkScheduler:
         )
 
     def _reconcile_unlocked(self, qb: QueryBuilder, *, tick_id: str | None = None) -> None:
-        workers = {str(item["id"]): item for item in qb.table("workers").select_many()}
+        workers = {str(item["id"]): item for item in qb.from_table("workers").fetch_all()}
 
         # reservation exists but worker row is gone
-        for reservation in qb.table("reservations").select_many():
+        for reservation in qb.from_table("reservations").fetch_all():
             if reservation.get("status") not in {"reserved", "starting", "running"}:
                 continue
             worker_id = reservation.get("worker_id")
             if isinstance(worker_id, str) and worker_id in workers:
                 continue
-            qb.table("reservations").update(
+            qb.update(
+                "reservations",
                 {"status": "lost", "updated_at": now_utc_iso()},
                 where={"id": str(reservation["id"])},
             )
@@ -135,20 +140,22 @@ class SparkScheduler:
                 continue
 
             now = now_utc_iso()
-            qb.table("workers").update(
+            qb.update(
+                "workers",
                 {"status": "lost", "completed_at": now, "updated_at": now},
                 where={"id": worker_id},
             )
             reservation_id = worker.get("reservation_id")
             if isinstance(reservation_id, str):
-                qb.table("reservations").update(
+                qb.update(
+                    "reservations",
                     {"status": "lost", "updated_at": now},
                     where={"id": reservation_id},
                 )
 
             rollout_id = worker.get("rollout_id")
             if isinstance(rollout_id, str):
-                rollout = qb.table("rollouts").select_one(where={"id": rollout_id})
+                rollout = qb.from_table("rollouts").where(id=rollout_id).fetch_one()
                 if isinstance(rollout, dict) and rollout.get("status") in {"running", "retrying"}:
                     self._fail_rollout(qb, rollout, worker_id=worker_id)
             if tick_id is not None:
@@ -167,7 +174,7 @@ class SparkScheduler:
                 )
 
         # rollout consistency from worker terminal states
-        for rollout in qb.table("rollouts").select_many(where_in={"status": ["running", "retrying"]}):
+        for rollout in qb.from_table("rollouts").where_in("status", ["running", "retrying"]).fetch_all():
             rollout_id = str(rollout["id"])
             active_worker_id = rollout.get("active_worker_id")
             if not isinstance(active_worker_id, str):
@@ -184,7 +191,8 @@ class SparkScheduler:
             if worker_status == "passed":
                 self._pass_rollout(qb, rollout, worker_id=active_worker_id)
                 if isinstance(reservation_id, str):
-                    qb.table("reservations").update(
+                    qb.update(
+                        "reservations",
                         {"status": "released", "updated_at": now_utc_iso()},
                         where={"id": reservation_id},
                     )
@@ -206,7 +214,8 @@ class SparkScheduler:
             if worker_status in {"failed", "timeout", "lost"}:
                 self._fail_rollout(qb, rollout, worker_id=active_worker_id)
                 if isinstance(reservation_id, str):
-                    qb.table("reservations").update(
+                    qb.update(
+                        "reservations",
                         {"status": "released", "updated_at": now_utc_iso()},
                         where={"id": reservation_id},
                     )
@@ -311,7 +320,8 @@ class SparkScheduler:
                     worker_dir = self.home_dir / "workers" / worker_id
                     memory = str(vm_config.get("memory", "2G"))
                     disk = str(vm_config.get("disk", "4G"))
-                    qb.table("workers").insert(
+                    qb.insert(
+                        "workers",
                         {
                             "id": worker_id,
                             "rollout_id": rollout_id,
@@ -345,7 +355,8 @@ class SparkScheduler:
                     )
 
                     reservation_id = f"res-{uuid4().hex[:12]}"
-                    qb.table("reservations").insert(
+                    qb.insert(
+                        "reservations",
                         {
                             "id": reservation_id,
                             "worker_id": worker_id,
@@ -364,7 +375,8 @@ class SparkScheduler:
                         }
                     )
 
-                    qb.table("workers").update(
+                    qb.update(
+                        "workers",
                         {"reservation_id": reservation_id, "updated_at": now},
                         where={"id": worker_id},
                     )
@@ -410,15 +422,17 @@ class SparkScheduler:
                 try:
                     now = now_utc_iso()
                     if pid is None:
-                        qb.table("workers").update(
+                        qb.update(
+                            "workers",
                             {"status": "lost", "completed_at": now, "updated_at": now},
                             where={"id": worker_id},
                         )
-                        qb.table("reservations").update(
+                        qb.update(
+                            "reservations",
                             {"status": "lost", "updated_at": now},
                             where={"id": reservation_id},
                         )
-                        rollout = qb.table("rollouts").select_one(where={"id": rollout_id})
+                        rollout = qb.from_table("rollouts").where(id=rollout_id).fetch_one()
                         if isinstance(rollout, dict):
                             self._fail_rollout(qb, rollout, worker_id=worker_id)
                         self._log_scheduler(
@@ -441,7 +455,8 @@ class SparkScheduler:
                         "UPDATE workers SET status = 'starting', pid = ?, started_at = COALESCE(started_at, ?), updated_at = ? WHERE id = ?",
                         (pid, now, now, worker_id),
                     )
-                    qb.table("reservations").update(
+                    qb.update(
+                        "reservations",
                         {"pid": pid, "status": "starting", "updated_at": now},
                         where={"id": reservation_id},
                     )
@@ -470,7 +485,7 @@ class SparkScheduler:
 
         with connect_db(self.home_dir) as conn:
             qb = QueryBuilder(conn)
-            for row in qb.table("rollouts").select_many():
+            for row in qb.from_table("rollouts").fetch_all():
                 status = str(row.get("status", ""))
                 if status in status_counts:
                     status_counts[status] += 1

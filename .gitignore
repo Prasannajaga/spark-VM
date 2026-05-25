@@ -1,4 +1,43 @@
 
 *.pyc
+*.pyo
+*.pyd
+*.log
+*.tmp
+*.swp
+*.swo
+
+# Python cache/build artifacts
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Local envs / tool caches
+.venv/
+venv/
+.uv-cache/
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+
+# Local agent/dev tooling
+.agents/
+.codex/
+
+# SparkVM local runtime/state artifacts
+.sparkvm/
+
+# Misc local temp folders seen in this repo
+"$tmp"/
+
 wget-log
 wget-log.1
