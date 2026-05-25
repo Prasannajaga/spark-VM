@@ -7,26 +7,10 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from ..core.config import resolve_home_dir
+from ..core.constants import DEFAULT_MACHINE_POLICY
 from ..storage.db import connect_db
 from ..storage.query_builder import QueryBuilder
 from ..core.utils import now_utc_iso
-
-
-DEFAULT_MACHINE_POLICY: dict[str, Any] = {
-    "host_reserved_memory": "2G",
-    "host_reserved_memory_bytes": 2 * 1024 * 1024 * 1024,
-    "host_reserved_disk": "20G",
-    "host_reserved_disk_bytes": 20 * 1024 * 1024 * 1024,
-    "max_memory_percent": 80,
-    "max_disk_percent": 80,
-    "max_concurrent_vms": 4,
-    "vm_memory_overhead": "256M",
-    "vm_memory_overhead_bytes": 256 * 1024 * 1024,
-    "vm_disk_overhead": "2G",
-    "vm_disk_overhead_bytes": 2 * 1024 * 1024 * 1024,
-    "poll_interval": 5.0,
-    "cooldown_after_vm": 5.0,
-}
 
 
 def _json_dumps(value: Any) -> str:

@@ -224,7 +224,7 @@ class Rollouts:
         )
 
         ensure_dir(self.rollouts_dir, exist_ok=True)
-        existing = self.find_existing_rollout_by_name(metadata={}, rollout_name=rollout_name)
+        existing = self._find_existing_rollout_by_name(metadata={}, rollout_name=rollout_name)
         existing_ids = {str(row.get("id")) for row in self.rollout_repo.list_all() if isinstance(row.get("id"), str)}
         if existing is not None:
             log_event(
@@ -235,7 +235,7 @@ class Rollouts:
             )
             return existing
 
-        rollout_id = self.generate_rollout_id(
+        rollout_id = self._generate_rollout_id(
             rollout_name=rollout_name,
             existing_ids=existing_ids,
         )
@@ -323,7 +323,7 @@ class Rollouts:
             save_rollout(rollout_json, self.home_dir)
             rollout = Rollout.from_payload(rollout_json, rollout_path=rollout_path)
 
-            existing = self.find_existing_rollout_by_name(metadata={}, rollout_name=rollout_name)
+            existing = self._find_existing_rollout_by_name(metadata={}, rollout_name=rollout_name)
             if existing is not None and existing.id != rollout.id:
                 self._delete_rollout_artifacts(rollout.to_metadata_entry())
                 log_event(
@@ -361,7 +361,73 @@ class Rollouts:
             remove_tree(rollout_path, ignore_errors=True)
             raise
 
-    def find_existing_rollout_by_name(self, *, metadata: dict[str, Any], rollout_name: str) -> Rollout | None:
+    def get(self, rollout_id: str) -> Rollout:
+        candidate_id = validate_rollout_id(rollout_id)
+        if self.rollout_repo.get(candidate_id) is None:
+            raise RolloutNotFoundError(f"Rollout not found: {candidate_id}")
+        try:
+            payload = get_rollout(candidate_id, self.home_dir)
+        except FileNotFoundError as exc:
+            raise RolloutNotFoundError(f"rollout.json missing for id '{candidate_id}'.") from exc
+        except Exception as exc:
+            raise RolloutMetadataError(f"Could not read rollout file for id '{candidate_id}'.") from exc
+        return Rollout.from_payload(payload, rollout_path=self.rollouts_dir / candidate_id)
+
+    def list(self, status: str | None = None) -> list[Rollout]:
+        items: list[Rollout] = []
+        rows = (
+            self.rollout_repo.list_by_status([status])
+            if status is not None
+            else self.rollout_repo.list_all()
+        )
+        for row in rows:
+            rollout_id = str(row.get("id", ""))
+            if not rollout_id:
+                continue
+            try:
+                payload = get_rollout(rollout_id, self.home_dir)
+            except Exception:
+                continue
+            rollout_path = self.rollouts_dir / rollout_id
+            try:
+                items.append(Rollout.from_payload(payload, rollout_path=rollout_path))
+            except RolloutMetadataError:
+                continue
+        return items
+
+    def delete(self, rollout_id: str) -> None:
+        candidate_id = validate_rollout_id(rollout_id)
+        log_event(self.logger, component="rollout", event="delete_started", fields={"rollout": candidate_id})
+        row = self.rollout_repo.get(candidate_id)
+        if row is None:
+            log_event(
+                self.logger,
+                component="rollout",
+                event="delete_failed",
+                fields={"rollout": candidate_id, "reason": "not_found"},
+                level="error",
+            )
+            raise RolloutNotFoundError(f"Rollout not found: {candidate_id}")
+
+        try:
+            rollout_payload = get_rollout(candidate_id, self.home_dir)
+            rollout = Rollout.from_payload(rollout_payload, rollout_path=self.rollouts_dir / candidate_id)
+            self._delete_rollout_artifacts(rollout.to_metadata_entry())
+        except Exception:
+            self._delete_rollout_artifacts({"id": candidate_id, "path": str(self.rollouts_dir / candidate_id)})
+        self.runtime_image_repo.delete_by_rollout(candidate_id)
+        self.rollout_repo.delete(candidate_id)
+        log_event(self.logger, component="rollout", event="delete_ok", fields={"rollout": candidate_id})
+
+    def schedule(self, rollout_id: str, priority: int = 100) -> None:
+        """Schedule a rollout for execution."""
+        pass
+
+    def cancel(self, rollout_id: str) -> None:
+        """Cancel a pending or running rollout."""
+        pass
+
+    def _find_existing_rollout_by_name(self, *, metadata: dict[str, Any], rollout_name: str) -> Rollout | None:
         del metadata
         row = self.rollout_repo.get_by_name(rollout_name)
         if row is None:
@@ -404,67 +470,14 @@ class Rollouts:
             if isinstance(metadata_path_raw, str) and metadata_path_raw.strip():
                 remove_file(Path(metadata_path_raw), missing_ok=True)
 
-    def list(self) -> list[Rollout]:
-        items: list[Rollout] = []
-        for row in self.rollout_repo.list_all():
-            rollout_id = str(row.get("id", ""))
-            if not rollout_id:
-                continue
-            try:
-                payload = get_rollout(rollout_id, self.home_dir)
-            except Exception:
-                continue
-            rollout_path = self.rollouts_dir / rollout_id
-            try:
-                items.append(Rollout.from_payload(payload, rollout_path=rollout_path))
-            except RolloutMetadataError:
-                continue
-        return items
-
-    def get_by_id(self, rollout_id: str) -> Rollout:
-        candidate_id = validate_rollout_id(rollout_id)
-        if self.rollout_repo.get(candidate_id) is None:
-            raise RolloutNotFoundError(f"Rollout not found: {candidate_id}")
+    def _exists(self, rollout_id: str) -> bool:
         try:
-            payload = get_rollout(candidate_id, self.home_dir)
-        except FileNotFoundError as exc:
-            raise RolloutNotFoundError(f"rollout.json missing for id '{candidate_id}'.") from exc
-        except Exception as exc:
-            raise RolloutMetadataError(f"Could not read rollout file for id '{candidate_id}'.") from exc
-        return Rollout.from_payload(payload, rollout_path=self.rollouts_dir / candidate_id)
-
-    def delete_by_id(self, rollout_id: str) -> None:
-        candidate_id = validate_rollout_id(rollout_id)
-        log_event(self.logger, component="rollout", event="delete_started", fields={"rollout": candidate_id})
-        row = self.rollout_repo.get(candidate_id)
-        if row is None:
-            log_event(
-                self.logger,
-                component="rollout",
-                event="delete_failed",
-                fields={"rollout": candidate_id, "reason": "not_found"},
-                level="error",
-            )
-            raise RolloutNotFoundError(f"Rollout not found: {candidate_id}")
-
-        try:
-            rollout_payload = get_rollout(candidate_id, self.home_dir)
-            rollout = Rollout.from_payload(rollout_payload, rollout_path=self.rollouts_dir / candidate_id)
-            self._delete_rollout_artifacts(rollout.to_metadata_entry())
-        except Exception:
-            self._delete_rollout_artifacts({"id": candidate_id, "path": str(self.rollouts_dir / candidate_id)})
-        self.runtime_image_repo.delete_by_rollout(candidate_id)
-        self.rollout_repo.delete(candidate_id)
-        log_event(self.logger, component="rollout", event="delete_ok", fields={"rollout": candidate_id})
-
-    def exists(self, rollout_id: str) -> bool:
-        try:
-            self.get_by_id(rollout_id)
+            self.get(rollout_id)
         except RolloutError:
             return False
         return True
 
-    def generate_rollout_id(self, *, rollout_name: str, existing_ids: set[Any]) -> str:
+    def _generate_rollout_id(self, *, rollout_name: str, existing_ids: set[Any]) -> str:
         slug = "-".join(part for part in rollout_name.lower().split() if part)[:32] or "rollout"
         for _ in range(64):
             candidate = f"rollout-{slug}-{secrets.token_hex(8)}"
@@ -475,7 +488,7 @@ class Rollouts:
             return candidate
         raise RolloutError("Could not allocate a unique rollout id.")
 
-    def load_rollout_json(self, rollout_json_path: Path) -> Rollout:
+    def _load_rollout_json(self, rollout_json_path: Path) -> Rollout:
         try:
             payload = read_json(rollout_json_path, encoding="utf-8")
         except json.JSONDecodeError as exc:
@@ -484,7 +497,7 @@ class Rollouts:
             raise RolloutMetadataError(f"Could not read rollout file: {rollout_json_path}") from exc
         return Rollout.from_payload(payload, rollout_path=rollout_json_path.parent)
 
-    def write_rollout_json(self, path: Path, payload: dict[str, Any]) -> None:
+    def _write_rollout_json(self, path: Path, payload: dict[str, Any]) -> None:
         write_json_atomic(path, payload, pretty=True)
 
 

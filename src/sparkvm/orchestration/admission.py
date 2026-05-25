@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from ..core.config import resolve_home_dir
-from ..machine.machine_config import MachineConfig, parse_size_to_bytes
+from ..core.utils import parse_size_to_bytes
+from ..machine.machine_config import MachineConfig
 from ..storage.repositories import ReservationRepository
 
 
@@ -76,7 +77,7 @@ class AdmissionController:
     def check(self, vm_config: dict[str, Any], reservations: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         total_memory = _read_total_memory_bytes()
         total_disk = shutil.disk_usage(self.home_dir).total
-        policy = MachineConfig(self.home_dir).get_policy()
+        policy = MachineConfig.get_policy(home_dir=self.home_dir)
         active_reservations = reservations if reservations is not None else ReservationRepository(self.home_dir).active()
 
         host_reserved_memory = int(policy.get("host_reserved_memory_bytes", parse_size_to_bytes(str(policy["host_reserved_memory"]))))

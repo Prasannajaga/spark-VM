@@ -11,6 +11,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .commands import run_checked
+from .constants import DEFAULT_MACHINE_POLICY
 from .errors import CleanupError, RolloutConfigError
 
 
@@ -172,3 +173,48 @@ def has_network_privileges() -> bool:
     if os.geteuid() == 0:
         return True
     return has_cap_net_admin()
+
+
+def parse_size_to_bytes(value: int | str) -> int:
+    if isinstance(value, bool):
+        raise ValueError("size must be int or size string")
+    if isinstance(value, int):
+        if value < 0:
+            raise ValueError("size must be >= 0")
+        return value
+    if not isinstance(value, str):
+        raise ValueError("size must be int or size string")
+
+    raw = value.strip().upper()
+    if not raw:
+        raise ValueError("size cannot be empty")
+
+    if raw.endswith("M"):
+        amount = int(raw[:-1])
+        return amount * 1024 * 1024
+    if raw.endswith("G"):
+        amount = int(raw[:-1])
+        return amount * 1024 * 1024 * 1024
+
+    return int(raw)
+
+
+def sanitize_machine_policy(payload: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(DEFAULT_MACHINE_POLICY)
+    merged.update({k: v for k, v in payload.items() if k in DEFAULT_MACHINE_POLICY})
+
+    merged["host_reserved_memory"] = str(merged["host_reserved_memory"])
+    merged["host_reserved_disk"] = str(merged["host_reserved_disk"])
+    merged["vm_memory_overhead"] = str(merged["vm_memory_overhead"])
+    merged["vm_disk_overhead"] = str(merged["vm_disk_overhead"])
+    merged["host_reserved_memory_bytes"] = parse_size_to_bytes(merged["host_reserved_memory"])
+    merged["host_reserved_disk_bytes"] = parse_size_to_bytes(merged["host_reserved_disk"])
+    merged["vm_memory_overhead_bytes"] = parse_size_to_bytes(merged["vm_memory_overhead"])
+    merged["vm_disk_overhead_bytes"] = parse_size_to_bytes(merged["vm_disk_overhead"])
+    merged["max_memory_percent"] = int(merged["max_memory_percent"])
+    merged["max_disk_percent"] = int(merged["max_disk_percent"])
+    merged["max_concurrent_vms"] = int(merged["max_concurrent_vms"])
+    merged["poll_interval"] = float(merged["poll_interval"])
+    merged["cooldown_after_vm"] = float(merged["cooldown_after_vm"])
+
+    return merged

@@ -371,9 +371,9 @@ def run_workers_view(
 
 
 def run_start_scheduler(home_dir: str | None) -> int:
-    from sparkvm.orchestration.scheduler import Scheduler
+    from sparkvm.orchestration.scheduler import SparkScheduler
 
-    scheduler = Scheduler(home_dir=home_dir)
+    scheduler = SparkScheduler(home_dir=home_dir)
     try:
         scheduler.start_loop()
     except KeyboardInterrupt:

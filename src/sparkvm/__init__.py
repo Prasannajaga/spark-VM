@@ -1,14 +1,12 @@
 """SparkVM public API."""
 
-from .api import Rollout, Rollouts, SparkVM, VMResult, Worker, Workers
-from .core.errors import SparkVMError
+from .api import Rollouts, SparkVM
+from .machine.machine_config import MachineConfig
+from .orchestration.scheduler import SparkScheduler
 
 __all__ = [
     "SparkVM",
-    "Rollout",
     "Rollouts",
-    "Worker",
-    "Workers",
-    "VMResult",
-    "SparkVMError",
+    "SparkScheduler",
+    "MachineConfig",
 ]

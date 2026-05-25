@@ -11,11 +11,10 @@ from typing import Any
 from ..core.config import resolve_home_dir
 from ..core.errors import CleanupError, WorkerMetadataError, WorkerNotFoundError
 from ..core.fsops import ensure_dir, list_dirs_with_prefix, read_text, remove_tree, write_json_atomic
-from ..machine.machine_config import parse_size_to_bytes
+from ..core.utils import now_utc_iso, parse_size_to_bytes
 from ..storage.repositories import WorkerRepository
 
 from ..core.constants import WORKER_ID_RE
-from ..core.utils import now_utc_iso
 
 
 def validate_worker_id(vm_id: str) -> str:
