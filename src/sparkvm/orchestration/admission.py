@@ -7,9 +7,9 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from .config import resolve_home_dir
-from .machine_config import MachineConfig, parse_size_to_bytes
-from .repositories import ReservationRepository
+from ..core.config import resolve_home_dir
+from ..machine.machine_config import MachineConfig, parse_size_to_bytes
+from ..storage.repositories import ReservationRepository
 
 
 def _read_total_memory_bytes() -> int:

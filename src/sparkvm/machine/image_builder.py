@@ -13,14 +13,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .commands import run_checked
-from .errors import RolloutBuildError, RolloutConfigError
-from .fsops import ensure_dir, read_json, remove_file, write_json_atomic, write_text
+from ..core.commands import run_checked
+from ..core.errors import RolloutBuildError, RolloutConfigError
+from ..core.fsops import ensure_dir, read_json, remove_file, write_json_atomic, write_text
 
 INIT_TEMPLATE_VERSION = "sparkvm-init-template-v1"
 
 
-from .utils import (
+from ..core.utils import (
     ResolvedCommand as ResolvedRunCommand,
     now_utc_iso,
     resolve_container_command as resolve_run_command,

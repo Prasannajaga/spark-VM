@@ -1,4 +1,4 @@
-## CASE B 
+## High level cluster design
 
 ```mermaid
 flowchart TD
@@ -71,7 +71,7 @@ flowchart TD
 
 
 
-## worker node level allocation
+## High level worker node design
 
 ```mermaid
 flowchart TD
@@ -116,7 +116,7 @@ flowchart TD
 ```
 
 
-## Architecture
+## Single POD design
 
 ```mermaid
 
@@ -139,7 +139,10 @@ flowchart TD
 ```
 
 
-## Scheduler design
+## Scheduler Design 
+
+`sparkvm start` is the reconciler that schedules the rollouts 
+based on the given system specifications.
 
 ```mermaid
 

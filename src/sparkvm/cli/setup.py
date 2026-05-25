@@ -11,17 +11,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from sparkvm.config import SparkVMConfig, resolve_home_dir
-from sparkvm.commands import run_checked
-from sparkvm.db import init_db
-from sparkvm.errors import FirecrackerBinaryNotInstalled, KVMUnavailableError, SparkVMSetupError
-from sparkvm.fsops import ensure_dir, read_json, write_json_atomic
-from sparkvm.migrations import migrate_json_rollouts_to_sqlite
-from sparkvm.repositories import MachinePolicyRepository
-from sparkvm.runtime_store import RuntimeRecord, list_runtime_records
-from sparkvm.utils import has_cap_net_admin, has_network_privileges as network_privileges_ok
+from sparkvm.core.config import SparkVMConfig, resolve_home_dir
+from sparkvm.core.commands import run_checked
+from sparkvm.storage.db import init_db
+from sparkvm.core.errors import FirecrackerBinaryNotInstalled, KVMUnavailableError, SparkVMSetupError
+from sparkvm.core.fsops import ensure_dir, read_json, write_json_atomic
+from sparkvm.storage.migrations import migrate_json_rollouts_to_sqlite
+from sparkvm.storage.repositories import MachinePolicyRepository
+from sparkvm.storage.runtime_store import RuntimeRecord, list_runtime_records
+from sparkvm.core.utils import has_cap_net_admin, has_network_privileges as network_privileges_ok
 
-from sparkvm.constants import (
+from sparkvm.core.constants import (
     ARCH_ALIASES as _ARCH_ALIASES,
     DOCTOR_NETWORK_TOOLS as _DOCTOR_NETWORK_TOOLS,
     DOCTOR_TOOLS as _DOCTOR_TOOLS,

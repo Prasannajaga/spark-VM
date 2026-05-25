@@ -6,16 +6,17 @@ import argparse
 import json
 import sys
 
-from cli.cleanup import run_cleanup_command, run_reset_command
-from sparkvm.errors import SparkVMError
-from cli.setup import (
+from sparkvm.cli.cleanup import run_cleanup_command, run_reset_command
+from sparkvm.core.errors import SparkVMError
+from sparkvm.storage.repositories import RolloutRepository
+from sparkvm.cli.setup import (
     doctor_status,
     format_doctor_report,
     get_sparkvm_paths,
     run_setup_command,
 )
-from sparkvm.rollouts import Rollouts
-from sparkvm.workers import Workers
+from sparkvm.api.rollouts import Rollouts, validate_rollout_id
+from sparkvm.api.workers import Workers
 
 
 def parse_env_vars(pairs: list[str] | None) -> dict[str, str]:
@@ -155,7 +156,7 @@ def run_rollout_execute(
 
         os.environ["SPARKVM_HOME"] = home_dir
     env = parse_env_vars(env_pairs)
-    from sparkvm.vm import SparkVM
+    from sparkvm.api.vm import SparkVM
 
     vm = SparkVM(vcpu=vcpu, memory=memory, disk=disk, timeout=timeout, network=network, env=env)
     result = vm.run(rollout_id)
@@ -177,18 +178,34 @@ def run_rollout_execute(
 
 
 def run_rollout_list(home_dir: str | None) -> int:
-    manager = Rollouts(home_dir=home_dir)
-    rollouts = manager.list()
-    payload = [item.to_metadata_entry() for item in rollouts]
+    repo = RolloutRepository(home_dir=home_dir)
+    rows = repo.list_all()
+    payload = [_format_rollout_db_row(row) for row in rows]
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 
 
 def run_rollout_view(home_dir: str | None, rollout_id: str) -> int:
-    manager = Rollouts(home_dir=home_dir)
-    rollout = manager.get_by_id(rollout_id)
-    print(json.dumps(rollout.to_metadata_entry(), indent=2, sort_keys=True))
+    candidate_id = validate_rollout_id(rollout_id)
+    repo = RolloutRepository(home_dir=home_dir)
+    row = repo.get(candidate_id)
+    if row is None:
+        raise SparkVMError(f"Rollout not found: {candidate_id}")
+    print(json.dumps(_format_rollout_db_row(row), indent=2, sort_keys=True))
     return 0
+
+
+def _format_rollout_db_row(row: dict[str, object]) -> dict[str, object]:
+    payload = dict(row)
+    for key in ("resolved_run_command_json", "runtime_image_json"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            try:
+                payload[key] = json.loads(value)
+            except Exception:
+                # Keep raw DB value if it is not valid JSON.
+                pass
+    return payload
 
 
 def run_workers_list(home_dir: str | None) -> int:
@@ -277,7 +294,7 @@ def run_workers_view(
 
 
 def run_start_scheduler(home_dir: str | None) -> int:
-    from sparkvm.scheduler import Scheduler
+    from sparkvm.orchestration.scheduler import Scheduler
 
     scheduler = Scheduler(home_dir=home_dir)
     try:
@@ -288,7 +305,7 @@ def run_start_scheduler(home_dir: str | None) -> int:
 
 
 def run_worker_execute(home_dir: str | None, worker_id: str) -> int:
-    from sparkvm.worker_runner import WorkerRunner
+    from sparkvm.orchestration.worker_runner import WorkerRunner
 
     runner = WorkerRunner(worker_id, home_dir=home_dir)
     return runner.run()
@@ -344,6 +361,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "setup":
             return run_setup_command(args.home_dir, args.force, owner=args.owner)
 
+        # ROLLOUT
         if args.command == "rollout":
             if args.rollout_command == "create":
                 return run_rollout_create(
@@ -366,6 +384,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "reset":
             return run_reset_command(args.home_dir, args.force)
 
+        # WORKERS 
         if args.command == "workers":
             if args.workers_command == "list":
                 return run_workers_list(args.home_dir)

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from sparkvm.errors import FirecrackerAPIError
+from sparkvm.core.errors import FirecrackerAPIError
 
 
 @dataclass(frozen=True)

@@ -11,12 +11,12 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from .admission import AdmissionController
-from .config import resolve_home_dir
-from .db import connect_db
-from .machine_config import MachineConfig, parse_size_to_bytes
-from .query_builder import QueryBuilder
-from .utils import now_utc_iso
+from ..orchestration.admission import AdmissionController
+from ..core.config import resolve_home_dir
+from ..storage.db import connect_db
+from ..machine.machine_config import MachineConfig, parse_size_to_bytes
+from ..storage.query_builder import QueryBuilder
+from ..core.utils import now_utc_iso
 
 DEFAULT_VM_CONFIG = {
     "vcpu": 2,
@@ -172,7 +172,7 @@ class Scheduler:
         cmd = [
             sys.executable,
             "-m",
-            "cli.main",
+            "sparkvm.cli.main",
             "--home-dir",
             str(self.home_dir),
             "worker",
@@ -255,8 +255,7 @@ class Scheduler:
                                 "result_path": str(worker_dir / "result.json"),
                                 "failure_path": str(worker_dir / "failure.json"),
                                 "status": "reserved",
-                                "exit_code": None,
-                                "failure_reason": None,
+                                "exit_code": None, 
                                 "failure_phase": None,
                                 "created_at": now,
                                 "started_at": None,

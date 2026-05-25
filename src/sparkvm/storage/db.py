@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
-from .config import resolve_home_dir
+from ..core.config import resolve_home_dir
 
 
 def state_db_path(home_dir: str | Path | None = None) -> Path:

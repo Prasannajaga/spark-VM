@@ -2,18 +2,19 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
-from sparkvm.config import DEFAULT_MEMORY, DEFAULT_RUNTIME, DEFAULT_TIMEOUT_SEC, DEFAULT_VCPU, SparkVMConfig, build_config
-from sparkvm.db import connect_db
-from sparkvm.errors import SparkVMError
-from sparkvm.fsops import (
+from sparkvm.core.config import DEFAULT_MEMORY, DEFAULT_RUNTIME, DEFAULT_TIMEOUT_SEC, DEFAULT_VCPU, SparkVMConfig, build_config
+from sparkvm.storage.db import connect_db
+from sparkvm.core.errors import SparkVMError
+from sparkvm.core.fsops import (
     ensure_dir,
     list_dirs_with_prefix,
     remove_file,
     remove_tree,
 )
-from sparkvm.utils import (
+from sparkvm.core.utils import (
     unmount_under,
 )
 
@@ -35,14 +36,49 @@ def clear_dir_contents(path: Path) -> None:
             remove_file(child, missing_ok=True)
 
 
+def _safe_unlink(path_value: object) -> None:
+    if isinstance(path_value, str) and path_value.strip():
+        remove_file(Path(path_value), missing_ok=True)
+
+
+def _delete_rollout_images_from_db(config: SparkVMConfig) -> None:
+    with connect_db(config.home_dir) as conn:
+        rollout_rows = conn.execute("SELECT image_path, runtime_image_json FROM rollouts").fetchall()
+        runtime_rows = conn.execute("SELECT path, metadata_path FROM runtime_images").fetchall()
+
+    for row in rollout_rows:
+        image_path = row["image_path"] if isinstance(row, dict) else row[0]
+        runtime_image_json = row["runtime_image_json"] if isinstance(row, dict) else row[1]
+        _safe_unlink(image_path)
+        if isinstance(runtime_image_json, str) and runtime_image_json.strip():
+            try:
+                payload = json.loads(runtime_image_json)
+            except Exception:
+                payload = None
+            if isinstance(payload, dict):
+                _safe_unlink(payload.get("path"))
+                _safe_unlink(payload.get("metadata_path"))
+
+    for row in runtime_rows:
+        runtime_path = row["path"] if isinstance(row, dict) else row[0]
+        metadata_path = row["metadata_path"] if isinstance(row, dict) else row[1]
+        _safe_unlink(runtime_path)
+        _safe_unlink(metadata_path)
+
+
 def cleanup_rollouts(config: SparkVMConfig, *, force: bool = False, dry_run: bool = False) -> None:
     del force  # CLI handles user confirmation before calling this function.
 
     rollouts_dir_path = rollouts_dir(config)
     if dry_run:
         return
+
+    # Remove rollout images and metadata files referenced by DB.
+    _delete_rollout_images_from_db(config)
+
     clear_dir_contents(rollouts_dir_path)
     with connect_db(config.home_dir) as conn:
+        conn.execute("DELETE FROM runtime_images")
         conn.execute("DELETE FROM rollouts")
         conn.commit()
 
@@ -68,8 +104,23 @@ def cleanup_workers(config: SparkVMConfig, *, force: bool = False, dry_run: bool
 
 
 def cleanup_all(config: SparkVMConfig, *, force: bool = False, dry_run: bool = False) -> None:
-    cleanup_rollouts(config, force=force, dry_run=dry_run)
-    cleanup_workers(config, force=force, dry_run=dry_run)
+    if dry_run:
+        return
+
+    cleanup_rollouts(config, force=force, dry_run=False)
+    cleanup_workers(config, force=force, dry_run=False)
+
+    # Remove any remaining image artifacts not tied to current rollout rows.
+    clear_dir_contents(config.home_dir / "images")
+
+    # Clear runtime DB state.
+    with connect_db(config.home_dir) as conn:
+        conn.execute("DELETE FROM events")
+        conn.execute("DELETE FROM reservations")
+        conn.execute("DELETE FROM workers")
+        conn.execute("DELETE FROM runtime_images")
+        conn.execute("DELETE FROM rollouts")
+        conn.commit()
 
 
 def confirm_cleanup(target: str, *, force: bool) -> bool:

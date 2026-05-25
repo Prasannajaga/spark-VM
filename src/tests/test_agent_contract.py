@@ -8,9 +8,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from sparkvm.rollouts import Rollouts
-from sparkvm.utils import ResolvedCommand
+from sparkvm.core.utils import ResolvedCommand
 from sparkvm.vm import SparkVM
-from sparkvm.image_builder import BuiltImage
+from sparkvm.machine.image_builder import BuiltImage
 
 
 class TestAgentContract(unittest.TestCase):

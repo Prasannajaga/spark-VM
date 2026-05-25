@@ -8,11 +8,11 @@ import os
 import re
 from pathlib import Path
 
-from .commands import run_checked
-from .errors import CleanupError, NetworkSetupError
-from .utils import has_cap_net_admin, has_network_privileges
+from ..core.commands import run_checked
+from ..core.errors import CleanupError, NetworkSetupError
+from ..core.utils import has_cap_net_admin, has_network_privileges
 
-from .constants import NET_SETUP_PRIVILEGE_MESSAGE
+from ..core.constants import NET_SETUP_PRIVILEGE_MESSAGE
 
 
 @dataclass(frozen=True)

@@ -7,11 +7,11 @@ import shutil
 import tempfile
 from pathlib import Path, PurePosixPath
 
-from .commands import run_checked
-from .errors import CleanupError, ExecutionDiskError, RuntimeImagePermissionError, WorkerRootfsError
-from .fsops import ensure_dir, read_text, remove_file, remove_tree, write_bytes, write_text
-from .result import PhaseResult, VMResult
-from .rollouts import Rollout
+from ..core.commands import run_checked
+from ..core.errors import CleanupError, ExecutionDiskError, RuntimeImagePermissionError, WorkerRootfsError
+from ..core.fsops import ensure_dir, read_text, remove_file, remove_tree, write_bytes, write_text
+from ..api.result import PhaseResult, VMResult
+from ..api.rollouts import Rollout
 
 
 def validate_relative_path(path: str) -> PurePosixPath:

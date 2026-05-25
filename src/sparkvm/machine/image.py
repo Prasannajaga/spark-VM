@@ -6,10 +6,10 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import SparkVMConfig
-from .errors import KernelImageNotFound, RuntimeImageNotFound
+from ..core.config import SparkVMConfig
+from ..core.errors import KernelImageNotFound, RuntimeImageNotFound
 
-from .constants import BOOT_ARGS
+from ..core.constants import BOOT_ARGS
 
 
 def normalize_runtime_name(image_name: str) -> str:
@@ -81,7 +81,7 @@ class ManagedImageResolver:
         return resolve_runtime_image(runtime or self._config.runtime, self._config)
 
 
-from .constants import DEBIAN_BOOT_ARGS
+from ..core.constants import DEBIAN_BOOT_ARGS
 
 
 __all__ = [

@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from .fsops import read_json
-from .image import normalize_runtime_name
+from ..core.fsops import read_json
+from ..machine.image import normalize_runtime_name
 
 
 @dataclass(frozen=True)

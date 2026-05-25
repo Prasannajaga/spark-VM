@@ -117,7 +117,7 @@ CREATE TABLE IF NOT EXISTS workers (
         )),
 
     exit_code INTEGER,
-    failure_reason TEXT,
+    failure_json JSON DEFAULT '{}',
     failure_phase TEXT,
 
     created_at TEXT NOT NULL,

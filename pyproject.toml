@@ -5,7 +5,7 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.scripts]
-sparkvm = "cli.main:main"
+sparkvm = "sparkvm.cli.main:main"
 
 [build-system]
 requires = ["hatchling>=1.24.2"]

@@ -6,10 +6,10 @@ import json
 from pathlib import Path
 from typing import Any, Sequence
 
-from .config import resolve_home_dir
-from .db import connect_db
-from .query_builder import QueryBuilder
-from .utils import now_utc_iso
+from ..core.config import resolve_home_dir
+from ..storage.db import connect_db
+from ..storage.query_builder import QueryBuilder
+from ..core.utils import now_utc_iso
 
 
 DEFAULT_MACHINE_POLICY: dict[str, Any] = {

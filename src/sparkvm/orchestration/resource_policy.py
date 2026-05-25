@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .errors import InvalidResourceError
+from ..core.errors import InvalidResourceError
 
 DEFAULT_RESOURCE_POLICY = {
     "max_vm_cpu_percent": 80,

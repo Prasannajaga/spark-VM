@@ -6,10 +6,10 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from .config import resolve_home_dir
-from .machine_config import parse_size_to_bytes
-from .repositories import ReservationRepository
-from .utils import now_utc_iso
+from ..core.config import resolve_home_dir
+from ..machine.machine_config import parse_size_to_bytes
+from ..storage.repositories import ReservationRepository
+from ..core.utils import now_utc_iso
 
 ACTIVE_STATUSES = {"reserved", "starting", "running"}
 

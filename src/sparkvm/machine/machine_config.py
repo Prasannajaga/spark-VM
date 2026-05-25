@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .config import resolve_home_dir
-from .repositories import MachinePolicyRepository
+from ..core.config import resolve_home_dir
+from ..storage.repositories import MachinePolicyRepository
 
 DEFAULT_POLICY: dict[str, Any] = {
     "host_reserved_memory": "2G",
