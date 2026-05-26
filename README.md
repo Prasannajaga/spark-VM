@@ -1,10 +1,40 @@
 # SparkVM
 
-SparkVM is a Firecracker microVM runner for Dockerfile rollouts usefull for agents long running task and inspired by composer-2 Async RL. 
+SparkVM is a Firecracker microVM runner for Dockerfile rollouts usefull for agents long running task and inspired by composer-2 Async RL.
 
 **The goal of SparkVM is simple:** Run thousands of agent rollouts efficiently on your own machine without needing a large Kubernetes cluster.
 
 SparkVM scales better than Kubernetes for local, single host agent rollout execution because it avoids cluster level orchestration overhead and directly schedules Firecracker workers based on host capacity.
+
+## Quick Start
+
+```bash
+# 1) Prepare host once
+sparkvm setup
+
+# 2) Create a rollout
+sparkvm rollout create --name my-agent --dockerfile Dockerfile
+
+# 3) Run it
+sparkvm workers run <rollout-id>
+```
+
+Python Quick Example:
+
+```python
+from sparkvm import Rollouts, SparkVM
+
+rollout = Rollouts().create(
+    name="my-agent",
+    runtime="Dockerfile",
+    dockerfile="Dockerfile",
+    deleteOnSuccess=False,
+)
+
+vm = SparkVM(vcpu=2, memory="2G", disk="4G", timeout=60.0, network=True, env={})
+result = vm.run(rollout.id)
+print(result.status, result.exit_code, result.passed)
+```
 
 ## Why SparkVM?
 
@@ -30,7 +60,7 @@ SparkVM runs workloads inside lightweight Firecracker microVMs, each rollout can
 - Track and manage thousands of rollouts from one machine
 
 SparkVM supports both SDK and CLI usage, you can use the SDK to integrate SparkVM into your own agent systems, rollout pipelines, or automation tools.
- 
+
 You can also use the CLI to trigger and manage rollouts directly from your terminal example Use Cases
 
 - Agent rollout execution
@@ -40,8 +70,6 @@ You can also use the CLI to trigger and manage rollouts directly from your termi
 - MicroVM sandboxing
 - Snapshot and restore workflows
 - Controlled network access for agents
- 
-
 
 ## Setup SparkVM
 
