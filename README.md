@@ -1,17 +1,47 @@
 # SparkVM
 
-SparkVM is a Firecracker microVM runner for Dockerfile rollouts usefull for agents long running task and inspired by composer-2 Async RL.
+SparkVM is a Firecracker microVM runner for Dockerfile rollouts usefull for agents long running task and inspired by composer-2 Async RL. 
 
-### why sparkvm ?
+**The goal of SparkVM is simple:** Run thousands of agent rollouts efficiently on your own machine without needing a large Kubernetes cluster.
 
-sparkvm will allocate and manage the agent rollouts efficiently by allocating available system to each microVM based on the host machines so you can freely run the agent rollouts without any hesitations
+SparkVM scales better than Kubernetes for local, single host agent rollout execution because it avoids cluster level orchestration overhead and directly schedules Firecracker workers based on host capacity.
 
-you dont need big kubernetes cluster for triggering 1000 of rollouts anymore sparkvm will do that for you
-just deploy it on your machine it will track and run the VM efficiently
+## Why SparkVM?
 
-check how that will be implemented
+SparkVM allocates and manages agent rollouts efficiently by assigning available system resources to each microVM based on the host machine.
 
-you can use SDK and cli as well both supporte
+This means you can freely run agent rollouts without hesitation.
+
+You do not need a big Kubernetes cluster for triggering thousands of rollouts anymore. SparkVM will do that for you, just deploy it on your machine. SparkVM will track, manage, and run the VMs efficiently.
+
+### How SparkVM Works ?
+
+SparkVM runs workloads inside lightweight Firecracker microVMs, each rollout can be isolated, tracked, paused, restored, and managed based on the available resources of the host machine and designed to make large-scale agent rollouts simpler deployments.
+
+### What SparkVM Can Do ?
+
+- Container-based deployment
+- Run Dockerfile-based rollouts inside Firecracker microVMs
+- Allocate host resources efficiently across microVMs
+- Store snapshots
+- Restore a VM from where it left off
+- Manage long-running agent tasks
+- Control what your agent can access through network egress policies
+- Track and manage thousands of rollouts from one machine
+
+SparkVM supports both SDK and CLI usage, you can use the SDK to integrate SparkVM into your own agent systems, rollout pipelines, or automation tools.
+ 
+You can also use the CLI to trigger and manage rollouts directly from your terminal example Use Cases
+
+- Agent rollout execution
+- Async RL workloads
+- Long-running task isolation
+- Dockerfile-based experiments
+- MicroVM sandboxing
+- Snapshot and restore workflows
+- Controlled network access for agents
+ 
+
 
 ## Setup SparkVM
 
