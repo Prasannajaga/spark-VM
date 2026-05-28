@@ -18,6 +18,7 @@ class FirecrackerProcess:
     firecracker_bin: Path
     socket_path: Path
     log_path: Path | None = None
+    namespace_name: str | None = None
     _proc: subprocess.Popen[str] | None = field(default=None, init=False, repr=False)
     _log_handle: IO[str] | None = field(default=None, init=False, repr=False)
 
@@ -43,8 +44,9 @@ class FirecrackerProcess:
         self._log_handle = open_text_append(log_path, encoding="utf-8")
 
         try:
+            cmd = self._build_command()
             self._proc = popen_checked(
-                [str(self.firecracker_bin), "--api-sock", str(self.socket_path)],
+                cmd,
                 error_factory=FirecrackerProcessError,
                 stdin=subprocess.DEVNULL,
                 stdout=self._log_handle,
@@ -124,6 +126,12 @@ class FirecrackerProcess:
         except OSError:
             return ""
         return "\n".join(lines[-max_lines:])
+
+    def _build_command(self) -> list[str]:
+        firecracker_cmd = [str(self.firecracker_bin), "--api-sock", str(self.socket_path)]
+        if self.namespace_name is None:
+            return firecracker_cmd
+        return ["ip", "netns", "exec", self.namespace_name, *firecracker_cmd]
 
 
 __all__ = ["FirecrackerProcess"]

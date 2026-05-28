@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core.config import resolve_home_dir
+from ..core.fsops import write_text
 from ..storage.db import connect_db
 from ..core.errors import JobTimeoutError, WorkerNotFoundError
 from ..storage.repositories import EventRepository, RolloutRepository, WorkerRepository
@@ -31,6 +32,45 @@ class WorkerRunner:
     def _write_json(self, path: Path, payload: dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    def _persist_phase_logs(self, *, result: Any) -> dict[str, Any]:
+        worker_dir = self._worker_dir()
+        results_log_path = worker_dir / "results.log"
+        phase_meta: dict[str, dict[str, Any]] = {}
+        sections: list[str] = []
+
+        def _append_section(category: str, content: str) -> None:
+            body = content.rstrip("\n")
+            if body:
+                sections.append(f"[{category}]\n{body}\n")
+            else:
+                sections.append(f"[{category}]\n<empty>\n")
+
+        def _collect_phase(phase_name: str, phase_obj: Any) -> None:
+            if phase_obj is None:
+                return
+            stdout_text = str(getattr(phase_obj, "stdout", "") or "")
+            stderr_text = str(getattr(phase_obj, "stderr", "") or "")
+            exit_code = getattr(phase_obj, "exit_code", None)
+
+            _append_section(f"{phase_name}.stdout", stdout_text)
+            _append_section(f"{phase_name}.stderr", stderr_text)
+
+            phase_meta[phase_name] = {
+                "exit_code": int(exit_code) if exit_code is not None else None,
+            }
+
+        _collect_phase("network", getattr(result, "network", None))
+        _collect_phase("setup", getattr(result, "setup", None))
+        _collect_phase("run", getattr(result, "run", None))
+        _append_section("final_exit_code", f"{int(getattr(result, 'exit_code', 0))}")
+        write_text(results_log_path, "\n".join(sections).rstrip() + "\n", encoding="utf-8")
+
+        return {
+            "results_log_path": str(results_log_path),
+            "result_files": ["results.log"],
+            "phases": phase_meta,
+        }
 
     def _finalize_rollout_on_failure(self, rollout_id: str, worker_id: str) -> None:
         with connect_db(self.home_dir) as conn:
@@ -114,6 +154,7 @@ class WorkerRunner:
 
         try:
             result = vm.run_as_worker(rollout_id, self.worker_id)
+            phase_logs = self._persist_phase_logs(result=result)
             result_payload = {
                 "worker_id": self.worker_id,
                 "rollout_id": rollout_id,
@@ -123,6 +164,9 @@ class WorkerRunner:
                 "duration_ms": result.duration_ms,
                 "passed": result.passed,
                 "created_at": now_utc_iso(),
+                "results_log_path": phase_logs["results_log_path"],
+                "result_files": phase_logs["result_files"],
+                "phase_summary": phase_logs["phases"],
             }
             self._write_json(self._worker_dir() / "result.json", result_payload)
             if result.passed:

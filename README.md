@@ -86,8 +86,13 @@ What `sparkvm setup` does:
 3. Installs the managed Firecracker binary into `~/.sparkvm/bin/firecracker` when needed.
 4. Creates `~/.sparkvm/bin/kvm` symlink pointing to `/dev/kvm`.
 5. Downloads the managed kernel image to `~/.sparkvm/images/vmlinux` when needed.
-6. Initializes the SQLite DB and default machine policy.
-7. Migrates old rollout metadata into SQLite when legacy data exists.
+6. Prepares SparkVM-managed CNI paths under `~/.sparkvm/cni/{bin,conf}` and writes `sparkvm.conflist`.
+7. Auto-installs required CNI binaries into `~/.sparkvm/cni/bin` when possible:
+   - `ptp`, `host-local`, `firewall` from official CNI plugin releases
+   - `cnitool` from CNI release archive (with Go build fallback)
+   - `tc-redirect-tap` via `go install` when needed
+8. Initializes the SQLite DB and default machine policy.
+9. Migrates old rollout metadata into SQLite when legacy data exists.
 
 If you run it again:
 

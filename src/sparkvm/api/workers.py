@@ -170,6 +170,14 @@ class Workers:
         worker_path = self.path(vm_id)
         if not worker_path.is_dir():
             raise WorkerNotFoundError(f"Worker not found: {validate_worker_id(vm_id)}")
+
+        single_log = worker_path / "results.log"
+        if single_log.exists() and single_log.is_file():
+            try:
+                return read_text(single_log, encoding="utf-8", errors="replace")
+            except OSError:
+                return "<unreadable>"
+
         results_dir = worker_path / "results"
         if not results_dir.exists() or not results_dir.is_dir():
             return ""

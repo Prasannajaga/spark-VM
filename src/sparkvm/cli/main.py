@@ -4,19 +4,27 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+from pathlib import Path
+import shutil
 import sys
+import traceback
 
 from sparkvm.cli.cleanup import run_cleanup_command, run_reset_command
+from sparkvm.core.fsops import read_json
+from sparkvm.core.utils import has_cap_net_admin, has_network_privileges
 from sparkvm.core.errors import SparkVMError
-from sparkvm.storage.repositories import RolloutRepository
+from sparkvm.machine.network import NetworkManager
+from sparkvm.storage.repositories import NetworkLeaseRepository, RolloutRepository
 from sparkvm.cli.setup import (
+    REQUIRED_CNI_BINARIES,
     doctor_status,
     format_doctor_report,
     get_sparkvm_paths,
     run_setup_command,
 )
 from sparkvm.api.rollouts import Rollouts, validate_rollout_id
-from sparkvm.api.workers import Workers
+from sparkvm.api.workers import Workers, validate_worker_id
 
 
 def parse_env_vars(pairs: list[str] | None) -> dict[str, str]:
@@ -34,6 +42,15 @@ def parse_env_vars(pairs: list[str] | None) -> dict[str, str]:
     return env
 
 
+def parse_bool_flag(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in {"true", "1", "yes", "y", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError("Expected one of: true, false")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="sparkvm", description="SparkVM setup and diagnostics")
     parser.add_argument(
@@ -49,6 +66,15 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser = subparsers.add_parser("setup", help="Install/verify managed SparkVM assets")
     setup_parser.add_argument("--force", action="store_true", help="Reinstall managed assets")
     setup_parser.add_argument("--owner", default=None, help="User that should own files under SparkVM home after setup")
+
+    network_parser = subparsers.add_parser("network", help="Network diagnostics")
+    network_subparsers = network_parser.add_subparsers(dest="network_command", required=True)
+    network_doctor = network_subparsers.add_parser("doctor", help="Check CNI networking prerequisites")
+    network_doctor.add_argument("--smoke", action="store_true", help="Run add/del smoke check in a temp network namespace")
+    network_cleanup = network_subparsers.add_parser("cleanup", help="Cleanup stale SparkVM network namespaces")
+    network_cleanup.add_argument("--stale", action="store_true", help="Delete stale spk-* namespaces (best effort)")
+    network_inspect = network_subparsers.add_parser("inspect", help="Inspect networking state for one worker")
+    network_inspect.add_argument("worker_id", help="Worker id (e.g. worker-02e67edfc7a0)")
 
     rollout_parser = subparsers.add_parser("rollout", help="Rollout operations")
     rollout_subparsers = rollout_parser.add_subparsers(dest="rollout_command", required=True)
@@ -68,19 +94,12 @@ def build_parser() -> argparse.ArgumentParser:
     rollout_create.add_argument("--memory", default="2G", help="Default worker memory (e.g. 2G)")
     rollout_create.add_argument("--disk", default="4G", help="Default worker execution disk (e.g. 4G)")
     rollout_create.add_argument("--timeout", type=float, default=60.0, help="Default worker timeout seconds")
-    rollout_network_group = rollout_create.add_mutually_exclusive_group()
-    rollout_network_group.add_argument(
+    rollout_create.add_argument(
         "--network",
-        dest="network",
-        action="store_true",
+        type=parse_bool_flag,
         default=True,
-        help="Enable network for workers spawned from this rollout (default: enabled)",
-    )
-    rollout_network_group.add_argument(
-        "--no-network",
-        dest="network",
-        action="store_false",
-        help="Disable network for workers spawned from this rollout",
+        metavar="{true,false}",
+        help="Enable network for workers spawned from this rollout (default: true)",
     )
     rollout_create.add_argument(
         "--env",
@@ -109,19 +128,12 @@ def build_parser() -> argparse.ArgumentParser:
     workers_run.add_argument("--memory", default="2G", help="Memory (e.g. 2G)")
     workers_run.add_argument("--disk", default="4G", help="Execution disk (e.g. 4G)")
     workers_run.add_argument("--timeout", type=float, default=60.0, help="Timeout seconds")
-    workers_network_group = workers_run.add_mutually_exclusive_group()
-    workers_network_group.add_argument(
+    workers_run.add_argument(
         "--network",
-        dest="network",
-        action="store_true",
+        type=parse_bool_flag,
         default=True,
-        help="Enable network (default: enabled)",
-    )
-    workers_network_group.add_argument(
-        "--no-network",
-        dest="network",
-        action="store_false",
-        help="Disable network",
+        metavar="{true,false}",
+        help="Enable network for this run (default: true)",
     )
     workers_run.add_argument(
         "--env",
@@ -153,6 +165,101 @@ def run_doctor(home_dir: str | None) -> int:
     paths = get_sparkvm_paths(home_dir)
     status = doctor_status(paths)
     print(format_doctor_report(status))
+    return 0
+
+
+def run_network_doctor(home_dir: str | None, *, smoke: bool = False) -> int:
+    paths = get_sparkvm_paths(home_dir)
+    checks: list[tuple[str, bool, str]] = []
+
+    checks.append(("ip command", shutil.which("ip") is not None, "required host tool"))
+    for binary in REQUIRED_CNI_BINARIES:
+        target = paths.cni_bin_dir / binary
+        ok = target.exists() and os.access(target, os.X_OK)
+        checks.append((f"CNI binary {binary}", ok, str(target)))
+    checks.append(("CNI config", paths.cni_conflist.exists(), str(paths.cni_conflist)))
+    checks.append(("/dev/net/tun", Path("/dev/net/tun").exists(), "/dev/net/tun"))
+
+    uid = os.geteuid()
+    cap_net_admin = has_cap_net_admin()
+    net_priv = has_network_privileges()
+    checks.append(
+        (
+            "Network privileges",
+            net_priv,
+            f"euid={uid}, cap_net_admin={'yes' if cap_net_admin else 'no'}",
+        )
+    )
+
+    print(f"SparkVM network doctor ({paths.home_dir})")
+    for name, ok, detail in checks:
+        marker = "OK" if ok else "MISSING"
+        print(f"- {name}: {marker} ({detail})")
+
+    all_ok = all(ok for _, ok, _ in checks)
+    if not all_ok:
+        print("\nMissing requirements detected. Run `sparkvm setup` and install required CNI binaries under:")
+        print(f"  {paths.cni_bin_dir}")
+        return 1
+    if smoke:
+        manager = NetworkManager(home_dir=paths.home_dir)
+        try:
+            config = manager.doctor_smoke()
+        except Exception as exc:
+            print("\nSmoke test failed:")
+            print(str(exc))
+            if isinstance(exc, SparkVMError):
+                return 1
+            print(traceback.format_exc())
+            return 1
+        print("\nSmoke test passed.")
+        print(f"- namespace: {config.namespace_name}")
+        print(f"- guest_cidr: {config.guest_cidr or ''}")
+        print(f"- guest_ip: {config.guest_ip or ''}")
+        print(f"- gateway: {config.gateway or ''}")
+        print(f"- dns: {config.dns}")
+        print(f"- ip source: {config.ip_source}")
+    return 0
+
+
+def run_network_cleanup(home_dir: str | None, *, stale: bool = False) -> int:
+    if not stale:
+        raise SparkVMError("Only `sparkvm network cleanup --stale` is currently supported.")
+    paths = get_sparkvm_paths(home_dir)
+    manager = NetworkManager(home_dir=paths.home_dir)
+    cleaned, warnings = manager.cleanup_stale()
+    print(f"SparkVM network cleanup ({paths.home_dir})")
+    print(f"- cleaned namespaces: {len(cleaned)}")
+    for namespace in cleaned:
+        print(f"  - {namespace}")
+    if warnings:
+        print("- warnings:")
+        for item in warnings:
+            print(f"  - {item}")
+    return 0
+
+
+def run_network_inspect(home_dir: str | None, worker_id: str) -> int:
+    worker_id = validate_worker_id(worker_id)
+    paths = get_sparkvm_paths(home_dir)
+    worker_dir = paths.workers_dir / worker_id
+    lease = NetworkLeaseRepository(home_dir).get_by_worker(worker_id)
+
+    payload: dict[str, object] = {
+        "worker_id": worker_id,
+        "worker_dir": str(worker_dir),
+        "lease": lease,
+        "network_result_path": str(worker_dir / "network-result.json"),
+        "network_result": None,
+    }
+    result_path = worker_dir / "network-result.json"
+    if result_path.exists():
+        try:
+            payload["network_result"] = read_json(result_path)
+        except Exception:
+            payload["network_result"] = {"error": "could not parse network-result.json"}
+
+    print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 
 
@@ -415,6 +522,16 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "setup":
             return run_setup_command(args.home_dir, args.force, owner=args.owner)
+
+        if args.command == "network":
+            if args.network_command == "doctor":
+                return run_network_doctor(args.home_dir, smoke=bool(getattr(args, "smoke", False)))
+            if args.network_command == "cleanup":
+                return run_network_cleanup(args.home_dir, stale=bool(getattr(args, "stale", False)))
+            if args.network_command == "inspect":
+                return run_network_inspect(args.home_dir, args.worker_id)
+            parser.error(f"Unknown network command: {args.network_command}")
+            return 2
 
         # ROLLOUT
         if args.command == "rollout":

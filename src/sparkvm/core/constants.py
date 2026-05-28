@@ -42,11 +42,16 @@ ROLLOUT_METADATA_VERSION = 1
 # --- Network ---
 NET_SETUP_PRIVILEGE_MESSAGE = (
     "Network setup failed. sparkvm network configuration requires CAP_NET_ADMIN privileges.\n"
-    "Please run the sparkvm client via sudo, or configure the host interfaces and iptables "
-    "rules manually.\n\n"
+    "Please run the sparkvm client via sudo so SparkVM can create network namespaces and CNI networking state.\n\n"
     "For example:\n"
     "  sudo sparkvm run ...\n"
 )
+DEFAULT_CNI_NETWORK_NAME = "sparkvm"
+DEFAULT_CNI_VERSION = "0.4.0"
+SUPPORTED_CNI_VERSIONS = ("0.3.0", "0.3.1", "0.4.0", "1.0.0", "1.1.0")
+DEFAULT_CNI_SUBNET = "172.31.0.0/16"
+DEFAULT_CNI_ROUTE = "0.0.0.0/0"
+DEFAULT_CNI_RESOLV_CONF = "/etc/resolv.conf"
 
 # --- Images ---
 BOOT_ARGS = "console=ttyS0 reboot=k panic=1 pci=off init=/init"
@@ -141,15 +146,21 @@ configure_network() {
     return 0
   fi
 
-  ip link set eth0 up
-  ip addr add "$SPARKVM_GUEST_CIDR" dev eth0
-  ip route add default via "$SPARKVM_HOST_IP" dev eth0
+  ip link set lo up || true
+  ip link set "${SPARKVM_GUEST_IFACE:-eth0}" up
+  ip addr flush dev "${SPARKVM_GUEST_IFACE:-eth0}" || true
+  ip addr add "$SPARKVM_GUEST_CIDR" dev "${SPARKVM_GUEST_IFACE:-eth0}"
 
-  if [ -n "${SPARKVM_DNS:-}" ]; then
-    echo "nameserver ${SPARKVM_DNS}" > /etc/resolv.conf 2>/dev/null || true
-  else
-    echo "nameserver 1.1.1.1" > /etc/resolv.conf 2>/dev/null || true
+  if [ -n "${SPARKVM_GATEWAY:-}" ]; then
+    ip route add default via "$SPARKVM_GATEWAY" dev "${SPARKVM_GUEST_IFACE:-eth0}" || true
   fi
+
+  mkdir -p /etc
+  {
+    echo "nameserver ${SPARKVM_DNS:-1.1.1.1}"
+    # Keep DNS failure latency bounded for dynamic workloads.
+    echo "options timeout:2 attempts:2"
+  } > /etc/resolv.conf
 }
 
 load_runtime_env() {
@@ -320,8 +331,8 @@ FIRECRACKER_VERSION = "v1.15.1"
 KERNEL_FILENAME = "vmlinux"
 SUPPORTED_ARCHES = {"x86_64", "aarch64"}
 REQUIRED_SETUP_TOOLS = ("curl", "tar")
-DOCTOR_TOOLS = ("docker", "dd", "mkfs.ext4", "mount", "umount", "debugfs", "ip", "iptables", "sysctl")
-DOCTOR_NETWORK_TOOLS = ("ip", "iptables", "sysctl")
+DOCTOR_TOOLS = ("docker", "dd", "mkfs.ext4", "mount", "umount", "debugfs", "ip")
+DOCTOR_NETWORK_TOOLS = ("ip",)
 
 ARCH_ALIASES = {
     "amd64": "x86_64",

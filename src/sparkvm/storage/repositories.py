@@ -271,6 +271,56 @@ class ReservationRepository(BaseRepository):
         return self.update(reservation_id, {"status": "lost"})
 
 
+class NetworkLeaseRepository(BaseRepository):
+    def create(self, lease: dict[str, Any]) -> None:
+        with connect_db(self.home_dir) as conn:
+            qb = QueryBuilder(conn)
+            qb.insert("network_leases", lease)
+            conn.commit()
+
+    def upsert(self, lease: dict[str, Any]) -> None:
+        cols = list(lease.keys())
+        placeholders = ", ".join("?" for _ in cols)
+        updates = ", ".join(f"{col}=excluded.{col}" for col in cols if col != "id")
+        sql = f"INSERT INTO network_leases ({', '.join(cols)}) VALUES ({placeholders}) ON CONFLICT(id) DO UPDATE SET {updates}"
+        with connect_db(self.home_dir) as conn:
+            qb = QueryBuilder(conn)
+            qb.execute(sql, tuple(lease[col] for col in cols))
+            conn.commit()
+
+    def get(self, lease_id: str) -> dict[str, Any] | None:
+        with connect_db(self.home_dir) as conn:
+            qb = QueryBuilder(conn)
+            return qb.from_table("network_leases").where(id=lease_id).fetch_one()
+
+    def get_by_worker(self, worker_id: str) -> dict[str, Any] | None:
+        with connect_db(self.home_dir) as conn:
+            qb = QueryBuilder(conn)
+            return (
+                qb.from_table("network_leases")
+                .where(worker_id=worker_id)
+                .order_by("created_at", "DESC")
+                .fetch_one()
+            )
+
+    def update(self, lease_id: str, patch: dict[str, Any]) -> dict[str, Any] | None:
+        if not patch:
+            return self.get(lease_id)
+        data = dict(patch)
+        data["updated_at"] = now_utc_iso()
+        with connect_db(self.home_dir) as conn:
+            qb = QueryBuilder(conn)
+            qb.update("network_leases", data, where={"id": lease_id})
+            conn.commit()
+            return qb.from_table("network_leases").where(id=lease_id).fetch_one()
+
+    def mark_status(self, lease_id: str, status: str, *, released: bool = False) -> dict[str, Any] | None:
+        patch: dict[str, Any] = {"status": status}
+        if released:
+            patch["released_at"] = now_utc_iso()
+        return self.update(lease_id, patch)
+
+
 class MachinePolicyRepository(BaseRepository):
     def get(self) -> dict[str, Any] | None:
         with connect_db(self.home_dir) as conn:
@@ -396,6 +446,7 @@ __all__ = [
     "RuntimeImageRepository",
     "WorkerRepository",
     "ReservationRepository",
+    "NetworkLeaseRepository",
     "MachinePolicyRepository",
     "EventRepository",
     "DEFAULT_MACHINE_POLICY",

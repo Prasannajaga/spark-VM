@@ -138,69 +138,40 @@ def convert_docker_export_to_ext4(
     ensure_dir(cache_dir, exist_ok=True)
     ensure_dir(output_path.parent, exist_ok=True)
     tmp_image = output_path.with_name(f"{output_path.name}.tmp")
-    mounted = False
 
     try:
         with tempfile.TemporaryDirectory(prefix="sparkvm-image-build-", dir=str(cache_dir)) as tmp_dir_str:
             tmp_dir = Path(tmp_dir_str)
             rootfs_dir = tmp_dir / "rootfs"
-            mount_dir = tmp_dir / "mnt"
             ensure_dir(rootfs_dir, exist_ok=True)
-            ensure_dir(mount_dir, exist_ok=True)
 
-            try:
-                run_checked_with_logs(
-                    ["tar", "-xf", str(tar_path), "-C", str(rootfs_dir)],
-                    stdout_log=build_log_stdout,
-                    stderr_log=build_log_stderr,
-                )
+            run_checked_with_logs(
+                ["tar", "-xf", str(tar_path), "-C", str(rootfs_dir)],
+                stdout_log=build_log_stdout,
+                stderr_log=build_log_stderr,
+            )
 
-                init_path = rootfs_dir / "init"
-                write_text(init_path, init_template, encoding="utf-8")
-                init_path.chmod(0o755)
-                ensure_dir(rootfs_dir / "job", exist_ok=True)
-                ensure_dir(rootfs_dir / "job" / "results", exist_ok=True)
-                validate_exported_rootfs(rootfs_dir)
+            init_path = rootfs_dir / "init"
+            write_text(init_path, init_template, encoding="utf-8")
+            init_path.chmod(0o755)
+            ensure_dir(rootfs_dir / "job", exist_ok=True)
+            ensure_dir(rootfs_dir / "job" / "results", exist_ok=True)
+            validate_exported_rootfs(rootfs_dir)
 
-                remove_file(tmp_image, missing_ok=True)
-                run_checked_with_logs(
-                    ["dd", "if=/dev/zero", f"of={tmp_image}", "bs=1M", f"count={disk_mb}", "status=none"],
-                    stdout_log=build_log_stdout,
-                    stderr_log=build_log_stderr,
-                )
-                run_checked_with_logs(
-                    ["mkfs.ext4", "-F", str(tmp_image)],
-                    stdout_log=build_log_stdout,
-                    stderr_log=build_log_stderr,
-                )
-                run_checked_with_logs(
-                    ["mount", "-o", "loop", str(tmp_image), str(mount_dir)],
-                    stdout_log=build_log_stdout,
-                    stderr_log=build_log_stderr,
-                )
-                mounted = True
+            remove_file(tmp_image, missing_ok=True)
+            run_checked_with_logs(
+                ["dd", "if=/dev/zero", f"of={tmp_image}", "bs=1M", f"count={disk_mb}", "status=none"],
+                stdout_log=build_log_stdout,
+                stderr_log=build_log_stderr,
+            )
+            # Build ext4 directly from rootfs directory to avoid loop-mount dependency.
+            run_checked_with_logs(
+                ["mkfs.ext4", "-d", str(rootfs_dir), "-F", str(tmp_image)],
+                stdout_log=build_log_stdout,
+                stderr_log=build_log_stderr,
+            )
 
-                try:
-                    run_checked_with_logs(
-                        ["rsync", "-aHAX", "--numeric-ids", f"{rootfs_dir}/", str(mount_dir) + "/"],
-                        stdout_log=build_log_stdout,
-                        stderr_log=build_log_stderr,
-                    )
-                except (ValueError, RolloutBuildError):
-                    run_checked_with_logs(
-                        ["cp", "-a", f"{rootfs_dir}/.", str(mount_dir)],
-                        stdout_log=build_log_stdout,
-                        stderr_log=build_log_stderr,
-                    )
-                run_checked_with_logs(["sync"], stdout_log=build_log_stdout, stderr_log=build_log_stderr)
-            finally:
-                if mounted:
-                    try:
-                        run_checked_with_logs(["umount", str(mount_dir)], stdout_log=build_log_stdout, stderr_log=build_log_stderr)
-                    except Exception:
-                        run_checked_with_logs(["umount", "-l", str(mount_dir)], stdout_log=build_log_stdout, stderr_log=build_log_stderr)
-                    finally:
-                        mounted = False
+            run_checked_with_logs(["sync"], stdout_log=build_log_stdout, stderr_log=build_log_stderr)
 
         try:
             os.replace(tmp_image, output_path)

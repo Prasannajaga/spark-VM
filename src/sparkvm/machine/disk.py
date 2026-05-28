@@ -224,9 +224,28 @@ class ExecutionDisk:
 
             setup: PhaseResult | None = None
             run: PhaseResult | None = None
+            network: PhaseResult | None = None
 
             if has_phased_results:
                 final_exit_code = read_int_file(final_exit_code_path, fs_path="/results/final_exit_code")
+
+                network_stdout_path = tmp_dir / "network.stdout.log"
+                network_stderr_path = tmp_dir / "network.stderr.log"
+                network_stdout = ""
+                network_stderr = ""
+                has_network_stdout = debugfs_dump_file(self.path, "/results/network.stdout.log", network_stdout_path)
+                has_network_stderr = debugfs_dump_file(self.path, "/results/network.stderr.log", network_stderr_path)
+                if has_network_stdout:
+                    network_stdout = read_text(network_stdout_path, encoding="utf-8")
+                if has_network_stderr:
+                    network_stderr = read_text(network_stderr_path, encoding="utf-8")
+                if has_network_stdout or has_network_stderr:
+                    network = PhaseResult(
+                        name="network",
+                        stdout=network_stdout,
+                        stderr=network_stderr,
+                        exit_code=0,
+                    )
 
                 setup_exit_code_path = tmp_dir / "setup.exit_code"
                 if debugfs_dump_file(self.path, "/results/setup.exit_code", setup_exit_code_path):
@@ -305,6 +324,7 @@ class ExecutionDisk:
                 status=status,
                 exit_code=final_exit_code,
                 duration_ms=duration_ms,
+                network=network,
                 setup=setup,
                 run=run,
                 firecracker_log_path=firecracker_log_path,

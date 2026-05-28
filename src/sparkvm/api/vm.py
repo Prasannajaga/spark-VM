@@ -37,6 +37,7 @@ from ..core.errors import (
     GuestPanicError,
     JobTimeoutError,
     KernelImageNotFound,
+    NetworkSetupError,
     RuntimeImagePermissionError,
     RolloutNotFoundError,
     SparkVMError,
@@ -46,10 +47,10 @@ from ..firecracker.process import FirecrackerProcess
 from ..core.fsops import ensure_dir, read_text, remove_file, remove_tree, write_json_atomic, write_text
 from ..machine.image import ManagedImageResolver, RuntimeImage
 from ..core.logger import configure_logging, log_event, log_failure
-from ..machine.network import NetworkConfig, NetworkManager, render_network_env_file
+from ..machine.network import NetworkConfig, NetworkManager, namespace_name_for, render_network_env_file
 from ..api.result import VMResult
 from ..orchestration.resource_policy import assert_resource_capacity
-from ..storage.repositories import WorkerRepository
+from ..storage.repositories import NetworkLeaseRepository, WorkerRepository
 from ..api.rollouts import Rollout, Rollouts
 from ..core.utils import shell_quote
 from sparkvm.cli.setup import ManagedSetup
@@ -205,6 +206,7 @@ class SparkVM:
         self._images = ManagedImageResolver(self.config)
         self._rollouts = Rollouts(home_dir=self.config.home_dir)
         self._worker_repo = WorkerRepository(home_dir=self.config.home_dir)
+        self._network_leases = NetworkLeaseRepository(home_dir=self.config.home_dir)
         self._network = NetworkManager(home_dir=self.config.home_dir)
         self._worker_id_override: str | None = None
 
@@ -258,8 +260,8 @@ class SparkVM:
         run_logger = self._create_run_logger(vm_id=vm_id)
         log_event(
             run_logger,
-            component="vm",
-            event="run_started",
+            component="Firecracker VM",
+            event="VM run started",
             fields={
                 "rollout": rollout_obj.id,
                 "name": rollout_obj.name,
@@ -270,7 +272,7 @@ class SparkVM:
         )
         log_event(
             run_logger,
-            component="vm",
+            component="Firecracker VM",
             event="run_config",
             fields={
                 "vcpu": self.config.vcpu,
@@ -298,13 +300,15 @@ class SparkVM:
         started_at = time.monotonic()
         firecracker: FirecrackerProcess | None = None
         network_config: NetworkConfig | None = None
+        network_lease_id = vm_id
+        failure_phase: str | None = None
 
         failure: Exception | None = None
         cleanup_failure_message: str | None = None
         final_result: VMResult | None = None
 
         try:
-            log_event(run_logger, component="vm", event="phase_worker_prepare", fields={"status": "begin"}, detail=True)
+            log_event(run_logger, component="Firecracker VM", event="phase_worker_prepare", fields={"status": "begin"}, detail=True)
             firecracker_bin = self._setup.firecracker_binary_path()
             self._setup.assert_kvm_available()
             runtime_image = self._resolve_runtime_image_for_rollout(rollout_obj, selected_runtime)
@@ -313,7 +317,7 @@ class SparkVM:
             create_worker_rootfs(base_rootfs=runtime_image.rootfs_image, worker_rootfs=worker_rootfs_path)
             log_event(
                 run_logger,
-                component="vm",
+                component="Firecracker VM",
                 event="phase_worker_prepare",
                 fields={
                     "status": "ok",
@@ -332,17 +336,66 @@ class SparkVM:
             )
 
             if self.config.network_enabled:
-                log_event(run_logger, component="vm", event="phase_network_prepare", fields={"status": "begin"}, detail=True)
-                network_config = self._network.setup(vm_id)
+                now = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+                namespace_name = namespace_name_for(vm_id)
+                self._network_leases.upsert(
+                    {
+                        "id": network_lease_id,
+                        "worker_id": vm_id,
+                        "rollout_id": rollout_obj.id,
+                        "network_name": self._network.network_name,
+                        "namespace_name": namespace_name,
+                        "namespace_path": f"/var/run/netns/{namespace_name}",
+                        "ifname": self._network.ifname,
+                        "tap_name": self._network.tap_name,
+                        "guest_ip": None,
+                        "guest_cidr": None,
+                        "gateway": None,
+                        "dns_json": "[]",
+                        "result_json": "{}",
+                        "status": "created",
+                        "created_at": now,
+                        "updated_at": now,
+                        "released_at": None,
+                    }
+                )
+                log_event(run_logger, component="Firecracker VM", event="phase_network_prepare", fields={"status": "begin"}, detail=True)
+                try:
+                    network_config = self._network.setup(vm_id)
+                    self._persist_network_diagnostics_from_config(worker_dir=worker_dir, config=network_config)
+                except NetworkSetupError as exc:
+                    self._persist_network_diagnostics_from_error(worker_dir=worker_dir, error=exc)
+                    log_failure(
+                        run_logger,
+                        component="Firecracker VM",
+                        event="phase_network_prepare_failed",
+                        error=exc,
+                    )
+                    failure_phase = "network_setup"
+                    self._network_leases.update(network_lease_id, {"status": "failed"})
+                    raise
+                self._network_leases.update(
+                    network_lease_id,
+                    {
+                        "namespace_name": network_config.namespace_name,
+                        "namespace_path": network_config.namespace_path,
+                        "guest_ip": network_config.guest_ip,
+                        "guest_cidr": network_config.guest_cidr,
+                        "gateway": network_config.gateway,
+                        "dns_json": json.dumps([network_config.dns], sort_keys=True),
+                        "result_json": json.dumps(network_config.raw_result, sort_keys=True),
+                        "status": "active",
+                    },
+                )
                 log_event(
                     run_logger,
-                    component="vm",
+                    component="Firecracker VM",
                     event="phase_network_prepare",
                     fields={"status": "ok", "tap": network_config.tap_name},
                     detail=True,
                 )
 
-            log_event(run_logger, component="vm", event="phase_disk_prepare", fields={"status": "begin"}, detail=True)
+            log_event(run_logger, component="Firecracker VM", event="phase_disk_prepare", fields={"status": "begin"}, detail=True)
             runtime_files = self._runtime_execution_files(rollout=rollout_obj, network_config=network_config)
             execution_disk.copy_rollout(runtime_files=runtime_files if runtime_files else None)
             self._assert_worker_image_permissions(
@@ -351,22 +404,23 @@ class SparkVM:
             )
             log_event(
                 run_logger,
-                component="vm",
+                component="Firecracker VM",
                 event="phase_disk_prepare",
                 fields={"status": "ok", "execution_disk": execution_disk_path},
                 detail=True,
             )
 
-            log_event(run_logger, component="vm", event="phase_firecracker_start", fields={"status": "begin"}, detail=True)
+            log_event(run_logger, component="Firecracker VM", event="phase_firecracker_start", fields={"status": "begin"}, detail=True)
             firecracker = FirecrackerProcess(
                 firecracker_bin=firecracker_bin,
                 socket_path=socket_path,
                 log_path=firecracker_log_path,
+                namespace_name=network_config.namespace_name if network_config is not None else None,
             )
             firecracker.start(startup_timeout_sec=min(5.0, self.config.timeout_sec))
             log_event(
                 run_logger,
-                component="vm",
+                component="Firecracker VM",
                 event="phase_firecracker_start",
                 fields={"status": "ok", "socket": socket_path},
                 detail=True,
@@ -374,7 +428,7 @@ class SparkVM:
 
             api = FirecrackerAPIClient(socket_path)
             self._wait_for_firecracker_socket(api, firecracker, timeout_sec=self.config.timeout_sec)
-            log_event(run_logger, component="vm", event="phase_firecracker_config", fields={"status": "begin"}, detail=True)
+            log_event(run_logger, component="Firecracker VM", event="phase_firecracker_config", fields={"status": "begin"}, detail=True)
             self._configure_microvm(
                 api=api,
                 runtime_image=runtime_image,
@@ -386,7 +440,7 @@ class SparkVM:
             api.put("/actions", {"action_type": "InstanceStart"})
             log_event(
                 run_logger,
-                component="vm",
+                component="Firecracker VM",
                 event="phase_firecracker_config",
                 fields={"status": "ok", "vm_boot": "started"},
                 detail=True,
@@ -401,7 +455,7 @@ class SparkVM:
                 )
                 log_event(
                     run_logger,
-                    component="vm",
+                    component="Firecracker VM",
                     event="phase_timeout",
                     fields={"status": "failed", "duration_ms": duration_ms},
                     level="error",
@@ -414,8 +468,8 @@ class SparkVM:
                 duration_ms = int((time.monotonic() - started_at) * 1000)
                 log_event(
                     run_logger,
-                    component="vm",
-                    event="phase_result_extract",
+                    component="Firecracker VM",
+                    event="VM boot completed",
                     fields={"status": "begin", "duration_ms": duration_ms},
                     detail=True,
                 )
@@ -429,8 +483,8 @@ class SparkVM:
                 if result.passed:
                     log_event(
                         run_logger,
-                        component="vm",
-                        event="phase_result_extract",
+                        component="Firecracker VM",
+                        event="VM run passed",
                         fields={"status": "ok", "result": "passed", "exit": result.exit_code},
                         detail=True,
                     )
@@ -453,7 +507,7 @@ class SparkVM:
                             self._rollouts.delete(rollout_obj.id)
                             log_event(
                                 run_logger,
-                                component="vm",
+                                component="Firecracker VM",
                                 event="cleanup",
                                 fields={"status": "ok", "delete_on_success": True, "rollout_deleted": rollout_obj.id},
                                 detail=True,
@@ -462,11 +516,34 @@ class SparkVM:
                             pass
                     final_result = result
                 else:
+                    setup_exit = result.setup.exit_code if result.setup is not None else None
+                    run_exit = result.run.exit_code if result.run is not None else None
+                    setup_stderr_tail = (
+                        "\n".join(result.setup.stderr.splitlines()[-20:]) if result.setup is not None else ""
+                    )
+                    run_stderr_tail = (
+                        "\n".join(result.run.stderr.splitlines()[-20:]) if result.run is not None else ""
+                    )
+                    run_stdout_tail = (
+                        "\n".join(result.run.stdout.splitlines()[-20:]) if result.run is not None else ""
+                    )
                     log_event(
                         run_logger,
-                        component="vm",
-                        event="phase_result_extract",
-                        fields={"status": "failed", "result_status": result.status, "exit": result.exit_code},
+                        component="Firecracker VM",
+                        event="VM run failed",
+                        fields={
+                            "status": "failed",
+                            "result_status": result.status,
+                            "exit": result.exit_code,
+                            "setup_exit": setup_exit,
+                            "run_exit": run_exit,
+                            "timed_out": result.timed_out,
+                            "oom_killed": result.oom_killed,
+                            "duration_ms": result.duration_ms,
+                            "setup_stderr_tail": setup_stderr_tail,
+                            "run_stderr_tail": run_stderr_tail,
+                            "run_stdout_tail": run_stdout_tail,
+                        },
                         level="warning",
                     )
                     self._cleanup_process_socket(
@@ -487,7 +564,7 @@ class SparkVM:
         except (FirecrackerAPIError, FirecrackerProcessError) as exc:
             log_failure(
                 run_logger,
-                component="vm",
+                component="Firecracker VM",
                 event="phase_firecracker_failed",
                 error=exc,
             )
@@ -499,7 +576,7 @@ class SparkVM:
                 firecracker_log_path=firecracker_log_path,
             )
         except SparkVMError as exc:
-            log_failure(run_logger, component="vm", event="phase_run_failed", error=exc)
+            log_failure(run_logger, component="Firecracker VM", event="phase_run_failed", error=exc)
             if self._detect_guest_panic(firecracker_log_path):
                 failure = GuestPanicError(
                     self._format_boot_failure(
@@ -513,7 +590,7 @@ class SparkVM:
             else:
                 failure = exc
         except Exception as exc:
-            log_failure(run_logger, component="vm", event="phase_run_failed", error=exc)
+            log_failure(run_logger, component="Firecracker VM", event="phase_run_failed", error=exc)
             failure = self._classify_infrastructure_error(
                 error=exc,
                 vm_id=vm_id,
@@ -524,14 +601,16 @@ class SparkVM:
         if network_config is not None:
             try:
                 self._network.cleanup(network_config)
+                self._network_leases.mark_status(network_lease_id, "released", released=True)
             except Exception as exc:
+                self._network_leases.update(network_lease_id, {"status": "failed"})
                 if failure is None:
                     failure = exc if isinstance(exc, SparkVMError) else CleanupError(str(exc))
                 else:
                     cleanup_failure_message = str(exc)
                 log_failure(
                     run_logger,
-                    component="vm",
+                    component="Firecracker VM",
                     event="phase_network_cleanup_failed",
                     error=exc,
                     level="warning",
@@ -553,6 +632,7 @@ class SparkVM:
                 error=failure,
                 duration_ms=int((time.monotonic() - started_at) * 1000),
                 machine_specs=machine_specs,
+                failure_phase=failure_phase,
             )
             if cleanup_failure_message is not None:
                 self._append_worker_note(
@@ -563,7 +643,7 @@ class SparkVM:
             del preserved
             log_failure(
                 run_logger,
-                component="vm",
+                component="Firecracker VM",
                 event="run_failed",
                 error=failure,
                 fields={
@@ -578,7 +658,7 @@ class SparkVM:
         assert final_result is not None
         log_event(
             run_logger,
-            component="vm",
+            component="Firecracker VM",
             event="run_finished",
             fields={
                 "rollout": rollout_obj.id,
@@ -596,7 +676,7 @@ class SparkVM:
         logger.setLevel(logging.INFO)
         logger.propagate = True
         logger.handlers.clear()
-        log_event(LOGGER, component="vm", event="run_logger_ready", fields={"worker": vm_id}, detail=True)
+        log_event(LOGGER, component="Firecracker VM", event="run_logger_ready", fields={"worker": vm_id}, detail=True)
         return logger
 
     def _close_run_logger(self, logger: logging.Logger) -> None:
@@ -624,6 +704,37 @@ class SparkVM:
         if network_config is not None:
             files[".sparkvm/network.env"] = render_network_env_file(network_config)
         return files
+
+    def _persist_network_diagnostics_from_error(self, *, worker_dir: Path, error: Exception) -> None:
+        payloads = getattr(error, "sparkvm_network_diagnostics", None)
+        if not isinstance(payloads, dict):
+            return
+        for filename, content in payloads.items():
+            if not isinstance(filename, str):
+                continue
+            if not isinstance(content, str):
+                continue
+            try:
+                write_text(worker_dir / filename, content, encoding="utf-8")
+            except OSError:
+                continue
+
+    def _persist_network_diagnostics_from_config(self, *, worker_dir: Path, config: NetworkConfig) -> None:
+        payloads = config.diagnostics
+        if not isinstance(payloads, dict):
+            return
+        for filename, content in payloads.items():
+            if not isinstance(filename, str):
+                continue
+            if not isinstance(content, str):
+                continue
+            target = worker_dir / filename
+            if target.exists():
+                continue
+            try:
+                write_text(target, content, encoding="utf-8")
+            except OSError:
+                continue
 
     def _resolve_rollout(self, rollout_id: str) -> Rollout:
         return self._rollouts.get(rollout_id)
@@ -948,6 +1059,7 @@ class SparkVM:
         results_path: Path | None,
         partial: Mapping[str, Any],
         machine_specs: Mapping[str, Any],
+        failure_phase: str | None = None,
     ) -> None:
         status = "timeout" if isinstance(error, JobTimeoutError) else "failed"
 
@@ -961,6 +1073,7 @@ class SparkVM:
             "exit_code": None,
             "error_type": type(error).__name__,
             "error_message": str(error),
+            "failure_phase": failure_phase,
             "duration_ms": duration_ms,
             "worker_preserved": True,
             "env_keys": sorted(self._env.keys()),
@@ -1278,6 +1391,7 @@ class SparkVM:
         error: BaseException | None,
         duration_ms: int,
         machine_specs: Mapping[str, Any],
+        failure_phase: str | None = None,
     ) -> VMResult | None:
         firecracker_log_path = worker_dir / "firecracker.log"
 
@@ -1350,6 +1464,21 @@ class SparkVM:
             results_path=results_path,
             partial=partial,
             machine_specs=machine_specs,
+            failure_phase=failure_phase,
+        )
+        self._worker_repo.update(
+            vm_id,
+            {
+                "failure_json": json.dumps(
+                    {
+                        "error_type": type(error).__name__,
+                        "error_message": str(error),
+                        "failure_phase": failure_phase,
+                    },
+                    sort_keys=True,
+                ),
+                "failure_phase": failure_phase,
+            },
         )
         return None
 

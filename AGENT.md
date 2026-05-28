@@ -1,9 +1,11 @@
 ## SparkVM Core
 
 - This repository is SparkVM.
-- SparkVM is a Firecracker-based microVM runner.
+- SparkVM is a Firecracker-based microVM runner designed for executing high-density agent rollouts.
 - SparkVM only supports Dockerfile-backed rollouts.
-- The Dockerfile is the source of truth for execution.
+- The Dockerfile is the source of truth for setup and execution.
+- Rollout and worker states are backed by a local SQLite database for robust, ACID-compliant indexing.
+- Machine resources and admission controls are dynamic, tracking available CPU, memory, and disk using policies.
 - The project core must not be changed.
 
 ## Core Flow
@@ -12,393 +14,155 @@
 - Build a Docker image from the Dockerfile.
 - Convert the Docker image filesystem into an ext4 image.
 - Store the ext4 image as the rollout artifact.
-- Create a SparkVM instance with VM resources.
-- Run the rollout inside Firecracker using rollout.id.
-- Extract results after the VM exits.
-- Delete successful workers.
-- Preserve failed workers.
+- Persist rollout metadata in the SQLite database and create a local `rollout.json` in the rollout directory.
+- Create a SparkVM instance with VM resource configuration.
+- Run the rollout inside Firecracker using `rollout.id` (either directly or via the background scheduler queue).
+- Attach dynamic network TAP devices and inject per-worker network environment configs (when network is enabled).
+- Extract results (stdouts, stderrs, exit codes, OOM checks) after the VM exits.
+- Delete successful workers (including rootfs/execution disks) while preserving failed and timeout workers for diagnostics.
 
 ## Canonical Python API
 
-- The only supported rollout creation API is:
+The 4 core public exports at the package root level of `sparkvm` are `Rollouts`, `SparkVM`, `SparkScheduler`, and `MachineConfig`.
 
+- **Rollout Management (SQLite Backed)**:
+
+  ```python
+  from sparkvm import Rollouts
+
+  rollouts = Rollouts()
   rollout = rollouts.create(
-  name="my-agent",
-  runtime="Dockerfile",
-  deleteOnSuccess=False,
-  dockerfile="/abs/path/simplegithub.Dockerfile",
+      name="my-agent",
+      runtime="Dockerfile",
+      deleteOnSuccess=False,
+      dockerfile="/abs/path/simplegithub.Dockerfile",
   )
-- The only supported VM configuration API is:
+  ```
+
+- **One-Shot VM Execution**:
+
+  ```python
+  from sparkvm import SparkVM
 
   vm = SparkVM(
-  vcpu=2,
-  memory="2G",
-  disk="4G",
-  timeout=60.0,
-  network=True,
-  env=runtime_env,
+      vcpu=2,
+      memory="2G",
+      disk="4G",
+      timeout=60.0,
+      network=True,
+      env=runtime_env,
   )
-- The only supported run API is:
-
-  vm.run(rollout.id)
-
-## Strict Runtime Rule
-
-- Runtime must always be Dockerfile.
-- The Dockerfile owns all setup and execution behavior.
-- Do not add any other runtime type.
-- Do not split setup or run logic between Dockerfile and host-side commands.
-
-## Forbidden Rollout APIs
-
-- Do not support:
-
-  - rollouts.create(command="...")
-  - rollouts.create(script="...")
-  - rollouts.create(files=[...])
-  - rollouts.create(repo="...")
-  - rollouts.create(source="...")
-  - rollouts.create(path="...")
-  - rollouts.create(mode="repo")
-  - rollouts.create(mode="script")
-  - rollouts.create(mode="file")
-  - rollouts.create(mode="command")
-  - rollouts.create(image_name="...")
-  - rollouts.create(setup_cmd="...")
-  - rollouts.create(run_cmd="...")
-
-## Forbidden Run APIs
-
-- Do not support:
-
-  - vm.run(command="...")
-  - vm.run(script="...")
-  - vm.run(path="...")
-  - vm.run(source="...")
-  - vm.run(repo="...")
-  - vm.run(runtime="...")
-  - vm.run(setup_cmd="...")
-  - vm.run(run_cmd="...")
-
-## Rollout Creation Rules
-
-- rollouts.create() is build-time only.
-- rollouts.create() must:
-
-  - validate the Dockerfile
-  - build the Docker image
-  - export or extract the Docker image filesystem
-  - create an ext4 filesystem image
-  - inject /init
-  - persist rollout metadata
-  - store the ext4 image under SparkVM home
-- rollouts.create() must not:
-
-  - launch Firecracker
-  - run guest commands
-  - configure networking
-  - create workers
-  - execute arbitrary host scripts
-
-## VM Run Rules
-
-- vm.run() is execution-time only.
-- vm.run() must accept only rollout.id.
-- vm.run() must load rollout metadata from disk.
-- vm.run() must use the stored rollout ext4 image.
-- vm.run() must not rebuild the Docker image.
-- vm.run() must not mutate the original rollout image.
-
-## SparkVM Constructor Rules
-
-- SparkVM must be configured through constructor arguments only.
-- Supported fields are:
-
-  - vcpu
-  - memory
-  - disk
-  - timeout
-  - network
-  - env
-- vcpu must be a positive integer.
-- memory must be validated.
-- disk must be validated.
-- timeout must be a positive number.
-- network must be a boolean.
-- env must be treated as sensitive.
-
-## Worker Rules
-
-- Every VM run must create a unique worker.
-- Worker directories must live under:
-
-  ~/.sparkvm/workers/<worker_id>/
-- Worker metadata must be recoverable from disk.
-- Valid worker statuses are:
-
-  - running
-  - passed
-  - failed
-  - timeout
-- Successful workers must be deleted.
-- Failed workers must be preserved.
-- Timeout workers must be preserved.
-
-## Worker Files
-
-- Each worker directory should contain:
-  - rootfs.ext4
-  - execution.ext4
-  - firecracker.sock
-  - firecracker.log
-  - worker.json
-  - result.json
-  - failure.json
-
-## Metadata Rules
-
-- Rollout metadata must include:
-
-  - id
-  - name
-  - runtime
-  - image_path
-  - deleteOnSuccess
-  - created_at
-- Worker metadata must include:
-
-  - id
-  - rollout_id
-  - vcpu
-  - memory
-  - disk
-  - timeout
-  - network
-  - status
-  - created_at
-  - completed_at
-- Metadata writes should be atomic.
-- Do not leave partial metadata files.
-- Do not rely only on in-memory runtime state.
-
-## Result Rules
-
-- Guest results must be extracted after VM exit.
-- Expected guest result files:
-
-  - /job/results/run.stdout.log
-  - /job/results/run.stderr.log
-  - /job/results/exit_code
-  - /job/results/status.json
-- A run must not be marked passed unless:
-
-  - the VM completed successfully
-  - the guest command succeeded
-  - result extraction succeeded
-- If result extraction fails, mark the worker failed.
-- Preserve the worker directory when result extraction fails.
-
-## Cleanup Rules
-
-- On passed run:
-
-  - mark worker as passed
-  - write result.json
-  - delete worker directory
-  - delete rollout artifacts only if deleteOnSuccess is true
-- On failed run:
-
-  - mark worker as failed
-  - write failure.json when possible
-  - preserve worker directory
-  - preserve logs
-  - preserve execution disk
-  - do not delete rollout image
-- On timeout:
-
-  - terminate Firecracker
-  - mark worker as timeout
-  - write failure.json when possible
-  - preserve worker directory
-  - do not delete rollout image
-- deleteOnSuccess applies only after passed execution.
-
-## Network Rules
-
-- If network is false:
-
-  - do not create TAP devices
-  - do not configure NAT
-  - do not attach a Firecracker network interface
-- If network is true:
-
-  - create isolated per-worker network config
-  - configure TAP
-  - configure routing or NAT when needed
-  - inject guest network metadata
-  - clean up network state after execution
-- Network logic must live in network.py.
-- Do not scatter iproute2 or iptables logic across vm.py.
-
-## Disk Rules
-
-- Disk logic must live in disk.py.
-- The rollout ext4 image is the root filesystem source.
-- The original rollout image must never be mutated during vm.run().
-- Each worker must get its own disk copy or reflink.
-- The execution disk must be writable.
-- Disk cleanup must remove temporary mounts and loop devices.
-
-## Layer Responsibilities
-
-- config.py:
-
-  - SparkVM home path resolution
-  - environment overrides
-  - directory paths
-  - config validation
-- constants.py:
-
-  - default values
-  - supported runtime values
-  - required host tools
-  - fixed filenames
-- rollouts.py:
-
-  - rollout creation
-  - rollout validation
-  - rollout metadata
-  - rollout lookup
-  - rollout deletion
-  - image builder calls
-- image_builder.py:
-
-  - Dockerfile validation
-  - docker build
-  - image inspection
-  - filesystem export
-  - ext4 creation
-  - /init injection
-  - temporary cleanup
-- vm.py:
-
-  - SparkVM constructor
-  - vm.run(rollout.id)
-  - worker setup
-  - Firecracker lifecycle
-  - timeout handling
-  - result extraction
-  - cleanup policy
-- workers.py:
-
-  - worker metadata
-  - worker status transitions
-  - worker lookup
-  - failed worker preservation
-- network.py:
-
-  - TAP creation
-  - IP allocation
-  - NAT
-  - routing
-  - guest network metadata
-  - network cleanup
-- disk.py:
-
-  - ext4 file creation
-  - sparse files
-  - disk copying
-  - execution disk preparation
-  - safe mount and unmount helpers
-- firecracker/client.py:
-
-  - Firecracker socket API client
-  - boot source config
-  - machine config
-  - drive attachment
-  - network attachment
-  - VM start
-- cli/main.py:
-
-  - CLI parsing
-  - calls to public SparkVM APIs only
-- cli/setup.py:
-
-  - host diagnostics
-  - Firecracker setup
-  - kernel setup
-  - directory scaffolding
-  - host tool checks
-
-## IMPLEMENTATION CONSTRAINTS
-
-- These rules are project-wide and mandatory across all modules.
-- Each concern must have one owner module. Do not duplicate logic across layers.
-- Keep API modules as API boundaries only; keep parsing/normalization/helpers in shared utility modules.
-- Keep constants/defaults in `core/constants.py` only.
-- Keep reusable helper logic in `core/utils.py` only.
-- Repository/storage modules may persist and fetch data, but must not define domain semantics, defaults, or normalization rules.
-- Orchestration/API/CLI modules must consume shared APIs/utilities; they must not re-implement shared logic locally.
-- If a helper or constant is needed in multiple modules, move it to the owning shared module instead of copying.
-- When refactoring, update all call sites project-wide to the shared owner; do not leave mixed patterns.
- 
-
-## Testing Rules
-
-- Tests must protect the architecture.
-- Tests must verify Dockerfile-only runtime.
-- Tests must reject unsupported APIs.
-- Tests must verify rollout metadata behavior.
-- Tests must verify image build behavior.
-- Tests must verify vm.run(rollout.id).
-- Tests must verify vm.run() does not rebuild images.
-- Tests must verify successful workers are deleted.
-- Tests must verify failed workers are preserved.
-- Tests must verify timeout workers are preserved.
-- Tests must verify deleteOnSuccess only applies after passed runs.
-- Tests must verify network=false creates no TAP device.
-- Tests must verify network=true uses centralized network setup.
-- Tests must verify metadata can be recovered from disk.
-
-## Security Rules
-
-- Do not execute rollout commands on the host.
-- Do not run Dockerfile-defined commands on the host outside Docker build/export mechanics.
-- Do not expose host secrets unless explicitly passed through env.
-- Treat env values as sensitive.
-- Redact env values from logs when possible.
-- Do not print secret env values.
-- Do not preserve sensitive env files in successful worker directories.
-- Avoid privileged operations outside setup, disk, and network layers.
-
-## Error Handling Rules
-
-- Errors must be explicit.
-- Do not swallow critical failures.
-- Do not mark a worker passed unless all required steps succeeded.
-- Write useful diagnostics to failure.json when possible.
-- Preserve failed worker data.
-- Preserve timeout worker data.
-- Preserve result extraction failure data.
-
-## Failure Phases
-
-- Use clear failure phases such as:
-  - rollout_validation
-  - docker_build
-  - docker_export
-  - ext4_creation
-  - metadata_write
-  - worker_prepare
-  - disk_prepare
-  - network_prepare
-  - firecracker_start
-  - firecracker_config
-  - vm_boot
-  - guest_run
-  - timeout
-  - result_extract
-  - cleanup
+  result = vm.run(rollout.id)
+  print(result.status, result.exit_code, result.passed)
+  ```
+
+- **Scheduler-Managed Queue Execution**:
+
+  ```python
+  from sparkvm import SparkScheduler, MachineConfig
+
+  # Configure machine resource policy constraints
+  MachineConfig.set_policy(poll_interval=2.0, max_concurrent_vms=10)
+
+  # Process the execution queue
+  scheduler = SparkScheduler()
+  summary = scheduler.tick()  # Executes one scheduling cycle
+  print(summary["tick_id"], summary["spawned"])
+  ```
+
+## SparkVM Core Rules
+
+### 1. Runtime & API Boundaries
+
+- **Strict Dockerfile Runtime**: The guest execution setup and instructions must always be defined entirely within the Dockerfile. Do not support any other runtime modes, and do not split logic between host commands and the Dockerfile.
+- **Canonical API Access**: The `Rollouts` and `SparkVM` classes must only be invoked via their canonical interfaces. No other parameters (such as `command`, `script`, `files`, `repo`, `source`, `path`, `mode`, `image_name`, `setup_cmd`, or `run_cmd`) are allowed.
+- **Constructor Configuration**: SparkVM must be configured via constructor arguments only (`vcpu`, `memory`, `disk`, `timeout`, `network`, `env`). These arguments must be strictly validated (e.g. positive integer cores, valid size strings like `"2G"`, positive timeout).
+
+### 2. Rollout Build Rules
+
+- **Build-Time Isolation**: Rollout creation (`Rollouts.create()`) is strictly a build-time operation. It must validate the Dockerfile, build the image, export its filesystem to an ext4 disk, inject the `/init` harness, and persist the rollout metadata.
+- **No Side Effects**: Rollout creation must NEVER start a Firecracker daemon, provision networks, execute guest code, or instantiate worker resources.
+- **Image Reuse**: When creating a rollout, check for and reuse an existing ext4 rollout image under the same name to avoid redundant builds.
+- **Artifact Storage**: Store the finalized static ext4 rootfs image under `~/.sparkvm/images/` and record the rollout in both `rollout.json` and the SQLite database.
+
+### 3. VM Execution & Workers
+
+- **Execution-Time Isolation**: VM runs (`vm.run()`) must accept only `rollout.id` and launch from the static rollout image without rebuilds or mutations to the original image.
+- **Unique Workers**: Every execution must run inside a private worker directory under `~/.sparkvm/workers/<worker_id>/` containing a writable rootfs copy, a writable execution disk, sockets, logs, and state files (`worker.json`, `result.json` / `failure.json`).
+- **Worker Cleanups**: Successful worker directories must be completely deleted from the host immediately after a passed run.
+- **Failure Diagnostics**: Failed and timed-out workers must be preserved in their entirety to allow post-mortem debugging.
+
+### 4. Database & State Management
+
+- **Central SQLite Index**: A local SQLite database under `~/.sparkvm/` serves as the primary operational state registry. It tracks all tables: `rollouts`, `workers`, `runtime_images`, `reservations`, `machine_policy`, and `events`.
+- **Atomic Operations**: All database writes and status transitions must be fully atomic and ACID-compliant. Partially written or corrupted entries are strictly forbidden.
+- **File Sync**: Maintain consistency by synchronizing database records with the local `rollout.json` and `worker.json` filesystem files.
+
+### 5. Network & Disk Controls
+
+- **Isolated Networks**: If network support is disabled, no TAP devices, NAT rules, or Firecracker network cards may be configured. If enabled, assign a unique TAP network device per worker using isolated subnets and route NAT cleanly, releasing all resources upon completion. Network logic is centralized strictly inside `src/sparkvm/machine/network.py`.
+- **Disk Safe Handling**: Mount, loop device setup, sparse space allocations, and unmount steps must live strictly in `src/sparkvm/machine/disk.py`. Never mutate the reference rollout ext4 image during runtime execution.
+
+### 6. Results, Diagnostics & Cleanup
+
+- **Strict Success Conditions**: A run is only considered `passed` if the Firecracker VM exited normally, the guest process succeeded with exit code `0`, and guest results (stdout, stderr, exit code, status) were successfully extracted from the guest's `/job/results/` directory.
+- **Result Failure Behavior**: If result extraction fails, the worker is marked `failed` and preserved.
+- **Delete on Success Policy**: The `deleteOnSuccess` option, when enabled, removes the primary rollout rootfs images only after a successfully completed pass.
+- **Timeouts Handling**: In the event of a timeout, immediately terminate the Firecracker subprocess, flag the status as `timeout`, write `failure.json`, and preserve the worker directory.
+
+### 7. Security, Testing & Verification
+
+- **No Host Execution**: Guest setup or run commands must never run directly on the host operating system.
+- **Sensitive Env Redaction**: Treat environment variables as highly sensitive. Automatically redact and scrub sensitive env values from stdout/stderr logs, worker files, and results.
+- **Test Enforcement**: Standardized tests must enforce architecture compliance, verify Dockerfile-only limits, reject disallowed APIs, check TAP configs, and validate metadata recovery from SQLite.
+- **Fail-Fast Error Handling**: Silence in error handling is strictly prohibited. Critical failures must trigger immediate, descriptive exceptions.
+
+## Package Structure & Module Responsibilities
+
+The codebase inside `src/` is structured as a modular package hierarchy under `sparkvm/`:
+
+### 1. `src/sparkvm/core/` (System Foundation)
+
+- `config.py`: Centralized config validation, resolvability of `SPARKVM_HOME` defaults (or sudo invoking user's home), and fail-fast validation routines.
+- `constants.py`: Fixed defaults (vcpu, memory, network, defaults), regex patterns, required host binaries, and fixed filesystem names.
+- `errors.py`: Exception class hierarchy representing infrastructure, guest, and configuration errors (e.g. `GuestPanicError`, `JobTimeoutError`).
+- `fsops.py`: Atomic file writing helper (`write_json_atomic`), safely handling nested directories.
+- `logger.py`: Central thread-safe custom logger using `threading.RLock`, supporting `logfmt` and structured `JSON` formatted events.
+- `utils.py`: Reusable utilities (ISOs, timing, shell quoting, memory parsers).
+
+### 2. `src/sparkvm/storage/` (ACID-Compliant State Management)
+
+- `db.py`: Establishes the thread-safe connection to the SQLite database.
+- `schema.sql`: Contains the canonical SQLite schema defining tables for `rollouts`, `workers`, `runtime_images`, `reservations`, `machine_policy`, and `events`.
+- `migrations.py`: Handles automatic sqlite file creation and structure migrations.
+- `query_builder.py`: Query assembly interface for safe parameterized database writes/reads.
+- `repositories.py`: Contains Repository classes (`RolloutRepository`, `WorkerRepository`, `ReservationRepository`, `MachinePolicyRepository`, `EventRepository`) separating raw query construction from orchestration rules.
+- `state_store.py`: Backward compatibility mapper translating SQLite database state to and from legacy JSON file structures.
+
+### 3. `src/sparkvm/machine/` (Infrastructure Logic)
+
+- `disk.py`: Dedicated ext4 loop setup, sparse file allocation, directory mounts/unmounts, and guest VM log/result extraction.
+- `image.py`: Manages resolution of runtime templates.
+- `image_builder.py`: Parses Dockerfiles, runs `docker build`, extracts Docker filesystem exports, constructs ext4 images, and injects the `/init` harness.
+- `machine_config.py`: Facilitates machine resource safety overrides (e.g. max memory overheads).
+- `network.py`: Safe allocation of unique IPs, MACs, guest routing/NAT, and automated TAP setup/cleanup.
+
+### 4. `src/sparkvm/firecracker/` (Virtualization Interface)
+
+- `api.py`: REST API wrapper talking directly over Unix socket endpoints with the Firecracker REST server.
+- `process.py`: Subprocess management, polling, and signal control for launching the Firecracker background daemon.
+
+### 5. `src/sparkvm/api/` (Public Boundaries)
+
+- `vm.py`: Orchestrates execution flow stages, resources capability checking, boots Firecracker, monitors runtime heartbeats, tail/redacts secrets from logs, and applies worker completion/cleanup rules.
+- `rollouts.py`: Manages validation and triggers the builder to generate rollout images, ensuring rollouts under existing names are reused without rebuilding.
+- `workers.py`: Supports diagnostics querying, status transitions, and log tailing.
+
+### 6. `src/sparkvm/cli/` (Command Line App)
+
+- `main.py`: Entry point for `sparkvm` commands (doctor, start, rollout, workers, setup).
+- `setup.py`: Diagnostics, managed Firecracker binary downloads, kernel installs, KVM device link setup, and DB schema creation.
+- `cleanup.py` / `runtimes.py`: Utility subcommands for cleanups and template checks.
 
 ## Conflict Behavior
 
@@ -409,7 +173,7 @@
 
   SparkVM only supports Dockerfile-backed rollouts:
 
-  rollouts.create(name, runtime="Dockerfile", deleteOnSuccess=False,   dockerfile="/abs/path/simplegithub.Dockerfile")
+  rollouts.create(name, runtime="Dockerfile", deleteOnSuccess=False, dockerfile="/abs/path/simplegithub.Dockerfile")
 
   vm = SparkVM(
   vcpu=2,
@@ -433,22 +197,6 @@
 - Prefer explicit metadata over hidden behavior.
 - Prefer preserving diagnostics over deleting failure data.
 - Prefer small focused changes over broad rewrites.
-
-## Core Invariants
-
-- A rollout is created from a Dockerfile.
-- A rollout has one generated ext4 image.
-- The ext4 image is created during rollout creation.
-- VM execution starts from rollout.id.
-- VM configuration lives in the SparkVM constructor.
-- Runtime env is passed through SparkVM env.
-- The Dockerfile owns execution logic.
-- Failed workers are preserved.
-- Successful workers are cleaned.
-- deleteOnSuccess deletes rollout artifacts only after passed execution.
-- Unsupported runtime modes are rejected.
-- CLI mirrors the Python API.
-- Tests protect the architecture.
 
 ## Final Instruction
 

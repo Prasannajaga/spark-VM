@@ -227,3 +227,39 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS idx_events_entity
 ON events(entity_type, entity_id, created_at);
+
+
+CREATE TABLE IF NOT EXISTS network_leases (
+    id TEXT PRIMARY KEY,
+
+    worker_id TEXT NOT NULL,
+    rollout_id TEXT,
+
+    network_name TEXT NOT NULL,
+    namespace_name TEXT NOT NULL,
+    namespace_path TEXT NOT NULL,
+
+    ifname TEXT NOT NULL DEFAULT 'veth0',
+    tap_name TEXT NOT NULL DEFAULT 'tap0',
+
+    guest_ip TEXT,
+    guest_cidr TEXT,
+    gateway TEXT,
+    dns_json TEXT,
+    result_json TEXT,
+
+    status TEXT NOT NULL DEFAULT 'created'
+        CHECK (status IN ('created', 'active', 'released', 'failed')),
+
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    released_at TEXT,
+
+    FOREIGN KEY (worker_id) REFERENCES workers(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_network_leases_worker
+ON network_leases(worker_id);
+
+CREATE INDEX IF NOT EXISTS idx_network_leases_status
+ON network_leases(status);

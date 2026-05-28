@@ -320,6 +320,29 @@ class SparkScheduler:
                     worker_dir = self.home_dir / "workers" / worker_id
                     memory = str(vm_config.get("memory", "2G"))
                     disk = str(vm_config.get("disk", "4G"))
+                    self._log_scheduler(
+                        "vm_allocation",
+                        fields={
+                            "tick": tick_id,
+                            "rollout": rollout_id,
+                            "worker": worker_id,
+                            "machine": (
+                                f"active={decision.get('active_vm_count', 0)}/{decision.get('max_concurrent_vms', 0)} "
+                                f"mem={decision.get('remaining_memory_bytes', 0)}/{decision.get('usable_memory_bytes', 0)}B "
+                                f"disk={decision.get('remaining_disk_bytes', 0)}/{decision.get('usable_disk_bytes', 0)}B"
+                            ),
+                            "vm": (
+                                f"{int(vm_config.get('vcpu', 2))}cpu "
+                                f"{memory} "
+                                f"{disk} "
+                                f"t={float(vm_config.get('timeout', 60.0))}s "
+                                f"net={'on' if bool(vm_config.get('network', True)) else 'off'} "
+                                f"env={','.join(sorted(dict(vm_config.get('env', {})).keys())) or '-'}"
+                            ),
+                            "requested_memory_bytes": int(decision.get("requested_memory_bytes", 0)),
+                            "requested_disk_bytes": int(decision.get("requested_disk_bytes", 0)),
+                        },
+                    )
                     qb.insert(
                         "workers",
                         {
@@ -462,7 +485,7 @@ class SparkScheduler:
                     )
                     spawn_success += 1
                     self._log_scheduler(
-                        "spawn_result",
+                        "spawning workers",
                         fields={
                             "tick": tick_id,
                             "rollout": rollout_id,

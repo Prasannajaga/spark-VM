@@ -24,6 +24,7 @@ class VMResult:
     status: str
     exit_code: int
     duration_ms: int
+    network: PhaseResult | None = None
     setup: PhaseResult | None = None
     run: PhaseResult | None = None
     timed_out: bool = False

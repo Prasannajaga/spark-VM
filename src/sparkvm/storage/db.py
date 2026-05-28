@@ -40,6 +40,8 @@ def _ensure_workers_columns(conn: sqlite3.Connection) -> None:
         conn.execute("UPDATE workers SET timeout_seconds = 60.0 WHERE timeout_seconds IS NULL")
     if "failure_json" not in cols:
         conn.execute("ALTER TABLE workers ADD COLUMN failure_json TEXT DEFAULT '{}'")
+    if "failure_phase" not in cols:
+        conn.execute("ALTER TABLE workers ADD COLUMN failure_phase TEXT")
 
 
 def init_db(home_dir: str | Path | None = None) -> Path:
