@@ -196,14 +196,45 @@ configure_network() {
     sparkvm_fn_rc=1
   }
 
-  {
-    echo "nameserver ${SPARKVM_DNS:-1.1.1.1}"
-    # Keep DNS failure latency bounded for dynamic workloads.
-    echo "options timeout:2 attempts:2"
-  } > /etc/resolv.conf || {
-    log_console "ERROR" "fn=configure_network action=write_resolv_conf rc=$?"
+  dns_servers_raw="${SPARKVM_DNS_SERVERS:-${SPARKVM_DNS:-1.1.1.1}}"
+  if [ -z "$dns_servers_raw" ]; then
+    dns_servers_raw="1.1.1.1"
+  fi
+
+  : > /etc/resolv.conf || {
+    log_console "ERROR" "fn=configure_network action=truncate_resolv_conf rc=$?"
     sparkvm_fn_rc=1
   }
+
+  wrote_dns=0
+  old_ifs="$IFS"
+  IFS=','
+  for dns_server in $dns_servers_raw; do
+    if [ -z "$dns_server" ]; then
+      continue
+    fi
+    echo "nameserver $dns_server" >> /etc/resolv.conf || {
+      log_console "ERROR" "fn=configure_network action=append_resolver dns=${dns_server} rc=$?"
+      sparkvm_fn_rc=1
+    }
+    wrote_dns=1
+  done
+  IFS="$old_ifs"
+
+  if [ "$wrote_dns" -eq 0 ]; then
+    echo "nameserver 1.1.1.1" >> /etc/resolv.conf || {
+      log_console "ERROR" "fn=configure_network action=append_default_resolver rc=$?"
+      sparkvm_fn_rc=1
+    }
+  fi
+
+  # Keep DNS failure latency bounded for dynamic workloads.
+  echo "options timeout:2 attempts:2" >> /etc/resolv.conf || {
+    log_console "ERROR" "fn=configure_network action=append_resolver_options rc=$?"
+    sparkvm_fn_rc=1
+  }
+
+  log_console "INFO" "fn=configure_network dns_servers=${dns_servers_raw}"
 
   log_fn_end "configure_network" "$sparkvm_fn_rc"
   return "$?"

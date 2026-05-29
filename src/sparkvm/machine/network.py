@@ -19,7 +19,7 @@ from ..core.fsops import write_json_atomic, write_text
 from ..core.utils import has_network_privileges
 from ..storage.db import state_db_path
 
-from ..core.constants import NET_SETUP_PRIVILEGE_MESSAGE
+from ..core.constants import DEFAULT_CNI_SUBNET, NET_SETUP_PRIVILEGE_MESSAGE
 
 
 DEFAULT_NETWORK_NAME = "sparkvm"
@@ -74,11 +74,17 @@ class NetworkConfig:
     dns: str
     raw_result: dict[str, Any]
     ip_source: str
+    dns_servers: tuple[str, ...]
     diagnostics: dict[str, str] | None = None
 
 
 def render_network_env_file(config: NetworkConfig) -> str:
-    dns = config.dns.strip() if config.dns.strip() else DEFAULT_DNS
+    dns_servers = [item.strip() for item in config.dns_servers if _is_usable_guest_dns_nameserver(item)]
+    if not dns_servers and _is_usable_guest_dns_nameserver(config.dns):
+        dns_servers = [config.dns.strip()]
+    if not dns_servers:
+        dns_servers = [DEFAULT_DNS]
+    dns = dns_servers[0]
     lines = [
         "SPARKVM_NET_ENABLED=1",
         "SPARKVM_GUEST_IFACE=eth0",
@@ -86,6 +92,7 @@ def render_network_env_file(config: NetworkConfig) -> str:
         f"SPARKVM_GUEST_IP={config.guest_ip or ''}",
         f"SPARKVM_GATEWAY={config.gateway or ''}",
         f"SPARKVM_DNS={dns}",
+        f"SPARKVM_DNS_SERVERS={','.join(dns_servers)}",
         f"SPARKVM_NET_IP_SOURCE={config.ip_source}",
         "",
     ]
@@ -127,7 +134,7 @@ class NetworkManager:
             cni_add_attempted = True
 
             raw_result = self._parse_json_result(cni_add.stdout)
-            guest_ip, guest_cidr, gateway, dns, ip_source = self._resolve_network_fields(
+            guest_ip, guest_cidr, gateway, dns, dns_servers, ip_source = self._resolve_network_fields(
                 worker_id=vm_id,
                 namespace_name=namespace_name,
                 raw_result=raw_result,
@@ -149,6 +156,7 @@ class NetworkManager:
                 dns=dns,
                 raw_result=raw_result,
                 ip_source=ip_source,
+                dns_servers=dns_servers,
                 diagnostics=diagnostics.to_payloads(),
             )
             self._persist_network_artifacts(worker_id=vm_id, raw_result=raw_result, diagnostics=diagnostics)
@@ -174,6 +182,7 @@ class NetworkManager:
                         dns=DEFAULT_DNS,
                         raw_result={},
                         ip_source="stdout",
+                        dns_servers=(DEFAULT_DNS,),
                         diagnostics=diagnostics.to_payloads(),
                     )
                 )
@@ -248,6 +257,95 @@ class NetworkManager:
             raise NetworkSetupError(
                 f"Network setup failed. Missing CNI config: {config_path}. Run `sparkvm setup`."
             )
+
+        if _auto_egress_rule_management_enabled():
+            subnet = self._resolve_cni_subnet(config_path)
+            self._ensure_host_egress_rules(subnet)
+
+    def _resolve_cni_subnet(self, config_path: Path) -> str:
+        fallback = DEFAULT_CNI_SUBNET
+        try:
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+        except Exception:
+            return fallback
+
+        candidates: list[str] = []
+
+        if isinstance(payload, dict):
+            plugins = payload.get("plugins")
+            if isinstance(plugins, list):
+                for plugin in plugins:
+                    if not isinstance(plugin, dict):
+                        continue
+                    ipam = plugin.get("ipam")
+                    if not isinstance(ipam, dict):
+                        continue
+                    subnet_value = ipam.get("subnet")
+                    if isinstance(subnet_value, str) and subnet_value.strip():
+                        candidates.append(subnet_value.strip())
+
+            ipam = payload.get("ipam")
+            if isinstance(ipam, dict):
+                subnet_value = ipam.get("subnet")
+                if isinstance(subnet_value, str) and subnet_value.strip():
+                    candidates.append(subnet_value.strip())
+
+        for raw in candidates:
+            try:
+                network = ipaddress.ip_network(raw, strict=False)
+            except ValueError:
+                continue
+            if network.version == 4:
+                return str(network)
+        return fallback
+
+    def _ensure_host_egress_rules(self, subnet: str) -> None:
+        # Ensure host forwarding is enabled for guest traffic.
+        ip_forward_value = Path("/proc/sys/net/ipv4/ip_forward")
+        try:
+            current = ip_forward_value.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            current = ""
+        if current != "1":
+            self._run_checked(["sysctl", "-w", "net.ipv4.ip_forward=1"])
+
+        self._ensure_iptables_rule(
+            table="nat",
+            append_args=["POSTROUTING", "-s", subnet, "!", "-d", "224.0.0.0/4", "-j", "MASQUERADE"],
+        )
+        self._ensure_iptables_rule(
+            table="filter",
+            append_args=["FORWARD", "-s", subnet, "-j", "ACCEPT"],
+        )
+        self._ensure_iptables_rule(
+            table="filter",
+            append_args=["FORWARD", "-d", subnet, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"],
+        )
+
+    def _ensure_iptables_rule(self, *, table: str, append_args: list[str]) -> None:
+        check_cmd = ["iptables", "-t", table, "-C", *append_args]
+        try:
+            check_completed = subprocess.run(check_cmd, check=False, capture_output=True, text=True)
+        except FileNotFoundError as exc:
+            raise NetworkSetupError("Network setup failed. Required command not found: iptables") from exc
+        stderr = (check_completed.stderr or "").strip().lower()
+
+        if check_completed.returncode == 0 and "bad rule" not in stderr:
+            return
+
+        known_not_found = check_completed.returncode == 1 or "bad rule" in stderr or "no chain/target/match" in stderr
+        if check_completed.returncode != 0 and not known_not_found:
+            detail = (check_completed.stderr or check_completed.stdout or "iptables check failed").strip()
+            raise NetworkSetupError(f"Failed checking host firewall rule: {' '.join(check_cmd)}\n{detail}")
+
+        add_cmd = ["iptables", "-t", table, "-A", *append_args]
+        try:
+            add_completed = subprocess.run(add_cmd, check=False, capture_output=True, text=True)
+        except FileNotFoundError as exc:
+            raise NetworkSetupError("Network setup failed. Required command not found: iptables") from exc
+        if add_completed.returncode != 0:
+            detail = (add_completed.stderr or add_completed.stdout or "iptables append failed").strip()
+            raise NetworkSetupError(f"Failed installing host firewall rule: {' '.join(add_cmd)}\n{detail}")
 
     def _cni_env(self) -> dict[str, str]:
         env = os.environ.copy()
@@ -327,12 +425,13 @@ class NetworkManager:
         namespace_name: str,
         raw_result: dict[str, Any],
         diagnostics: NetworkDiagnostics,
-    ) -> tuple[str, str, str | None, str, str]:
-        dns = self._extract_dns(raw_result)
+    ) -> tuple[str, str, str | None, str, tuple[str, ...], str]:
+        dns_servers = self._extract_dns_servers(raw_result)
+        dns = dns_servers[0] if dns_servers else DEFAULT_DNS
         from_stdout = self._extract_ipv4_from_stdout(raw_result)
         if from_stdout is not None:
             guest_ip, guest_cidr, gateway = from_stdout
-            return guest_ip, guest_cidr, gateway, dns, "stdout"
+            return guest_ip, guest_cidr, gateway, dns, dns_servers, "stdout"
 
         guest_ip, guest_cidr = self._resolve_ipv4_from_netns(namespace_name=namespace_name, diagnostics=diagnostics)
         gateway = self._resolve_gateway_from_netns(namespace_name=namespace_name, diagnostics=diagnostics)
@@ -342,7 +441,7 @@ class NetworkManager:
                 "CNI ADD completed but SparkVM could not resolve guest IPv4 from CNI stdout or netns inspection.\n"
                 f"Diagnostics: {', '.join(f'{name}={path}' for name, path in diag_paths.items())}"
             )
-        return guest_ip, guest_cidr, gateway, dns, "netns"
+        return guest_ip, guest_cidr, gateway, dns, dns_servers, "netns"
 
     def _extract_ipv4_from_stdout(self, payload: dict[str, Any]) -> tuple[str, str, str | None] | None:
         ips = payload.get("ips")
@@ -371,18 +470,34 @@ class NetworkManager:
             gateway = None
         return guest_ip, guest_cidr, gateway
 
-    def _extract_dns(self, payload: dict[str, Any]) -> str:
-        dns_value = DEFAULT_DNS
+    def _extract_dns_servers(self, payload: dict[str, Any]) -> tuple[str, ...]:
+        seen: set[str] = set()
+        ordered: list[str] = []
+
+        def add_candidate(raw: str) -> None:
+            candidate = raw.strip()
+            if not _is_usable_guest_dns_nameserver(candidate):
+                return
+            if candidate in seen:
+                return
+            seen.add(candidate)
+            ordered.append(candidate)
+
         dns = payload.get("dns")
         if isinstance(dns, dict):
             nameservers = dns.get("nameservers")
             if isinstance(nameservers, list):
                 for item in nameservers:
-                    if isinstance(item, str) and _is_usable_guest_dns_nameserver(item):
-                        dns_value = item.strip()
-                        break
+                    if isinstance(item, str):
+                        add_candidate(item)
 
-        return dns_value
+        for path in _host_resolver_candidate_paths():
+            for nameserver in _nameservers_from_resolv_conf(path):
+                add_candidate(nameserver)
+
+        if not ordered:
+            ordered.append(DEFAULT_DNS)
+        return tuple(ordered)
 
     def _resolve_ipv4_from_netns(self, *, namespace_name: str, diagnostics: NetworkDiagnostics) -> tuple[str | None, str | None]:
         completed = self._run_checked(["ip", "netns", "exec", namespace_name, "ip", "-j", "-4", "addr"])
@@ -525,7 +640,7 @@ class NetworkManager:
             cni_add = self._run_cni("add", namespace_path=namespace_path, diagnostics=diagnostics)
             cni_add_attempted = True
             raw_result = self._parse_json_result(cni_add.stdout)
-            guest_ip, guest_cidr, gateway, dns, ip_source = self._resolve_network_fields(
+            guest_ip, guest_cidr, gateway, dns, dns_servers, ip_source = self._resolve_network_fields(
                 worker_id="smoke",
                 namespace_name=namespace_name,
                 raw_result=raw_result,
@@ -546,6 +661,7 @@ class NetworkManager:
                 dns=dns,
                 raw_result=raw_result,
                 ip_source=ip_source,
+                dns_servers=dns_servers,
                 diagnostics=diagnostics.to_payloads(),
             )
         finally:
@@ -678,6 +794,43 @@ def _is_usable_guest_dns_nameserver(value: str) -> bool:
     if ip.version != 4:
         return False
     return not ip.is_loopback
+
+
+def _host_resolver_candidate_paths() -> tuple[Path, ...]:
+    return (
+        Path("/etc/resolv.conf"),
+        Path("/run/systemd/resolve/resolv.conf"),
+        Path("/run/resolvconf/resolv.conf"),
+    )
+
+
+def _nameservers_from_resolv_conf(path: Path) -> tuple[str, ...]:
+    if not path.exists() or not path.is_file():
+        return ()
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ()
+
+    nameservers: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        if parts[0].lower() != "nameserver":
+            continue
+        candidate = parts[1].strip()
+        if _is_usable_guest_dns_nameserver(candidate):
+            nameservers.append(candidate)
+    return tuple(nameservers)
+
+
+def _auto_egress_rule_management_enabled() -> bool:
+    raw = os.getenv("SPARKVM_AUTO_MANAGE_HOST_EGRESS", "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
 
 
 __all__ = [
