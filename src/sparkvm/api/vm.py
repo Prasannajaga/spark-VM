@@ -868,6 +868,9 @@ class SparkVM:
         execution_disk: ExecutionDisk,
     ) -> None:
         errors: list[Exception] = []
+        firecracker_log_path = worker_dir / "firecracker.log"
+        worker_rootfs_path = worker_dir / "rootfs.ext4"
+        mount_base = worker_dir / "mnt"
 
         if firecracker is not None:
             try:
@@ -887,9 +890,18 @@ class SparkVM:
             errors.append(exc)
 
         try:
-            remove_tree(worker_dir, ignore_errors=False)
+            remove_file(worker_rootfs_path, missing_ok=True)
         except OSError as exc:
             errors.append(exc)
+
+        if mount_base.exists():
+            try:
+                remove_tree(mount_base, ignore_errors=False)
+            except OSError as exc:
+                errors.append(exc)
+
+        # Keep firecracker.log for post-success debugging while redacting runtime secrets.
+        redact_file_in_place(firecracker_log_path, list(self._env.values()))
 
         if errors:
             raise CleanupError(f"Worker cleanup failed for {worker_dir}: {errors[0]}")
