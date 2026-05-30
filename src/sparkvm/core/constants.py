@@ -47,6 +47,16 @@ NET_SETUP_PRIVILEGE_MESSAGE = (
     "For example:\n"
     "  sudo sparkvm run ...\n"
 )
+<<<<<<< Updated upstream
+=======
+DEFAULT_CNI_NETWORK_NAME = "sparkvm"
+DEFAULT_CNI_VERSION = "0.4.0"
+SUPPORTED_CNI_VERSIONS = ("0.3.0", "0.3.1", "0.4.0", "1.0.0", "1.1.0")
+DEFAULT_CNI_SUBNET = "172.31.0.0/16"
+DEFAULT_CNI_ROUTE = "0.0.0.0/0"
+DEFAULT_CNI_IPV6_ROUTE = "::/0"
+DEFAULT_CNI_RESOLV_CONF = "/etc/resolv.conf"
+>>>>>>> Stashed changes
 
 # --- Images ---
 BOOT_ARGS = "console=ttyS0 reboot=k panic=1 pci=off init=/init"
@@ -138,9 +148,15 @@ configure_network() {
 
   if ! command -v ip >/dev/null 2>&1; then
     echo "SparkVM: ip command missing; network unavailable" > /dev/console
-    return 0
+    return 1
   fi
 
+  if [ -z "${SPARKVM_GUEST_CIDR:-}" ]; then
+    echo "SparkVM: guest CIDR missing; network unavailable" > /dev/console
+    return 1
+  fi
+
+<<<<<<< Updated upstream
   ip link set eth0 up
   ip addr add "$SPARKVM_GUEST_CIDR" dev eth0
   ip route add default via "$SPARKVM_HOST_IP" dev eth0
@@ -150,6 +166,77 @@ configure_network() {
   else
     echo "nameserver 1.1.1.1" > /etc/resolv.conf 2>/dev/null || true
   fi
+=======
+  ip link set lo up || true
+  if [ -w "/proc/sys/net/ipv6/conf/${SPARKVM_GUEST_IFACE:-eth0}/disable_ipv6" ]; then
+    echo 0 > "/proc/sys/net/ipv6/conf/${SPARKVM_GUEST_IFACE:-eth0}/disable_ipv6" || true
+  fi
+  if [ -w "/proc/sys/net/ipv6/conf/${SPARKVM_GUEST_IFACE:-eth0}/accept_dad" ]; then
+    echo 0 > "/proc/sys/net/ipv6/conf/${SPARKVM_GUEST_IFACE:-eth0}/accept_dad" || true
+  fi
+  if ! ip link set "${SPARKVM_GUEST_IFACE:-eth0}" up; then
+    echo "SparkVM: failed to bring up ${SPARKVM_GUEST_IFACE:-eth0}" > /dev/console
+    return 1
+  fi
+  ip addr flush dev "${SPARKVM_GUEST_IFACE:-eth0}" || true
+  if ! ip addr add "$SPARKVM_GUEST_CIDR" dev "${SPARKVM_GUEST_IFACE:-eth0}"; then
+    echo "SparkVM: failed to assign ${SPARKVM_GUEST_CIDR} to ${SPARKVM_GUEST_IFACE:-eth0}" > /dev/console
+    return 1
+  fi
+
+  if [ -n "${SPARKVM_GATEWAY:-}" ]; then
+    if ! ip route replace default via "$SPARKVM_GATEWAY" dev "${SPARKVM_GUEST_IFACE:-eth0}"; then
+      echo "SparkVM: failed to configure default route via ${SPARKVM_GATEWAY}" > /dev/console
+      return 1
+    fi
+  fi
+
+  if [ -n "${SPARKVM_GUEST_IPV6_CIDR:-}" ]; then
+    if ! ip -6 addr add "$SPARKVM_GUEST_IPV6_CIDR" dev "${SPARKVM_GUEST_IFACE:-eth0}"; then
+      echo "SparkVM: failed to assign ${SPARKVM_GUEST_IPV6_CIDR} to ${SPARKVM_GUEST_IFACE:-eth0}" > /dev/console
+      return 1
+    fi
+    if ! wait_ipv6_address_ready "${SPARKVM_GUEST_IFACE:-eth0}" "$SPARKVM_GUEST_IPV6_CIDR"; then
+      return 1
+    fi
+  fi
+
+  if [ -n "${SPARKVM_GATEWAY_IPV6:-}" ]; then
+    if ! ip -6 route replace default via "$SPARKVM_GATEWAY_IPV6" dev "${SPARKVM_GUEST_IFACE:-eth0}"; then
+      echo "SparkVM: failed to configure IPv6 default route via ${SPARKVM_GATEWAY_IPV6}" > /dev/console
+      return 1
+    fi
+  fi
+
+  mkdir -p /etc
+  {
+    echo "nameserver ${SPARKVM_DNS:-1.1.1.1}"
+    # Keep DNS failure latency bounded for dynamic workloads.
+    echo "options timeout:2 attempts:2"
+  } > /etc/resolv.conf || return 1
+}
+
+wait_ipv6_address_ready() {
+  iface="$1"
+  cidr="$2"
+
+  if ! command -v grep >/dev/null 2>&1; then
+    return 0
+  fi
+
+  attempts=0
+  while [ "$attempts" -lt 20 ]; do
+    if ip -6 addr show dev "$iface" | grep "$cidr" | grep -q tentative; then
+      sleep 0.1
+      attempts=$((attempts + 1))
+      continue
+    fi
+    return 0
+  done
+
+  echo "SparkVM: IPv6 address still tentative after wait: ${cidr}" > /dev/console
+  return 1
+>>>>>>> Stashed changes
 }
 
 load_runtime_env() {
@@ -241,6 +328,47 @@ run_phase() {
   return "$code"
 }
 
+collect_network_probes() {
+  if [ -n "${SPARKVM_GATEWAY:-}" ]; then
+    echo "[network] route to gateway ${SPARKVM_GATEWAY}"
+    ip route get "$SPARKVM_GATEWAY" 2>&1 || true
+  fi
+
+  if [ -n "${SPARKVM_DNS:-}" ]; then
+    echo "[network] route to dns ${SPARKVM_DNS}"
+    ip route get "$SPARKVM_DNS" 2>&1 || true
+  fi
+
+  if [ -n "${SPARKVM_GATEWAY_IPV6:-}" ]; then
+    echo "[network] IPv6 route to gateway ${SPARKVM_GATEWAY_IPV6}"
+    ip -6 route get "$SPARKVM_GATEWAY_IPV6" 2>&1 || true
+  fi
+
+  if command -v ping >/dev/null 2>&1; then
+    if [ -n "${SPARKVM_GATEWAY:-}" ]; then
+      echo "[network] ping gateway ${SPARKVM_GATEWAY}"
+      ping -c 1 -W 2 "$SPARKVM_GATEWAY" 2>&1 || true
+    fi
+    if [ -n "${SPARKVM_DNS:-}" ]; then
+      echo "[network] ping dns ${SPARKVM_DNS}"
+      ping -c 1 -W 2 "$SPARKVM_DNS" 2>&1 || true
+    fi
+    if [ -n "${SPARKVM_GATEWAY_IPV6:-}" ]; then
+      echo "[network] ping IPv6 gateway ${SPARKVM_GATEWAY_IPV6}"
+      ping -6 -c 1 -W 2 "$SPARKVM_GATEWAY_IPV6" 2>&1 || true
+    fi
+  else
+    echo "[network] ping command missing"
+  fi
+
+  if command -v getent >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
+    echo "[network] resolve api.github.com"
+    timeout 5 getent hosts api.github.com 2>&1 || true
+  else
+    echo "[network] getent or timeout command missing; DNS probe skipped"
+  fi
+}
+
 collect_network_diagnostics() {
   if [ "${SPARKVM_NET_ENABLED:-0}" != "1" ]; then
     return 0
@@ -255,10 +383,14 @@ collect_network_diagnostics() {
   if command -v ip >/dev/null 2>&1; then
     ip addr > /dev/console 2>&1 || true
     ip route > /dev/console 2>&1 || true
+    ip -6 route > /dev/console 2>&1 || true
   else
     echo "SparkVM: ip command missing; network diagnostics limited" > /dev/console
   fi
   cat /etc/resolv.conf > /dev/console 2>&1 || true
+  if command -v ip >/dev/null 2>&1; then
+    collect_network_probes > /dev/console 2>&1 || true
+  fi
   echo "SparkVM: network diagnostics end" > /dev/console
 
   {
@@ -268,6 +400,11 @@ collect_network_diagnostics() {
       echo ""
       echo "[network] ip route"
       ip route
+      echo ""
+      echo "[network] ip -6 route"
+      ip -6 route
+      echo ""
+      collect_network_probes
       echo ""
     else
       echo "[network] ip command missing"
@@ -280,7 +417,11 @@ collect_network_diagnostics() {
 prepare_linux_runtime
 mount_job_disk
 load_runtime_env
-configure_network
+if ! configure_network; then
+  collect_network_diagnostics
+  echo 125 > /job/results/final_exit_code
+  shutdown_vm
+fi
 collect_network_diagnostics
 
 cd /job
@@ -320,8 +461,13 @@ FIRECRACKER_VERSION = "v1.15.1"
 KERNEL_FILENAME = "vmlinux"
 SUPPORTED_ARCHES = {"x86_64", "aarch64"}
 REQUIRED_SETUP_TOOLS = ("curl", "tar")
+<<<<<<< Updated upstream
 DOCTOR_TOOLS = ("docker", "dd", "mkfs.ext4", "mount", "umount", "debugfs", "ip", "iptables", "sysctl")
 DOCTOR_NETWORK_TOOLS = ("ip", "iptables", "sysctl")
+=======
+DOCTOR_TOOLS = ("docker", "dd", "mkfs.ext4", "mount", "umount", "debugfs", "ip")
+DOCTOR_NETWORK_TOOLS = ("ip", "iptables", "ip6tables", "sysctl")
+>>>>>>> Stashed changes
 
 ARCH_ALIASES = {
     "amd64": "x86_64",

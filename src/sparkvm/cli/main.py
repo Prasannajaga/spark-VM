@@ -105,6 +105,7 @@ def build_parser() -> argparse.ArgumentParser:
     workers_subparsers.add_parser("list", help="List preserved workers")
     workers_run = workers_subparsers.add_parser("run", help="Run a rollout id")
     workers_run.add_argument("rollout_id", help="Rollout id")
+<<<<<<< Updated upstream
     workers_run.add_argument("--vcpu", type=int, default=2, help="vCPU count")
     workers_run.add_argument("--memory", default="2G", help="Memory (e.g. 2G)")
     workers_run.add_argument("--disk", default="4G", help="Execution disk (e.g. 4G)")
@@ -122,6 +123,18 @@ def build_parser() -> argparse.ArgumentParser:
         dest="network",
         action="store_false",
         help="Disable network",
+=======
+    workers_run.add_argument("--vcpu", type=int, default=None, help="Override rollout vCPU count")
+    workers_run.add_argument("--memory", default=None, help="Override rollout memory (e.g. 2G)")
+    workers_run.add_argument("--disk", default=None, help="Override rollout execution disk (e.g. 4G)")
+    workers_run.add_argument("--timeout", type=float, default=None, help="Override rollout timeout seconds")
+    workers_run.add_argument(
+        "--network",
+        type=parse_bool_flag,
+        default=None,
+        metavar="{true,false}",
+        help="Override rollout network setting",
+>>>>>>> Stashed changes
     )
     workers_run.add_argument(
         "--env",
@@ -192,11 +205,11 @@ def run_rollout_execute(
     home_dir: str | None,
     *,
     rollout_id: str,
-    vcpu: int,
-    memory: str,
-    disk: str,
-    timeout: float,
-    network: bool,
+    vcpu: int | None,
+    memory: str | None,
+    disk: str | None,
+    timeout: float | None,
+    network: bool | None,
     env_pairs: list[str] | None,
 ) -> int:
     if home_dir is not None:
@@ -207,7 +220,31 @@ def run_rollout_execute(
     env = parse_env_vars(env_pairs)
     from sparkvm.api.vm import SparkVM
 
-    vm = SparkVM(vcpu=vcpu, memory=memory, disk=disk, timeout=timeout, network=network, env=env)
+    rollout = Rollouts(home_dir=home_dir).get(rollout_id)
+    vm_config = dict(rollout.vm_config)
+    if vcpu is not None:
+        vm_config["vcpu"] = vcpu
+    if memory is not None:
+        vm_config["memory"] = memory
+    if disk is not None:
+        vm_config["disk"] = disk
+    if timeout is not None:
+        vm_config["timeout"] = timeout
+    if network is not None:
+        vm_config["network"] = network
+    if env:
+        merged_env = dict(vm_config.get("env", {}))
+        merged_env.update(env)
+        vm_config["env"] = merged_env
+
+    vm = SparkVM(
+        vcpu=int(vm_config["vcpu"]),
+        memory=str(vm_config["memory"]),
+        disk=str(vm_config["disk"]),
+        timeout=float(vm_config["timeout"]),
+        network=bool(vm_config["network"]),
+        env=dict(vm_config.get("env", {})),
+    )
     result = vm.run(rollout_id)
     print(
         json.dumps(
