@@ -179,6 +179,7 @@ def reset_home(config: SparkVMConfig, *, dry_run: bool = False) -> None:
     home_dir = config.home_dir
     if not home_dir.exists():
         return
+    static_dirs = {"bin", "images", "cni"}
 
     # Ensure mounted worker subpaths are unmounted before deleting home contents.
     workers_dir_path = config.workers_dir
@@ -188,6 +189,8 @@ def reset_home(config: SparkVMConfig, *, dry_run: bool = False) -> None:
                 unmount_under(vm_dir)
 
     for child in home_dir.iterdir():
+        if child.is_dir() and child.name in static_dirs:
+            continue
         if dry_run:
             continue
         if child.is_dir():
