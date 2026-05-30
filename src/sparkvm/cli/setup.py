@@ -25,14 +25,11 @@ from sparkvm.core.utils import has_cap_net_admin, has_network_privileges as netw
 
 from sparkvm.core.constants import (
     ARCH_ALIASES as _ARCH_ALIASES,
-<<<<<<< Updated upstream
-=======
     DEFAULT_CNI_NETWORK_NAME,
     DEFAULT_CNI_IPV6_ROUTE,
     DEFAULT_CNI_RESOLV_CONF,
     DEFAULT_CNI_ROUTE,
     DEFAULT_CNI_SUBNET,
->>>>>>> Stashed changes
     DOCTOR_NETWORK_TOOLS as _DOCTOR_NETWORK_TOOLS,
     DOCTOR_TOOLS as _DOCTOR_TOOLS,
     FIRECRACKER_VERSION,
@@ -176,8 +173,6 @@ def host_tool_status() -> dict[str, bool]:
     return {tool: shutil.which(tool) is not None for tool in sorted(tools)}
 
 
-<<<<<<< Updated upstream
-=======
 REQUIRED_CNI_BINARIES = ("cnitool", "ptp", "host-local", "firewall", "tc-redirect-tap")
 _CNI_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _PINNED_CNI_VERSION = "0.4.0"
@@ -523,7 +518,6 @@ def ensure_cni_layout(
         emit_progress(progress, f"CNI binaries ready under: {paths.cni_bin_dir}")
 
 
->>>>>>> Stashed changes
 
 
 
@@ -535,9 +529,6 @@ def require_setup_tools() -> None:
 
 
 def download_with_curl(url: str, out_path: Path) -> None:
-<<<<<<< Updated upstream
-    run_checked(["curl", "-fL", url, "-o", str(out_path)], error_factory=SparkVMSetupError)
-=======
     ensure_dir(out_path.parent, exist_ok=True)
     partial_path = out_path.with_suffix(out_path.suffix + ".part")
     attempts: list[list[str]] = [
@@ -605,7 +596,6 @@ def download_with_curl(url: str, out_path: Path) -> None:
             last_error = exc
 
     raise SparkVMSetupError(f"Failed to download {url} after multiple attempts.") from last_error
->>>>>>> Stashed changes
 
 
 def firecracker_release_url(arch: str) -> str:

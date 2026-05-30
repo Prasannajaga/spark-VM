@@ -105,25 +105,6 @@ def build_parser() -> argparse.ArgumentParser:
     workers_subparsers.add_parser("list", help="List preserved workers")
     workers_run = workers_subparsers.add_parser("run", help="Run a rollout id")
     workers_run.add_argument("rollout_id", help="Rollout id")
-<<<<<<< Updated upstream
-    workers_run.add_argument("--vcpu", type=int, default=2, help="vCPU count")
-    workers_run.add_argument("--memory", default="2G", help="Memory (e.g. 2G)")
-    workers_run.add_argument("--disk", default="4G", help="Execution disk (e.g. 4G)")
-    workers_run.add_argument("--timeout", type=float, default=60.0, help="Timeout seconds")
-    workers_network_group = workers_run.add_mutually_exclusive_group()
-    workers_network_group.add_argument(
-        "--network",
-        dest="network",
-        action="store_true",
-        default=True,
-        help="Enable network (default: enabled)",
-    )
-    workers_network_group.add_argument(
-        "--no-network",
-        dest="network",
-        action="store_false",
-        help="Disable network",
-=======
     workers_run.add_argument("--vcpu", type=int, default=None, help="Override rollout vCPU count")
     workers_run.add_argument("--memory", default=None, help="Override rollout memory (e.g. 2G)")
     workers_run.add_argument("--disk", default=None, help="Override rollout execution disk (e.g. 4G)")
@@ -134,7 +115,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="{true,false}",
         help="Override rollout network setting",
->>>>>>> Stashed changes
     )
     workers_run.add_argument(
         "--env",

@@ -47,8 +47,6 @@ NET_SETUP_PRIVILEGE_MESSAGE = (
     "For example:\n"
     "  sudo sparkvm run ...\n"
 )
-<<<<<<< Updated upstream
-=======
 DEFAULT_CNI_NETWORK_NAME = "sparkvm"
 DEFAULT_CNI_VERSION = "0.4.0"
 SUPPORTED_CNI_VERSIONS = ("0.3.0", "0.3.1", "0.4.0", "1.0.0", "1.1.0")
@@ -56,7 +54,6 @@ DEFAULT_CNI_SUBNET = "172.31.0.0/16"
 DEFAULT_CNI_ROUTE = "0.0.0.0/0"
 DEFAULT_CNI_IPV6_ROUTE = "::/0"
 DEFAULT_CNI_RESOLV_CONF = "/etc/resolv.conf"
->>>>>>> Stashed changes
 
 # --- Images ---
 BOOT_ARGS = "console=ttyS0 reboot=k panic=1 pci=off init=/init"
@@ -156,17 +153,6 @@ configure_network() {
     return 1
   fi
 
-<<<<<<< Updated upstream
-  ip link set eth0 up
-  ip addr add "$SPARKVM_GUEST_CIDR" dev eth0
-  ip route add default via "$SPARKVM_HOST_IP" dev eth0
-
-  if [ -n "${SPARKVM_DNS:-}" ]; then
-    echo "nameserver ${SPARKVM_DNS}" > /etc/resolv.conf 2>/dev/null || true
-  else
-    echo "nameserver 1.1.1.1" > /etc/resolv.conf 2>/dev/null || true
-  fi
-=======
   ip link set lo up || true
   if [ -w "/proc/sys/net/ipv6/conf/${SPARKVM_GUEST_IFACE:-eth0}/disable_ipv6" ]; then
     echo 0 > "/proc/sys/net/ipv6/conf/${SPARKVM_GUEST_IFACE:-eth0}/disable_ipv6" || true
@@ -236,7 +222,6 @@ wait_ipv6_address_ready() {
 
   echo "SparkVM: IPv6 address still tentative after wait: ${cidr}" > /dev/console
   return 1
->>>>>>> Stashed changes
 }
 
 load_runtime_env() {
@@ -461,13 +446,8 @@ FIRECRACKER_VERSION = "v1.15.1"
 KERNEL_FILENAME = "vmlinux"
 SUPPORTED_ARCHES = {"x86_64", "aarch64"}
 REQUIRED_SETUP_TOOLS = ("curl", "tar")
-<<<<<<< Updated upstream
-DOCTOR_TOOLS = ("docker", "dd", "mkfs.ext4", "mount", "umount", "debugfs", "ip", "iptables", "sysctl")
-DOCTOR_NETWORK_TOOLS = ("ip", "iptables", "sysctl")
-=======
 DOCTOR_TOOLS = ("docker", "dd", "mkfs.ext4", "mount", "umount", "debugfs", "ip")
 DOCTOR_NETWORK_TOOLS = ("ip", "iptables", "ip6tables", "sysctl")
->>>>>>> Stashed changes
 
 ARCH_ALIASES = {
     "amd64": "x86_64",
