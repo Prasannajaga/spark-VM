@@ -51,10 +51,11 @@ DEFAULT_CNI_VERSION = "0.4.0"
 SUPPORTED_CNI_VERSIONS = ("0.3.0", "0.3.1", "0.4.0", "1.0.0", "1.1.0")
 DEFAULT_CNI_SUBNET = "172.31.0.0/16"
 DEFAULT_CNI_ROUTE = "0.0.0.0/0"
+DEFAULT_CNI_IPV6_ROUTE = "::/0"
 DEFAULT_CNI_RESOLV_CONF = "/etc/resolv.conf"
 
 # --- Images ---
-BOOT_ARGS = "console=ttyS0 reboot=k panic=1 pci=off init=/init"
+BOOT_ARGS = "console=ttyS0 reboot=k panic=1 pci=off init=/init random.trust_cpu=on"
 DEBIAN_BOOT_ARGS = BOOT_ARGS
 DEBIAN_MINBASE_IMAGE_ID = "debian-minbase"
 
@@ -143,16 +144,53 @@ configure_network() {
 
   if ! command -v ip >/dev/null 2>&1; then
     echo "SparkVM: ip command missing; network unavailable" > /dev/console
-    return 0
+    return 1
+  fi
+
+  if [ -z "${SPARKVM_GUEST_CIDR:-}" ]; then
+    echo "SparkVM: guest CIDR missing; network unavailable" > /dev/console
+    return 1
   fi
 
   ip link set lo up || true
-  ip link set "${SPARKVM_GUEST_IFACE:-eth0}" up
+  if [ -w "/proc/sys/net/ipv6/conf/${SPARKVM_GUEST_IFACE:-eth0}/disable_ipv6" ]; then
+    echo 0 > "/proc/sys/net/ipv6/conf/${SPARKVM_GUEST_IFACE:-eth0}/disable_ipv6" || true
+  fi
+  if [ -w "/proc/sys/net/ipv6/conf/${SPARKVM_GUEST_IFACE:-eth0}/accept_dad" ]; then
+    echo 0 > "/proc/sys/net/ipv6/conf/${SPARKVM_GUEST_IFACE:-eth0}/accept_dad" || true
+  fi
+  if ! ip link set "${SPARKVM_GUEST_IFACE:-eth0}" up; then
+    echo "SparkVM: failed to bring up ${SPARKVM_GUEST_IFACE:-eth0}" > /dev/console
+    return 1
+  fi
   ip addr flush dev "${SPARKVM_GUEST_IFACE:-eth0}" || true
-  ip addr add "$SPARKVM_GUEST_CIDR" dev "${SPARKVM_GUEST_IFACE:-eth0}"
+  if ! ip addr add "$SPARKVM_GUEST_CIDR" dev "${SPARKVM_GUEST_IFACE:-eth0}"; then
+    echo "SparkVM: failed to assign ${SPARKVM_GUEST_CIDR} to ${SPARKVM_GUEST_IFACE:-eth0}" > /dev/console
+    return 1
+  fi
 
   if [ -n "${SPARKVM_GATEWAY:-}" ]; then
-    ip route add default via "$SPARKVM_GATEWAY" dev "${SPARKVM_GUEST_IFACE:-eth0}" || true
+    if ! ip route replace default via "$SPARKVM_GATEWAY" dev "${SPARKVM_GUEST_IFACE:-eth0}"; then
+      echo "SparkVM: failed to configure default route via ${SPARKVM_GATEWAY}" > /dev/console
+      return 1
+    fi
+  fi
+
+  if [ -n "${SPARKVM_GUEST_IPV6_CIDR:-}" ]; then
+    if ! ip -6 addr add "$SPARKVM_GUEST_IPV6_CIDR" dev "${SPARKVM_GUEST_IFACE:-eth0}"; then
+      echo "SparkVM: failed to assign ${SPARKVM_GUEST_IPV6_CIDR} to ${SPARKVM_GUEST_IFACE:-eth0}" > /dev/console
+      return 1
+    fi
+    if ! wait_ipv6_address_ready "${SPARKVM_GUEST_IFACE:-eth0}" "$SPARKVM_GUEST_IPV6_CIDR"; then
+      return 1
+    fi
+  fi
+
+  if [ -n "${SPARKVM_GATEWAY_IPV6:-}" ]; then
+    if ! ip -6 route replace default via "$SPARKVM_GATEWAY_IPV6" dev "${SPARKVM_GUEST_IFACE:-eth0}"; then
+      echo "SparkVM: failed to configure IPv6 default route via ${SPARKVM_GATEWAY_IPV6}" > /dev/console
+      return 1
+    fi
   fi
 
   mkdir -p /etc
@@ -160,7 +198,29 @@ configure_network() {
     echo "nameserver ${SPARKVM_DNS:-1.1.1.1}"
     # Keep DNS failure latency bounded for dynamic workloads.
     echo "options timeout:2 attempts:2"
-  } > /etc/resolv.conf
+  } > /etc/resolv.conf || return 1
+}
+
+wait_ipv6_address_ready() {
+  iface="$1"
+  cidr="$2"
+
+  if ! command -v grep >/dev/null 2>&1; then
+    return 0
+  fi
+
+  attempts=0
+  while [ "$attempts" -lt 20 ]; do
+    if ip -6 addr show dev "$iface" | grep "$cidr" | grep -q tentative; then
+      sleep 0.1
+      attempts=$((attempts + 1))
+      continue
+    fi
+    return 0
+  done
+
+  echo "SparkVM: IPv6 address still tentative after wait: ${cidr}" > /dev/console
+  return 1
 }
 
 load_runtime_env() {
@@ -191,6 +251,85 @@ run_with_timeout() {
   echo "SparkVM: timeout command missing; phase timeout disabled" > /dev/console
   sh "$script" > "$out_file" 2> "$err_file"
   return "$?"
+}
+
+wait_for_guest_entropy() {
+  timeout_sec="${SPARKVM_ENTROPY_READY_TIMEOUT_SEC:-15}"
+
+  if [ ! -r /dev/random ]; then
+    echo "SparkVM: entropy readiness skipped; /dev/random missing" > /dev/console
+    return 0
+  fi
+
+  if ! command -v timeout >/dev/null 2>&1; then
+    echo "SparkVM: entropy readiness skipped; timeout command missing" > /dev/console
+    return 0
+  fi
+
+  if timeout "$timeout_sec" sh -c 'dd if=/dev/random of=/dev/null bs=1 count=1 2>/dev/null'; then
+    echo "SparkVM: entropy ready" > /dev/console
+    return 0
+  fi
+
+  echo "SparkVM: entropy not ready after ${timeout_sec}s; TLS workloads may block" > /dev/console
+  if [ "${SPARKVM_REQUIRE_ENTROPY_READY:-0}" = "1" ]; then
+    return 1
+  fi
+  return 0
+}
+
+credit_guest_entropy_seed() {
+  seed_file="/job/.sparkvm/entropy.seed"
+
+  if [ ! -r "$seed_file" ]; then
+    echo "SparkVM: entropy seed missing" > /dev/console
+    return 0
+  fi
+
+  py=""
+  if command -v python3 >/dev/null 2>&1; then
+    py="$(command -v python3)"
+  elif command -v python >/dev/null 2>&1; then
+    py="$(command -v python)"
+  fi
+
+  if [ -z "$py" ]; then
+    cat "$seed_file" > /dev/urandom 2>/dev/null || true
+    rm -f "$seed_file" 2>/dev/null || true
+    echo "SparkVM: entropy seed mixed without credit; python missing" > /dev/console
+    return 0
+  fi
+
+  if "$py" - "$seed_file" <<'PY'
+import fcntl
+import os
+import struct
+import sys
+
+RNDADDENTROPY = 0x40085203
+seed_path = sys.argv[1]
+with open(seed_path, "rb") as seed_file:
+    seed = seed_file.read()
+if not seed:
+    raise SystemExit("empty entropy seed")
+
+payload = struct.pack("ii", len(seed) * 8, len(seed)) + seed
+fd = os.open("/dev/random", os.O_WRONLY)
+try:
+    fcntl.ioctl(fd, RNDADDENTROPY, payload)
+finally:
+    os.close(fd)
+PY
+  then
+    rm -f "$seed_file" 2>/dev/null || true
+    echo "SparkVM: entropy seed credited" > /dev/console
+    return 0
+  fi
+
+  cat "$seed_file" > /dev/urandom 2>/dev/null || true
+  rm -f "$seed_file" 2>/dev/null || true
+  echo "SparkVM: entropy seed credit failed; seed mixed without credit" > /dev/console
+  return 0
 }
 
 redact_to_console() {
@@ -252,6 +391,47 @@ run_phase() {
   return "$code"
 }
 
+collect_network_probes() {
+  if [ -n "${SPARKVM_GATEWAY:-}" ]; then
+    echo "[network] route to gateway ${SPARKVM_GATEWAY}"
+    ip route get "$SPARKVM_GATEWAY" 2>&1 || true
+  fi
+
+  if [ -n "${SPARKVM_DNS:-}" ]; then
+    echo "[network] route to dns ${SPARKVM_DNS}"
+    ip route get "$SPARKVM_DNS" 2>&1 || true
+  fi
+
+  if [ -n "${SPARKVM_GATEWAY_IPV6:-}" ]; then
+    echo "[network] IPv6 route to gateway ${SPARKVM_GATEWAY_IPV6}"
+    ip -6 route get "$SPARKVM_GATEWAY_IPV6" 2>&1 || true
+  fi
+
+  if command -v ping >/dev/null 2>&1; then
+    if [ -n "${SPARKVM_GATEWAY:-}" ]; then
+      echo "[network] ping gateway ${SPARKVM_GATEWAY}"
+      ping -c 1 -W 2 "$SPARKVM_GATEWAY" 2>&1 || true
+    fi
+    if [ -n "${SPARKVM_DNS:-}" ]; then
+      echo "[network] ping dns ${SPARKVM_DNS}"
+      ping -c 1 -W 2 "$SPARKVM_DNS" 2>&1 || true
+    fi
+    if [ -n "${SPARKVM_GATEWAY_IPV6:-}" ]; then
+      echo "[network] ping IPv6 gateway ${SPARKVM_GATEWAY_IPV6}"
+      ping -6 -c 1 -W 2 "$SPARKVM_GATEWAY_IPV6" 2>&1 || true
+    fi
+  else
+    echo "[network] ping command missing"
+  fi
+
+  if command -v getent >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
+    echo "[network] resolve api.github.com"
+    timeout 5 getent hosts api.github.com 2>&1 || true
+  else
+    echo "[network] getent or timeout command missing; DNS probe skipped"
+  fi
+}
+
 collect_network_diagnostics() {
   if [ "${SPARKVM_NET_ENABLED:-0}" != "1" ]; then
     return 0
@@ -266,10 +446,14 @@ collect_network_diagnostics() {
   if command -v ip >/dev/null 2>&1; then
     ip addr > /dev/console 2>&1 || true
     ip route > /dev/console 2>&1 || true
+    ip -6 route > /dev/console 2>&1 || true
   else
     echo "SparkVM: ip command missing; network diagnostics limited" > /dev/console
   fi
   cat /etc/resolv.conf > /dev/console 2>&1 || true
+  if command -v ip >/dev/null 2>&1; then
+    collect_network_probes > /dev/console 2>&1 || true
+  fi
   echo "SparkVM: network diagnostics end" > /dev/console
 
   {
@@ -279,6 +463,11 @@ collect_network_diagnostics() {
       echo ""
       echo "[network] ip route"
       ip route
+      echo ""
+      echo "[network] ip -6 route"
+      ip -6 route
+      echo ""
+      collect_network_probes
       echo ""
     else
       echo "[network] ip command missing"
@@ -291,8 +480,18 @@ collect_network_diagnostics() {
 prepare_linux_runtime
 mount_job_disk
 load_runtime_env
-configure_network
+if ! configure_network; then
+  collect_network_diagnostics
+  echo 125 > /job/results/final_exit_code
+  shutdown_vm
+fi
 collect_network_diagnostics
+
+credit_guest_entropy_seed
+if ! wait_for_guest_entropy; then
+  echo 126 > /job/results/final_exit_code
+  shutdown_vm
+fi
 
 cd /job
 
@@ -332,7 +531,7 @@ KERNEL_FILENAME = "vmlinux"
 SUPPORTED_ARCHES = {"x86_64", "aarch64"}
 REQUIRED_SETUP_TOOLS = ("curl", "tar")
 DOCTOR_TOOLS = ("docker", "dd", "mkfs.ext4", "mount", "umount", "debugfs", "ip")
-DOCTOR_NETWORK_TOOLS = ("ip",)
+DOCTOR_NETWORK_TOOLS = ("ip", "iptables", "ip6tables", "sysctl")
 
 ARCH_ALIASES = {
     "amd64": "x86_64",

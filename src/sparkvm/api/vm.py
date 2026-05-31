@@ -55,10 +55,11 @@ from ..api.rollouts import Rollout, Rollouts
 from ..core.utils import shell_quote
 from sparkvm.cli.setup import ManagedSetup
 
-from ..core.constants import BOOT_ARGS, DEFAULT_RUN_TIMEOUT_SEC, DEFAULT_SETUP_TIMEOUT_SEC, ENV_KEY_RE
+from ..core.constants import BOOT_ARGS, ENV_KEY_RE
 
 
 LOGGER = logging.getLogger("sparkvm.vm")
+FIRECRACKER_SHUTDOWN_GRACE_SEC = 5.0
 
 
 def render_env_file(env: Mapping[str, str]) -> str:
@@ -142,7 +143,7 @@ def scrub_sensitive_execution_files(worker_dir: Path) -> None:
     scrub_files_from_ext4_image(
         image_path=execution_disk_path,
         mount_base=worker_dir / "mnt",
-        rel_paths=[".sparkvm/env.sh", ".sparkvm/redact.sed"],
+        rel_paths=[".sparkvm/env.sh", ".sparkvm/redact.sed", ".sparkvm/entropy.seed"],
     )
 
 
@@ -198,8 +199,9 @@ class SparkVM:
         configure_logging(home_dir=self.config.home_dir)
         self._env = validate_env_mapping(env)
         self._disk_mib = parse_disk_to_mib(disk)
-        self._setup_timeout_sec = DEFAULT_SETUP_TIMEOUT_SEC
-        self._run_timeout_sec = DEFAULT_RUN_TIMEOUT_SEC
+        phase_timeout_sec = max(1, int(self.config.timeout_sec))
+        self._setup_timeout_sec = phase_timeout_sec
+        self._run_timeout_sec = phase_timeout_sec
         self._keep_rootfs_on_failure = True
         self._keep_disk_on_failure = True
         self._setup = ManagedSetup(self.config)
@@ -447,11 +449,12 @@ class SparkVM:
             )
 
             try:
-                firecracker.wait(timeout_sec=self.config.timeout_sec)
+                firecracker.wait(timeout_sec=self.config.timeout_sec + FIRECRACKER_SHUTDOWN_GRACE_SEC)
             except subprocess.TimeoutExpired:
                 duration_ms = int((time.monotonic() - started_at) * 1000)
                 failure = JobTimeoutError(
-                    f"SparkVM run timed out after {self.config.timeout_sec:.2f}s before guest shutdown."
+                    f"SparkVM run timed out after {self.config.timeout_sec:.2f}s plus "
+                    f"{FIRECRACKER_SHUTDOWN_GRACE_SEC:.2f}s shutdown grace before guest shutdown."
                 )
                 log_event(
                     run_logger,
@@ -496,12 +499,12 @@ class SparkVM:
                         machine_specs=machine_specs,
                         completed_at=datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
                     )
-                    self._cleanup_worker_on_completion(
-                        worker_dir=worker_dir,
-                        socket_path=socket_path,
-                        firecracker=firecracker,
-                        execution_disk=execution_disk,
-                    )
+                    # self._cleanup_worker_on_completion(
+                    #     worker_dir=worker_dir,
+                    #     socket_path=socket_path,
+                    #     firecracker=firecracker,
+                    #     execution_disk=execution_disk,
+                    # )
                     if rollout_obj.delete_on_success:
                         try:
                             self._rollouts.delete(rollout_obj.id)
@@ -687,14 +690,15 @@ class SparkVM:
             finally:
                 logger.removeHandler(handler)
 
-    def _runtime_execution_files(self, *, rollout: Rollout, network_config: NetworkConfig | None) -> dict[str, str]:
+    def _runtime_execution_files(self, *, rollout: Rollout, network_config: NetworkConfig | None) -> dict[str, str | bytes]:
         del rollout
         runtime_env = render_runtime_config_file(
             setup_timeout_sec=self._setup_timeout_sec,
             run_timeout_sec=self._run_timeout_sec,
         )
-        files: dict[str, str] = {
+        files: dict[str, str | bytes] = {
             ".sparkvm/runtime.env": runtime_env,
+            ".sparkvm/entropy.seed": os.urandom(64),
         }
         if self._env:
             files[".sparkvm/env.sh"] = render_env_file(self._env)
@@ -1138,53 +1142,81 @@ class SparkVM:
             metadata["partial_results_error"] = "execution disk not present"
             return metadata
 
-        mount_base = output_results_dir.parent / "mnt"
-        mount_dir = mount_base / "rollout-partial-results-mount"
-        mounted = False
         copied_files: list[str] = []
         try:
-            ensure_dir(mount_base, exist_ok=True)
-            ensure_dir(output_results_dir, exist_ok=True)
-            run_checked(
-                ["mount", "-o", "loop,ro", str(execution_disk_path), str(mount_dir)],
-                error_factory=ExecutionDiskError,
+            copied_files = self._extract_partial_results_with_debugfs(
+                execution_disk_path=execution_disk_path,
+                output_results_dir=output_results_dir,
+                secrets=secrets,
             )
-            mounted = True
-            result_roots = [mount_dir / "results", mount_dir / "job" / "results"]
+        except Exception as exc:
+            metadata["partial_results_error"] = str(exc)
+
+        metadata["files"] = copied_files
+        metadata["partial_results_extracted"] = bool(copied_files)
+        return metadata
+
+    def _extract_partial_results_with_debugfs(
+        self,
+        *,
+        execution_disk_path: Path,
+        output_results_dir: Path,
+        secrets: Sequence[str],
+    ) -> list[str]:
+        ensure_dir(output_results_dir, exist_ok=True)
+        copied_files: list[str] = []
+        with tempfile.TemporaryDirectory(prefix="sparkvm-partial-results-") as tmp_dir_str:
+            tmp_dir = Path(tmp_dir_str)
             for filename in PARTIAL_RESULT_FILES:
-                source_path: Path | None = None
-                for root in result_roots:
-                    candidate = root / filename
-                    if candidate.exists() and candidate.is_file():
-                        source_path = candidate
+                dumped_path = tmp_dir / filename
+                found = False
+                for fs_prefix in ("/results", "/job/results"):
+                    try:
+                        found = debugfs_dump_file(
+                            execution_disk_path,
+                            f"{fs_prefix}/{filename}",
+                            dumped_path,
+                        )
+                    except Exception:
+                        found = False
+                    if found:
                         break
-                if source_path is None:
+                if not found:
                     continue
                 try:
-                    raw = read_text(source_path, encoding="utf-8", errors="replace")
+                    raw = read_text(dumped_path, encoding="utf-8", errors="replace")
                 except OSError:
                     continue
                 sanitized = redact_text(raw, secrets)
                 write_text(output_results_dir / filename, sanitized, encoding="utf-8")
                 copied_files.append(filename)
-        except Exception as exc:
-            metadata["partial_results_error"] = str(exc)
-        finally:
-            if mounted:
-                try:
-                    unmount_ext4(mount_dir)
-                except Exception as exc:
-                    if metadata.get("partial_results_error") is None:
-                        metadata["partial_results_error"] = f"failed to unmount partial results mount: {exc}"
-            if mount_dir.exists():
-                try:
-                    mount_dir.rmdir()
-                except OSError:
-                    remove_tree(mount_dir, ignore_errors=True)
+        return copied_files
 
-        metadata["files"] = copied_files
-        metadata["partial_results_extracted"] = bool(copied_files)
-        return metadata
+    def _mount_partial_results_disk(self, *, execution_disk_path: Path, mount_dir: Path) -> None:
+        ensure_dir(mount_dir, exist_ok=True)
+        if not mount_dir.is_dir():
+            raise ExecutionDiskError(f"Partial results mount path is not a directory: {mount_dir}")
+
+        errors: list[str] = []
+        for mount_options in ("loop,ro", "loop,rw"):
+            cmd = ["mount", "-o", mount_options, str(execution_disk_path), str(mount_dir)]
+            for attempt in range(2):
+                try:
+                    run_checked(cmd, error_factory=ExecutionDiskError)
+                    return
+                except ExecutionDiskError as exc:
+                    detail = str(exc)
+                    errors.append(f"{mount_options}: {detail}")
+                    lowered = detail.lower()
+                    if (
+                        attempt == 0
+                        and ("mount point does not exist" in lowered or "mountpoint does not exist" in lowered)
+                    ):
+                        ensure_dir(mount_dir, exist_ok=True)
+                        continue
+                    break
+
+        raise ExecutionDiskError("Partial results mount failed: " + " | ".join(errors))
 
     def _copy_sanitized_results_from_execution_disk(
         self,
@@ -1332,6 +1364,7 @@ class SparkVM:
                 "track_dirty_pages": False,
             },
         )
+        api.attach_entropy()
         api.put(
             "/drives/rootfs",
             {

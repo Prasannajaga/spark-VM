@@ -186,7 +186,7 @@ class ExecutionDisk:
         mount_ext4(self.path, self.mount_dir)
         self._mounted = True
 
-    def copy_rollout(self, runtime_files: dict[str, str] | None = None) -> None:
+    def copy_rollout(self, runtime_files: dict[str, str | bytes] | None = None) -> None:
         if not self.rollout.path.exists():
             raise ExecutionDiskError(f"Rollout path does not exist: {self.rollout.path}")
 

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import ipaddress
 import platform
 import pwd
 import re
@@ -26,6 +28,7 @@ from sparkvm.core.utils import has_network_privileges as network_privileges_ok
 from sparkvm.core.constants import (
     ARCH_ALIASES as _ARCH_ALIASES,
     DEFAULT_CNI_NETWORK_NAME,
+    DEFAULT_CNI_IPV6_ROUTE,
     DEFAULT_CNI_RESOLV_CONF,
     DEFAULT_CNI_ROUTE,
     DEFAULT_CNI_SUBNET,
@@ -413,21 +416,69 @@ def resolve_cni_settings() -> dict[str, str]:
 
     subnet = os.getenv("SPARKVM_CNI_SUBNET", DEFAULT_CNI_SUBNET).strip() or DEFAULT_CNI_SUBNET
     default_route = os.getenv("SPARKVM_CNI_DEFAULT_ROUTE", DEFAULT_CNI_ROUTE).strip() or DEFAULT_CNI_ROUTE
-    resolv_conf = os.getenv("SPARKVM_CNI_RESOLV_CONF", DEFAULT_CNI_RESOLV_CONF).strip() or DEFAULT_CNI_RESOLV_CONF
+    ipv6_subnet = os.getenv("SPARKVM_CNI_IPV6_SUBNET", "").strip()
+    ipv6_default_route = (
+        os.getenv("SPARKVM_CNI_IPV6_DEFAULT_ROUTE", DEFAULT_CNI_IPV6_ROUTE).strip() or DEFAULT_CNI_IPV6_ROUTE
+    )
+    resolv_conf = os.getenv("SPARKVM_CNI_RESOLV_CONF", "").strip() or default_cni_resolv_conf()
 
     return {
         "network_name": network_name,
         "cni_version": _PINNED_CNI_VERSION,
         "subnet": subnet,
         "default_route": default_route,
+        "ipv6_subnet": ipv6_subnet,
+        "ipv6_default_route": ipv6_default_route,
         "resolv_conf": resolv_conf,
     }
+
+
+def default_cni_resolv_conf() -> str:
+    resolved = Path("/run/systemd/resolve/resolv.conf")
+    if resolved.exists():
+        return str(resolved)
+    return DEFAULT_CNI_RESOLV_CONF
+
+
+def default_cni_ipv6_subnet(*, home_dir: Path | str | None, network_name: str) -> str:
+    resolved_home = resolve_home_dir(home_dir)
+    seed = f"{resolved_home.resolve()}:{network_name}".encode("utf-8")
+    digest = hashlib.sha256(seed).digest()
+    global_id = int.from_bytes(digest[:5], "big")
+    subnet_id = int.from_bytes(digest[5:7], "big")
+    network_int = (0xFD << 120) | (global_id << 80) | (subnet_id << 64)
+    return str(ipaddress.IPv6Network((network_int, 64)))
+
+
+def _env_truthy(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def sparkvm_cni_conflist(home_dir: Path | str | None = None) -> dict[str, object]:
     settings = resolve_cni_settings()
     resolved_home = resolve_home_dir(home_dir)
+    if not settings["ipv6_subnet"] and _env_truthy(os.getenv("SPARKVM_CNI_ENABLE_IPV6", "")):
+        settings["ipv6_subnet"] = default_cni_ipv6_subnet(
+            home_dir=resolved_home,
+            network_name=str(settings["network_name"]),
+        )
     ipam_data_dir = (resolved_home / "cni" / "ipam").absolute()
+    ipam: dict[str, object] = {
+        "type": "host-local",
+        "dataDir": str(ipam_data_dir),
+        "resolvConf": settings["resolv_conf"],
+    }
+    routes: list[dict[str, str]] = [{"dst": settings["default_route"]}]
+    if settings["ipv6_subnet"]:
+        ipam["ranges"] = [
+            [{"subnet": settings["subnet"]}],
+            [{"subnet": settings["ipv6_subnet"]}],
+        ]
+        routes.append({"dst": settings["ipv6_default_route"]})
+    else:
+        ipam["subnet"] = settings["subnet"]
+    ipam["routes"] = routes
+
     return {
         "name": settings["network_name"],
         "cniVersion": settings["cni_version"],
@@ -435,13 +486,7 @@ def sparkvm_cni_conflist(home_dir: Path | str | None = None) -> dict[str, object
             {
                 "type": "ptp",
                 "ipMasq": True,
-                "ipam": {
-                    "type": "host-local",
-                    "dataDir": str(ipam_data_dir),
-                    "subnet": settings["subnet"],
-                    "routes": [{"dst": settings["default_route"]}],
-                    "resolvConf": settings["resolv_conf"],
-                },
+                "ipam": ipam,
             },
             {"type": "firewall"},
             {"type": "tc-redirect-tap"},
@@ -511,7 +556,73 @@ def require_setup_tools() -> None:
 
 
 def download_with_curl(url: str, out_path: Path) -> None:
-    run_checked(["curl", "-fsSL", url, "-o", str(out_path)], error_factory=SparkVMSetupError)
+    ensure_dir(out_path.parent, exist_ok=True)
+    partial_path = out_path.with_suffix(out_path.suffix + ".part")
+    attempts: list[list[str]] = [
+        [
+            "curl",
+            "-4",
+            "--http1.1",
+            "-fL",
+            "--retry",
+            "8",
+            "--retry-all-errors",
+            "--retry-delay",
+            "2",
+            "--connect-timeout",
+            "10",
+            "--max-time",
+            "900",
+            "--continue-at",
+            "-",
+            "-o",
+            str(partial_path),
+            url,
+        ],
+        [
+            "curl",
+            "-4",
+            "-fL",
+            "--retry",
+            "8",
+            "--retry-all-errors",
+            "--retry-delay",
+            "2",
+            "--connect-timeout",
+            "10",
+            "--max-time",
+            "900",
+            "--continue-at",
+            "-",
+            "-o",
+            str(partial_path),
+            url,
+        ],
+    ]
+    if shutil.which("wget") is not None:
+        attempts.append(
+            [
+                "wget",
+                "-4",
+                "--tries=8",
+                "--timeout=15",
+                "--continue",
+                "-O",
+                str(partial_path),
+                url,
+            ]
+        )
+
+    last_error: Exception | None = None
+    for cmd in attempts:
+        try:
+            run_checked(cmd, error_factory=SparkVMSetupError)
+            partial_path.replace(out_path)
+            return
+        except Exception as exc:
+            last_error = exc
+
+    raise SparkVMSetupError(f"Failed to download {url} after multiple attempts.") from last_error
 
 
 def firecracker_release_url(arch: str) -> str:
@@ -583,7 +694,8 @@ def ensure_kernel_image(
 
     ensure_directories(paths)
     arch = normalize_arch()
-    url = _KERNEL_URLS[arch]
+    override_url = os.getenv("SPARKVM_KERNEL_URL", "").strip()
+    url = override_url or _KERNEL_URLS[arch]
     emit_progress(progress, f"Downloading kernel image for {arch}...")
 
     try:

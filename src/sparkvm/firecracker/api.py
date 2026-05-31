@@ -44,6 +44,9 @@ class FirecrackerAPIClient:
             },
         )
 
+    def attach_entropy(self) -> FirecrackerAPIResponse:
+        return self.put("/entropy", {})
+
     def _request(
         self,
         method: str,

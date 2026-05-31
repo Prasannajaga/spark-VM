@@ -17,6 +17,7 @@ ALLOWED_COMMANDS = frozenset(
         "docker",
         "e2fsck",
         "ip",
+        "ip6tables",
         "iptables",
         "mkfs.ext4",
         "mount",
