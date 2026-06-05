@@ -23,3 +23,6 @@ include = [
 
 [tool.uv]
 package = true
+
+[tool.uv.sources]
+crackersdk = { path = "external/cracker-sdk", editable = true }
