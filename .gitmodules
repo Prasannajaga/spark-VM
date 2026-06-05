@@ -1,0 +1,3 @@
+[submodule "external/cracker-sdk"]
+	path = external/cracker-sdk
+	url = https://github.com/Prasannajaga/cracker-sdk
