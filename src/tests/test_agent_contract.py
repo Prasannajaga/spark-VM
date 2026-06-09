@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import os
+from types import SimpleNamespace
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,22 +13,35 @@ from sparkvm.core.constants import BOOT_ARGS, SPARKVM_INIT_TEMPLATE
 from sparkvm.core.errors import ExecutionDiskError
 from sparkvm.core.utils import ResolvedCommand
 from sparkvm.vm import SparkVM
-from sparkvm.machine.image import RuntimeImage
 from sparkvm.machine.image_builder import BuiltImage
 from sparkvm.api.rollouts import Rollout
 from sparkvm.api.vm import SparkVM as SparkVMImpl
 from sparkvm.cli.main import run_rollout_execute
+from sparkvm.services.vm_engine import VMEngine, VMEngineConfig
 
 
-class _FakeFirecrackerAPI:
+class _FakeVMControl:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, object]]] = []
 
-    def put(self, path: str, payload: dict[str, object]) -> None:
-        self.calls.append((path, payload))
+    def configure_logger(self, *, log_path: str) -> None:
+        self.calls.append(("/logger", {"log_path": log_path}))
 
-    def attach_entropy(self) -> None:
-        self.put("/entropy", {})
+    def boot_source(self, *, kernel_image_path: str, boot_args: str) -> None:
+        self.calls.append(("/boot-source", {"kernel_image_path": kernel_image_path, "boot_args": boot_args}))
+
+    def machine(self, *, vcpu_count: int, mem_size_mib: int, smt: bool) -> None:
+        self.calls.append(("/machine-config", {"vcpu_count": vcpu_count, "mem_size_mib": mem_size_mib, "smt": smt}))
+
+    def entropy(self) -> SimpleNamespace:
+        self.calls.append(("/entropy", {}))
+        return SimpleNamespace(success=True, error=None)
+
+    def root_drive(self, *, path: str) -> None:
+        self.calls.append(("/drives/rootfs", {"path": path}))
+
+    def drive(self, *, drive_id: str, path: str) -> None:
+        self.calls.append((f"/drives/{drive_id}", {"path": path}))
 
 
 class TestAgentContract(unittest.TestCase):
@@ -173,23 +187,27 @@ class TestAgentContract(unittest.TestCase):
         self.assertEqual(64, len(files[".sparkvm/entropy.seed"]))
 
     def test_microvm_config_attaches_entropy_before_boot(self) -> None:
-        vm = SparkVMImpl(vcpu=1, memory="512M", disk="1G", timeout=1.0, network=False, env={})
-        api = _FakeFirecrackerAPI()
-        runtime_image = RuntimeImage(
-            name="test",
-            kernel_image=self.home / "images" / "vmlinux",
-            rootfs_image=self.home / "images" / "rootfs.ext4",
-            boot_args="console=ttyS0",
-        )
-
-        vm._configure_microvm(
-            api=api,  # type: ignore[arg-type]
-            runtime_image=runtime_image,
-            worker_rootfs_path=self.home / "workers" / "worker-test" / "rootfs.ext4",
+        control = _FakeVMControl()
+        engine = object.__new__(VMEngine)
+        engine._config = VMEngineConfig(
+            firecracker_bin=self.home / "bin" / "firecracker",
+            socket_path=self.home / "workers" / "worker-test" / "firecracker.sock",
+            log_path=self.home / "workers" / "worker-test" / "firecracker.log",
+            kernel_path=self.home / "images" / "vmlinux",
+            rootfs_path=self.home / "workers" / "worker-test" / "rootfs.ext4",
             execution_disk_path=self.home / "workers" / "worker-test" / "execution.ext4",
+            vcpu=1,
+            memory_mib=512,
+            boot_args="console=ttyS0",
+            namespace_name=None,
+            secure=False,
         )
+        engine._vm = control
+        engine._jailer = None
 
-        paths = [path for path, _ in api.calls]
+        engine.configure()
+
+        paths = [path for path, _ in control.calls]
         self.assertIn("/entropy", paths)
         self.assertLess(paths.index("/entropy"), paths.index("/drives/rootfs"))
 

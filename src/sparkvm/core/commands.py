@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Callable, IO
 
 
+
 # Single source of truth for host binaries SparkVM intentionally invokes.
 ALLOWED_COMMANDS = frozenset(
     {

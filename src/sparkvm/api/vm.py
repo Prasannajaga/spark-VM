@@ -9,7 +9,6 @@ import os
 import pwd
 import re
 import shlex
-import subprocess
 import tempfile
 import time
 from datetime import UTC, datetime
@@ -18,7 +17,6 @@ from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
 from ..core.commands import run_checked
-from ..firecracker.client import FirecrackerAPIClient
 from ..core.config import DEFAULT_MEMORY, DEFAULT_TIMEOUT_SEC, DEFAULT_VCPU, SparkVMConfig, build_config, parse_memory_to_mib
 from ..machine.disk import (
     ExecutionDisk,
@@ -43,7 +41,7 @@ from ..core.errors import (
     SparkVMError,
     WorkerRootfsError,
 )
-from ..firecracker.process import FirecrackerProcess
+from ..services.vm_engine import NetworkInterfaceSpec, VMEngine, VMEngineConfig
 from ..core.fsops import ensure_dir, read_text, remove_file, remove_tree, write_json_atomic, write_text
 from ..machine.image import ManagedImageResolver, RuntimeImage
 from ..core.logger import configure_logging, log_event, log_failure
@@ -59,7 +57,7 @@ from ..core.constants import BOOT_ARGS, ENV_KEY_RE
 
 
 LOGGER = logging.getLogger("sparkvm.vm")
-FIRECRACKER_SHUTDOWN_GRACE_SEC = 5.0
+FIRECRACKER_SHUTDOWN_GRACE_SEC: float = 5.0
 
 
 def render_env_file(env: Mapping[str, str]) -> str:
@@ -188,8 +186,11 @@ class SparkVM:
         disk: int | str = "4G",
         timeout: float = DEFAULT_TIMEOUT_SEC,
         network: bool = False,
+        secure: bool = True,
         env: Mapping[str, str] | None = None,
     ) -> None:
+        if not isinstance(secure, bool):
+            raise TypeError("secure must be a boolean.")
         self.config: SparkVMConfig = build_config(
             vcpu=vcpu,
             memory=memory,
@@ -204,6 +205,7 @@ class SparkVM:
         self._run_timeout_sec = phase_timeout_sec
         self._keep_rootfs_on_failure = True
         self._keep_disk_on_failure = True
+        self._secure = secure
         self._setup = ManagedSetup(self.config)
         self._images = ManagedImageResolver(self.config)
         self._rollouts = Rollouts(home_dir=self.config.home_dir)
@@ -300,7 +302,7 @@ class SparkVM:
             mount_base=mount_base,
         )
         started_at = time.monotonic()
-        firecracker: FirecrackerProcess | None = None
+        vm_engine: VMEngine | None = None
         network_config: NetworkConfig | None = None
         network_lease_id = vm_id
         failure_phase: str | None = None
@@ -413,13 +415,27 @@ class SparkVM:
             )
 
             log_event(run_logger, component="Firecracker VM", event="phase_firecracker_start", fields={"status": "begin"}, detail=True)
-            firecracker = FirecrackerProcess(
+            net_iface = (
+                NetworkInterfaceSpec(tap_name=network_config.tap_name, guest_mac=network_config.guest_mac)
+                if network_config is not None
+                else None
+            )
+            engine_config = VMEngineConfig(
                 firecracker_bin=firecracker_bin,
                 socket_path=socket_path,
                 log_path=firecracker_log_path,
+                kernel_path=runtime_image.kernel_image,
+                rootfs_path=worker_rootfs_path,
+                execution_disk_path=execution_disk_path,
+                vcpu=self.config.vcpu,
+                memory_mib=self.config.memory_mib,
+                boot_args=str(runtime_image.boot_args),
                 namespace_name=network_config.namespace_name if network_config is not None else None,
+                network_iface=net_iface,
+                secure=self._secure,
             )
-            firecracker.start(startup_timeout_sec=min(5.0, self.config.timeout_sec))
+            vm_engine = VMEngine(engine_config)
+            vm_engine.start(startup_timeout_sec=min(5.0, self.config.timeout_sec))
             log_event(
                 run_logger,
                 component="Firecracker VM",
@@ -428,18 +444,9 @@ class SparkVM:
                 detail=True,
             )
 
-            api = FirecrackerAPIClient(socket_path)
-            self._wait_for_firecracker_socket(api, firecracker, timeout_sec=self.config.timeout_sec)
             log_event(run_logger, component="Firecracker VM", event="phase_firecracker_config", fields={"status": "begin"}, detail=True)
-            self._configure_microvm(
-                api=api,
-                runtime_image=runtime_image,
-                worker_rootfs_path=worker_rootfs_path,
-                execution_disk_path=execution_disk_path,
-            )
-            if network_config is not None:
-                api.attach_network(host_dev_name=network_config.tap_name, guest_mac=network_config.guest_mac)
-            api.put("/actions", {"action_type": "InstanceStart"})
+            vm_engine.configure()
+            vm_engine.boot()
             log_event(
                 run_logger,
                 component="Firecracker VM",
@@ -449,8 +456,8 @@ class SparkVM:
             )
 
             try:
-                firecracker.wait(timeout_sec=self.config.timeout_sec + FIRECRACKER_SHUTDOWN_GRACE_SEC)
-            except subprocess.TimeoutExpired:
+                vm_engine.wait(timeout_sec=self.config.timeout_sec + FIRECRACKER_SHUTDOWN_GRACE_SEC)
+            except JobTimeoutError:
                 duration_ms = int((time.monotonic() - started_at) * 1000)
                 failure = JobTimeoutError(
                     f"SparkVM run timed out after {self.config.timeout_sec:.2f}s plus "
@@ -463,8 +470,8 @@ class SparkVM:
                     fields={"status": "failed", "duration_ms": duration_ms},
                     level="error",
                 )
-                self._cleanup_process_socket(
-                    firecracker=firecracker,
+                self._cleanup_vm_engine(
+                    vm_engine=vm_engine,
                     socket_path=socket_path,
                 )
             else:
@@ -499,12 +506,12 @@ class SparkVM:
                         machine_specs=machine_specs,
                         completed_at=datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
                     )
-                    # self._cleanup_worker_on_completion(
-                    #     worker_dir=worker_dir,
-                    #     socket_path=socket_path,
-                    #     firecracker=firecracker,
-                    #     execution_disk=execution_disk,
-                    # )
+                    self._cleanup_worker_on_completion(
+                        worker_dir=worker_dir,
+                        socket_path=socket_path,
+                        vm_engine=vm_engine,
+                        execution_disk=execution_disk,
+                    )
                     if rollout_obj.delete_on_success:
                         try:
                             self._rollouts.delete(rollout_obj.id)
@@ -549,8 +556,8 @@ class SparkVM:
                         },
                         level="warning",
                     )
-                    self._cleanup_process_socket(
-                        firecracker=firecracker,
+                    self._cleanup_vm_engine(
+                        vm_engine=vm_engine,
                         socket_path=socket_path,
                     )
                     final_result = self._preserve_worker_after_failure(
@@ -620,8 +627,8 @@ class SparkVM:
                 )
 
         if failure is not None:
-            self._cleanup_process_socket(
-                firecracker=firecracker,
+            self._cleanup_vm_engine(
+                vm_engine=vm_engine,
                 socket_path=socket_path,
             )
 
@@ -777,44 +784,12 @@ class SparkVM:
             metadata_path=metadata_path,
         )
 
-    def _wait_for_firecracker_socket(
-        self,
-        api: FirecrackerAPIClient,
-        process: FirecrackerProcess,
-        *,
-        timeout_sec: float,
-    ) -> None:
-        deadline = time.monotonic() + timeout_sec
-        while time.monotonic() < deadline:
-            exit_code = process.poll()
-            if exit_code is not None:
-                detail = self._format_firecracker_process_diagnostic(
-                    process=process,
-                    reason=f"Firecracker exited before API socket became ready (exit code {exit_code}).",
-                )
-                raise FirecrackerProcessError(detail)
-            if api.socket_path.exists():
-                try:
-                    api.get("/machine-config")
-                    return
-                except FirecrackerAPIError:
-                    pass
-            time.sleep(0.05)
-        detail = self._format_firecracker_process_diagnostic(
-            process=process,
-            reason=f"Timed out waiting for Firecracker API socket after {timeout_sec:.2f}s.",
-        )
-        raise FirecrackerProcessError(detail)
 
-    def _format_firecracker_process_diagnostic(self, *, process: FirecrackerProcess, reason: str) -> str:
-        parts = [reason, f"Socket path: {process.socket_path}"]
-        if process.log_path is not None:
-            parts.append(f"Check Firecracker log: {process.log_path}")
-            tail = self._read_log_tail(process.log_path)
-            if tail:
-                parts.append("Firecracker log tail:")
-                parts.append(tail)
-        return "\n".join(parts)
+
+    def _format_vm_engine_diagnostic(self, *, vm_engine: VMEngine | None, reason: str) -> str:
+        if vm_engine is not None:
+            return vm_engine.format_diagnostic(reason=reason)
+        return reason
 
     def _format_boot_failure(
         self,
@@ -859,6 +834,8 @@ class SparkVM:
             firecracker_log_path=firecracker_log_path,
             reason=str(error),
         )
+        if isinstance(error, JobTimeoutError):
+            return error
         if self._detect_guest_panic(firecracker_log_path):
             return GuestPanicError(message)
         return FirecrackerBootError(message)
@@ -868,14 +845,14 @@ class SparkVM:
         *,
         worker_dir: Path,
         socket_path: Path,
-        firecracker: FirecrackerProcess | None,
+        vm_engine: VMEngine | None,
         execution_disk: ExecutionDisk,
     ) -> None:
         errors: list[Exception] = []
 
-        if firecracker is not None:
+        if vm_engine is not None:
             try:
-                firecracker.stop()
+                vm_engine.stop()
             except Exception as exc:  # pragma: no cover - defensive
                 errors.append(exc)
 
@@ -898,12 +875,9 @@ class SparkVM:
         if errors:
             raise CleanupError(f"Worker cleanup failed for {worker_dir}: {errors[0]}")
 
-    def _cleanup_process_socket(self, *, firecracker: FirecrackerProcess | None, socket_path: Path) -> None:
-        if firecracker is not None:
-            try:
-                firecracker.stop()
-            except Exception:
-                pass
+    def _cleanup_vm_engine(self, *, vm_engine: VMEngine | None, socket_path: Path) -> None:
+        if vm_engine is not None:
+            vm_engine.stop()
         if socket_path.exists():
             try:
                 remove_file(socket_path, missing_ok=True)
@@ -1340,49 +1314,7 @@ class SparkVM:
             "secret_scrub_failed": secret_scrub_failed,
         }
 
-    def _configure_microvm(
-        self,
-        *,
-        api: FirecrackerAPIClient,
-        runtime_image: RuntimeImage,
-        worker_rootfs_path: Path,
-        execution_disk_path: Path,
-    ) -> None:
-        api.put(
-            "/boot-source",
-            {
-                "kernel_image_path": str(runtime_image.kernel_image),
-                "boot_args": str(runtime_image.boot_args),
-            },
-        )
-        api.put(
-            "/machine-config",
-            {
-                "vcpu_count": self.config.vcpu,
-                "mem_size_mib": self.config.memory_mib,
-                "smt": False,
-                "track_dirty_pages": False,
-            },
-        )
-        api.attach_entropy()
-        api.put(
-            "/drives/rootfs",
-            {
-                "drive_id": "rootfs",
-                "path_on_host": str(worker_rootfs_path),
-                "is_root_device": True,
-                "is_read_only": False,
-            },
-        )
-        api.put(
-            "/drives/job",
-            {
-                "drive_id": "job",
-                "path_on_host": str(execution_disk_path),
-                "is_root_device": False,
-                "is_read_only": False,
-            },
-        )
+
 
     def _assert_runtime_image_permissions(self, runtime_image: RuntimeImage) -> None:
         rootfs = runtime_image.rootfs_image

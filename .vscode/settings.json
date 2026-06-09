@@ -1,4 +1,8 @@
 {
+    "python.analysis.extraPaths": [
+        "${workspaceFolder}/src",
+        "${workspaceFolder}/external/cracker-sdk/src"
+    ],
     "workbench.colorCustomizations": {
         "activityBar.background": "#551913",
         "titleBar.activeBackground": "#77231B",

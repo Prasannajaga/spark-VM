@@ -3,9 +3,20 @@ from __future__ import annotations
 
 """Single-rollout SparkVM example using a fixed Dockerfile."""
 
+import sys
 from pathlib import Path
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+for extra_path in (
+    PROJECT_ROOT / "src",
+    PROJECT_ROOT / "external" / "cracker-sdk" / "src",
+):
+    resolved = str(extra_path)
+    if resolved not in sys.path:
+        sys.path.insert(0, resolved)
+
 from sparkvm import Rollouts, SparkVM
+from crackersdk import CrackerVM
 
 
 TEMPLATE_DOCKERFILE = (Path(__file__).resolve().parent / "simple_app/simplegithub.Dockerfile").resolve()
