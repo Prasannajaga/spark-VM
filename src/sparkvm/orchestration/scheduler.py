@@ -20,14 +20,7 @@ from ..machine.machine_config import MachineConfig
 from ..core.utils import now_utc_iso, parse_size_to_bytes
 from ..storage.query_builder import QueryBuilder
 
-DEFAULT_VM_CONFIG = {
-    "vcpu": 2,
-    "memory": "2G",
-    "disk": "4G",
-    "timeout": 60.0,
-    "network": True,
-    "env": {},
-}
+from ..core.constants import DEFAULT_VM_CONFIG
 
 
 class SparkScheduler:
@@ -72,6 +65,7 @@ class SparkScheduler:
         resolved.update(vm_config)
         env = resolved.get("env", {})
         resolved["env"] = dict(env) if isinstance(env, dict) else {}
+        resolved["secure"] = bool(resolved.get("secure", True))
         return resolved
 
     def _current_active_reservations(self, qb: QueryBuilder) -> list[dict[str, Any]]:
@@ -358,6 +352,7 @@ class SparkScheduler:
                             "disk_bytes": parse_size_to_bytes(disk),
                             "timeout_seconds": float(vm_config.get("timeout", 60.0)),
                             "network": 1 if bool(vm_config.get("network", True)) else 0,
+                            "secure": 1 if bool(vm_config.get("secure", True)) else 0,
                             "env_json": json.dumps(dict(vm_config.get("env", {})), sort_keys=True),
                             "pid": None,
                             "worker_dir": str(worker_dir),

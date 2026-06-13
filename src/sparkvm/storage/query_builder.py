@@ -7,12 +7,12 @@ from dataclasses import dataclass, field
 from typing import Any, Sequence
 
 
-_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+from ..core.constants import IDENTIFIER_RE
 
 
 @functools.lru_cache(maxsize=256)
 def _validate_identifier(name: str) -> None: 
-    if not _IDENTIFIER_RE.fullmatch(name):
+    if not IDENTIFIER_RE.fullmatch(name):
         raise ValueError(f"Unsafe SQL identifier: {name!r}")
 
 

@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import json
-import os
-import shlex
+import os 
 import shutil
 import subprocess
 import tempfile
@@ -16,8 +15,7 @@ from typing import Any
 from ..core.commands import run_checked
 from ..core.errors import RolloutBuildError, RolloutConfigError
 from ..core.fsops import ensure_dir, read_json, remove_file, write_json_atomic, write_text
-
-INIT_TEMPLATE_VERSION = "sparkvm-init-template-v1"
+from ..core.constants import INIT_TEMPLATE_VERSION
 
 
 from ..core.utils import (

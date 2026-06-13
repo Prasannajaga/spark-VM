@@ -3,6 +3,17 @@ revision = 3
 requires-python = ">=3.11"
 
 [[package]]
+name = "crackersdk"
+version = "0.1.0"
+source = { editable = "external/cracker-sdk" }
+
+[[package]]
 name = "sparkvm"
 version = "0.1.0"
 source = { editable = "." }
+dependencies = [
+    { name = "crackersdk" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "crackersdk", editable = "external/cracker-sdk" }]

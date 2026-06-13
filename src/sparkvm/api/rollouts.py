@@ -22,6 +22,7 @@ from ..storage.state_store import (
     save_rollout,
 )
 from ..core.utils import now_utc_iso, shell_quote
+from .vm_config import VMConfig
 
 
 @dataclass(frozen=True)
@@ -130,10 +131,10 @@ def validate_rollout_id(rollout_id: str) -> str:
     return candidate
 
 
-def _normalize_vm_config(raw: dict[str, Any] | None) -> dict[str, Any]:
-    data = raw or {}
+def _normalize_vm_config(raw: VMConfig | dict[str, Any] | None) -> dict[str, Any]:
+    data = raw.to_dict() if isinstance(raw, VMConfig) else raw or {}
     if not isinstance(data, dict):
-        raise RolloutConfigError("vm_config must be an object.")
+        raise RolloutConfigError("vm_config must be a VMConfig or object.")
     try:
         vcpu = int(data.get("vcpu", 2))
     except (TypeError, ValueError) as exc:
@@ -149,6 +150,7 @@ def _normalize_vm_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     if timeout <= 0:
         raise RolloutConfigError("vm_config.timeout must be > 0.")
     network = bool(data.get("network", True))
+    secure = bool(data.get("secure", True))
     env_raw = data.get("env", {})
     if not isinstance(env_raw, dict):
         raise RolloutConfigError("vm_config.env must be an object.")
@@ -159,6 +161,7 @@ def _normalize_vm_config(raw: dict[str, Any] | None) -> dict[str, Any]:
         "disk": disk,
         "timeout": timeout,
         "network": network,
+        "secure": secure,
         "env": env,
     }
 
@@ -182,7 +185,7 @@ class Rollouts:
         runtime: str = DEFAULT_RUNTIME,
         deleteOnSuccess: bool = False,
         dockerfile: str | Path = "Dockerfile",
-        vm_config: dict[str, Any] | None = None,
+        vm_config: VMConfig | dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> Rollout:
         create_started_at = time.monotonic()
@@ -504,5 +507,6 @@ class Rollouts:
 __all__ = [
     "Rollout",
     "Rollouts",
+    "VMConfig",
     "validate_rollout_id",
 ]

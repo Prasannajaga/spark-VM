@@ -2,6 +2,7 @@
 
 import re
 from pathlib import Path
+import os
 
 # --- Configuration Defaults ---
 DEFAULT_VCPU = 1
@@ -392,20 +393,20 @@ run_phase() {
 }
 
 collect_network_probes() {
-  if [ -n "${SPARKVM_GATEWAY:-}" ]; then
-    echo "[network] route to gateway ${SPARKVM_GATEWAY}"
-    ip route get "$SPARKVM_GATEWAY" 2>&1 || true
-  fi
+    if [ -n "${SPARKVM_GATEWAY:-}" ]; then
+      echo "[network] route to gateway ${SPARKVM_GATEWAY}"
+      ip route get "$SPARKVM_GATEWAY" 2>&1 || true
+    fi
 
-  if [ -n "${SPARKVM_DNS:-}" ]; then
-    echo "[network] route to dns ${SPARKVM_DNS}"
-    ip route get "$SPARKVM_DNS" 2>&1 || true
-  fi
+    if [ -n "${SPARKVM_DNS:-}" ]; then
+      echo "[network] route to dns ${SPARKVM_DNS}"
+      ip route get "$SPARKVM_DNS" 2>&1 || true
+    fi
 
-  if [ -n "${SPARKVM_GATEWAY_IPV6:-}" ]; then
-    echo "[network] IPv6 route to gateway ${SPARKVM_GATEWAY_IPV6}"
-    ip -6 route get "$SPARKVM_GATEWAY_IPV6" 2>&1 || true
-  fi
+    if [ -n "${SPARKVM_GATEWAY_IPV6:-}" ]; then
+      echo "[network] IPv6 route to gateway ${SPARKVM_GATEWAY_IPV6}"
+      ip -6 route get "$SPARKVM_GATEWAY_IPV6" 2>&1 || true
+    fi
 
   if command -v ping >/dev/null 2>&1; then
     if [ -n "${SPARKVM_GATEWAY:-}" ]; then
@@ -548,6 +549,115 @@ IP_CANDIDATE_PATHS = ("/sbin/ip", "/bin/ip", "/usr/sbin/ip", "/usr/bin/ip")
 SHUTDOWN_FALLBACK_PATHS = ("/sbin/poweroff", "/usr/sbin/poweroff", "/sbin/halt", "/usr/sbin/halt", "/sbin/reboot", "/usr/sbin/reboot")
 BUSYBOX_CANDIDATE_PATHS = ("/bin/busybox", "/usr/bin/busybox", "/sbin/busybox", "/usr/sbin/busybox")
 
+
+# --- Commands ---
+ALLOWED_COMMANDS = frozenset(
+    {
+        "curl", "cp", "dd", "debugfs", "docker", "e2fsck", "ip",
+        "ip6tables", "iptables", "mkfs.ext4", "mount", "rsync",
+        "sync", "sysctl", "tar", "umount", "git",
+    }
+)
+
+# --- Image Builder ---
+INIT_TEMPLATE_VERSION = "sparkvm-init-template-v1"
+
+# --- Network Manager ---
+DEFAULT_NETWORK_NAME = "sparkvm"
+DEFAULT_IFNAME = "veth0"
+DEFAULT_TAP_NAME = "tap0"
+DEFAULT_DNS = "1.1.1.1"
+HOST_RESOLV_CONF_CANDIDATES = (
+    "/run/systemd/resolve/resolv.conf",
+    "/etc/resolv.conf",
+)
+CNI_BINARIES = ("cnitool", "ptp", "host-local", "firewall", "tc-redirect-tap")
+NETWORK_DIAG_FILENAMES = {
+    "add_stdout_json": "network-add.stdout.json",
+    "add_stderr_log": "network-add.stderr.log",
+    "netns_addr_json": "network-netns-addr.json",
+    "netns_route_json": "network-netns-route.json",
+    "host_forwarding_log": "network-host-forwarding.log",
+    "del_stdout_log": "network-del.stdout.log",
+    "del_stderr_log": "network-del.stderr.log",
+}
+
+# --- VM Engine ---
+JAILED_EXECUTION_DISK_PATH = "/drives/job.ext4"
+DEFAULT_JAILER_ROOT = "/tmp/sparkvm-jailer"
+
+# --- Setup ---
+REQUIRED_CNI_BINARIES = ("cnitool", "ptp", "host-local", "firewall", "tc-redirect-tap")
+CNI_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+PINNED_CNI_VERSION = "0.4.0"
+CNI_ARCH_MAP = {
+    "x86_64": "amd64",
+    "aarch64": "arm64",
+}
+DEFAULT_CNI_PLUGINS_VERSION = os.getenv("SPARKVM_CNI_PLUGINS_VERSION", "v1.9.1").strip() or "v1.9.1"
+DEFAULT_CNITOOL_VERSION = os.getenv("SPARKVM_CNITOOL_VERSION", "v1.3.0").strip() or "v1.3.0"
+DEFAULT_TC_REDIRECT_TAP_VERSION = (
+    os.getenv("SPARKVM_TC_REDIRECT_TAP_VERSION", "v0.0.0-20250516183331-34bf829e9a5c").strip()
+    or "v0.0.0-20250516183331-34bf829e9a5c"
+)
+DEFAULT_CNITOOL_GO_VERSION = os.getenv("SPARKVM_CNITOOL_GO_VERSION", "v1.3.0").strip() or "v1.3.0"
+MANAGED_CNI_PLUGIN_BINARIES = ("ptp", "host-local", "firewall")
+
+# --- Resource Policy ---
+DEFAULT_RESOURCE_POLICY = {
+    "max_vm_cpu_percent": 80,
+    "max_vm_memory_percent": 80,
+    "max_vm_disk_percent": 80,
+    "min_host_cpu_percent": 20,
+    "min_host_memory_percent": 20,
+    "min_host_disk_percent": 20,
+}
+
+# --- Reservations ---
+ACTIVE_STATUSES = {"reserved", "starting", "running"}
+
+# --- Scheduler ---
+DEFAULT_VM_CONFIG = {
+    "vcpu": 2,
+    "memory": "2G",
+    "disk": "4G",
+    "timeout": 60.0,
+    "network": True,
+    "secure": True,
+    "env": {},
+}
+
+# --- VM API ---
+FIRECRACKER_SHUTDOWN_GRACE_SEC = 5.0
+RESULT_FS_PATHS = (
+    "/results/network.stdout.log",
+    "/results/network.stderr.log",
+    "/results/setup.stdout.log",
+    "/results/setup.stderr.log",
+    "/results/setup.exit_code",
+    "/results/run.stdout.log",
+    "/results/run.stderr.log",
+    "/results/run.exit_code",
+    "/results/final_exit_code",
+    "/output.log",
+    "/error.log",
+    "/exit_code",
+)
+PARTIAL_RESULT_FILES = (
+    "setup.stdout.log",
+    "setup.stderr.log",
+    "setup.exit_code",
+    "run.stdout.log",
+    "run.stderr.log",
+    "run.exit_code",
+    "final_exit_code",
+    "network.stdout.log",
+    "network.stderr.log",
+)
+
+# --- Query Builder ---
+IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
 __all__ = [
     "DEFAULT_VCPU", "DEFAULT_MEMORY", "DEFAULT_TIMEOUT_SEC", "DEFAULT_RUNTIME", "DEFAULT_HOME_DIR",
     "DEFAULT_SETUP_TIMEOUT_SEC", "DEFAULT_RUN_TIMEOUT_SEC",
@@ -557,4 +667,5 @@ __all__ = [
     "BOOT_ARGS", "DEBIAN_BOOT_ARGS", "DEBIAN_MINBASE_IMAGE_ID", "SPARKVM_INIT_TEMPLATE", "INIT_TEMPLATE",
     "FIRECRACKER_VERSION", "KERNEL_FILENAME", "SUPPORTED_ARCHES", "REQUIRED_SETUP_TOOLS", "DOCTOR_TOOLS", "DOCTOR_NETWORK_TOOLS", "ARCH_ALIASES", "KERNEL_URLS",
     "IP_CANDIDATE_PATHS", "SHUTDOWN_FALLBACK_PATHS", "BUSYBOX_CANDIDATE_PATHS",
+    "ALLOWED_COMMANDS", "INIT_TEMPLATE_VERSION", "DEFAULT_NETWORK_NAME", "DEFAULT_IFNAME", "DEFAULT_TAP_NAME", "DEFAULT_DNS", "HOST_RESOLV_CONF_CANDIDATES", "CNI_BINARIES", "NETWORK_DIAG_FILENAMES", "JAILED_EXECUTION_DISK_PATH", "DEFAULT_JAILER_ROOT", "REQUIRED_CNI_BINARIES", "CNI_NAME_RE", "PINNED_CNI_VERSION", "CNI_ARCH_MAP", "DEFAULT_CNI_PLUGINS_VERSION", "DEFAULT_CNITOOL_VERSION", "DEFAULT_TC_REDIRECT_TAP_VERSION", "DEFAULT_CNITOOL_GO_VERSION", "MANAGED_CNI_PLUGIN_BINARIES", "DEFAULT_RESOURCE_POLICY", "ACTIVE_STATUSES", "DEFAULT_VM_CONFIG", "FIRECRACKER_SHUTDOWN_GRACE_SEC", "RESULT_FS_PATHS", "PARTIAL_RESULT_FILES", "IDENTIFIER_RE",
 ]

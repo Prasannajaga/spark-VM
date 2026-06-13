@@ -23,7 +23,7 @@ from sparkvm.cli.setup import (
     get_sparkvm_paths,
     run_setup_command,
 )
-from sparkvm.api.rollouts import Rollouts, validate_rollout_id
+from sparkvm.api.rollouts import Rollouts, VMConfig, validate_rollout_id
 from sparkvm.api.workers import Workers, validate_worker_id
 
 
@@ -282,14 +282,7 @@ def run_rollout_create(
         name=name,
         dockerfile=dockerfile,
         deleteOnSuccess=delete_on_success,
-        vm_config={
-            "vcpu": vcpu,
-            "memory": memory,
-            "disk": disk,
-            "timeout": timeout,
-            "network": network,
-            "env": env,
-        },
+        vm_config=VMConfig(vcpu=vcpu, memory=memory, disk=disk, timeout=timeout, network=network, env=env),
     )
     print(json.dumps(rollout.to_metadata_entry(), indent=2, sort_keys=True))
     return 0
@@ -337,6 +330,7 @@ def run_rollout_execute(
         disk=str(vm_config["disk"]),
         timeout=float(vm_config["timeout"]),
         network=bool(vm_config["network"]),
+        secure=bool(vm_config.get("secure", True)),
         env=dict(vm_config.get("env", {})),
     )
     result = vm.run(rollout_id)

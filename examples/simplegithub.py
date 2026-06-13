@@ -1,47 +1,27 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-"""Single-rollout SparkVM example using a fixed Dockerfile."""
+"""Run the smallest Dockerfile-backed SparkVM rollout."""
 
-import sys
-from pathlib import Path
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-for extra_path in (
-    PROJECT_ROOT / "src",
-    PROJECT_ROOT / "external" / "cracker-sdk" / "src",
-):
-    resolved = str(extra_path)
-    if resolved not in sys.path:
-        sys.path.insert(0, resolved)
-
-from sparkvm import Rollouts, SparkVM
-from crackersdk import CrackerVM
+from sparkvm import Rollouts, SparkVM, VMConfig
 
 
-TEMPLATE_DOCKERFILE = (Path(__file__).resolve().parent / "simple_app/simplegithub.Dockerfile").resolve()
+VM_CONFIG = VMConfig(vcpu=1, memory="512M", disk="1G", timeout=5.0, network=False, secure=False, env={})
 
 
 def main() -> int:
     rollout = Rollouts().create(
-        name="simplegithub-single-rollout",
+        name="simplegithub-single-rollout-1",
         runtime="Dockerfile",
-        dockerfile="examples/simple_app/simplegithub.Dockerfile",    
+        dockerfile="examples/simple_app/simplegithub.Dockerfile",
         deleteOnSuccess=False,
+        vm_config=VM_CONFIG,
     )
 
-    vm = SparkVM(
-        vcpu=1,
-        memory="512M",
-        disk="2G",
-        timeout=60.0,
-        network=False,
-        env={},
-    )
-
+    vm = SparkVM(**VM_CONFIG.to_dict())
     result = vm.run(rollout.id)
 
-    print("Single rollout created:", rollout.id)
+    print("Created rollout:", rollout.id)
     print("VM status:", result.status)
     print("Exit code:", result.exit_code)
     print("Passed:", result.passed)

@@ -9,27 +9,7 @@ from typing import Callable, IO
 
 
 # Single source of truth for host binaries SparkVM intentionally invokes.
-ALLOWED_COMMANDS = frozenset(
-    {
-        "curl",
-        "cp",
-        "dd",
-        "debugfs",
-        "docker",
-        "e2fsck",
-        "ip",
-        "ip6tables",
-        "iptables",
-        "mkfs.ext4",
-        "mount",
-        "rsync",
-        "sync",
-        "sysctl",
-        "tar",
-        "umount",
-        "git",
-    }
-)
+from .constants import ALLOWED_COMMANDS
 
 
 def ensure_allowed_command(cmd: list[str], *, allow_unlisted: bool = False) -> None:
@@ -48,24 +28,48 @@ def run_checked(
     check: bool = True,
     allow_unlisted: bool = False,
 ) -> subprocess.CompletedProcess[str]:
+    import tempfile
     ensure_allowed_command(cmd, allow_unlisted=allow_unlisted)
-    run_kwargs = {
-        "cwd": str(cwd) if cwd is not None else None,
-        "check": check,
-        "capture_output": True,
-        "text": True,
-    }
-    if stdin is not None:
-        run_kwargs["stdin"] = stdin
-    try:
-        return subprocess.run(cmd, **run_kwargs)
-    except FileNotFoundError as exc:
-        raise error_factory(f"Required command not found: {cmd[0]}") from exc
-    except subprocess.CalledProcessError as exc:
-        stderr = (exc.stderr or "").strip()
-        stdout = (exc.stdout or "").strip()
-        detail = stderr or stdout or "command failed"
-        raise error_factory(f"Command failed: {' '.join(cmd)}\n{detail}") from exc
+    
+    with tempfile.SpooledTemporaryFile(max_size=1024 * 1024) as out_f, \
+         tempfile.SpooledTemporaryFile(max_size=1024 * 1024) as err_f:
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(cwd) if cwd is not None else None,
+                stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+                stdout=out_f,
+                stderr=err_f,
+            )
+            
+            stdin_bytes = None
+            if isinstance(stdin, str):
+                stdin_bytes = stdin.encode("utf-8")
+            elif isinstance(stdin, bytes):
+                stdin_bytes = stdin
+                
+            proc.communicate(input=stdin_bytes)
+            
+        except FileNotFoundError as exc:
+            raise error_factory(f"Required command not found: {cmd[0]}") from exc
+
+        def _read_tail(f) -> str:
+            f.seek(0, 2)
+            size = f.tell()
+            max_read = 2 * 1024 * 1024
+            f.seek(max(0, size - max_read))
+            return f.read().decode("utf-8", errors="replace")
+
+        stdout_str = _read_tail(out_f)
+        stderr_str = _read_tail(err_f)
+
+        if check and proc.returncode != 0:
+            detail = stderr_str.strip() or stdout_str.strip() or "command failed"
+            raise error_factory(f"Command failed: {' '.join(cmd)}\n{detail}")
+            
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=proc.returncode, stdout=stdout_str, stderr=stderr_str
+        )
 
 
 def popen_checked(

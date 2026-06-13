@@ -93,6 +93,8 @@ CREATE TABLE IF NOT EXISTS workers (
         CHECK (timeout_seconds > 0),
     network INTEGER NOT NULL DEFAULT 1
         CHECK (network IN (0, 1)),
+    secure INTEGER NOT NULL DEFAULT 1
+        CHECK (secure IN (0, 1)),
     env_json TEXT,
 
     pid INTEGER

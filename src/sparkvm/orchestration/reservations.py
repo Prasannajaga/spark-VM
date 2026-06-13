@@ -10,7 +10,7 @@ from ..core.config import resolve_home_dir
 from ..core.utils import now_utc_iso, parse_size_to_bytes
 from ..storage.repositories import ReservationRepository
 
-ACTIVE_STATUSES = {"reserved", "starting", "running"}
+from ..core.constants import ACTIVE_STATUSES
 
 
 def _repo(home_dir: str | Path | None = None) -> ReservationRepository:

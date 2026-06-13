@@ -9,6 +9,7 @@ from typing import Any
 from ..core.config import resolve_home_dir
 from ..core.fsops import write_text
 from ..storage.db import connect_db
+from ..storage.query_builder import QueryBuilder
 from ..core.errors import JobTimeoutError, WorkerNotFoundError
 from ..storage.repositories import EventRepository, RolloutRepository, WorkerRepository
 from ..storage.state_store import get_rollout
@@ -72,63 +73,135 @@ class WorkerRunner:
             "phases": phase_meta,
         }
 
-    def _finalize_rollout_on_failure(self, rollout_id: str, worker_id: str) -> None:
+    def _finalize_worker_failure(self, rollout_id: str, reservation_id: str | None, failed_status: str, failure_payload: dict[str, Any], error_type: str) -> None:
         with connect_db(self.home_dir) as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
-                row = conn.execute("SELECT * FROM rollouts WHERE id = ?", (rollout_id,)).fetchone()
-                if row is None:
-                    conn.commit()
-                    return
-                rollout = dict(row)
-                retry_count = int(rollout.get("retry_count", 0)) + 1
-                max_retries = int(rollout.get("max_retries", 3))
-                exhausted = retry_count >= max_retries
-                status = "exhausted" if exhausted else "retry_pending"
                 now = now_utc_iso()
-                conn.execute(
-                    """
-                    UPDATE rollouts
-                    SET retry_count = ?, status = ?, active_worker_id = NULL, last_worker_id = ?, completed_at = ?, updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (retry_count, status, worker_id, now, now, rollout_id),
+                qb = QueryBuilder(conn)
+                
+                # Update worker
+                failure_json = json.dumps(failure_payload, sort_keys=True)
+                qb.update(
+                    "workers",
+                    {"status": failed_status, "completed_at": now, "failure_json": failure_json, "updated_at": now},
+                    where={"id": self.worker_id}
                 )
+                
+                # Release reservation
+                if reservation_id is not None:
+                    qb.update(
+                        "reservations",
+                        {"status": "released", "updated_at": now},
+                        where={"id": reservation_id}
+                    )
+
+                # Update rollout
+                row = qb.from_table("rollouts").where(id=rollout_id).fetch_one()
+                if row is not None:
+                    rollout = dict(row)
+                    retry_count = int(rollout.get("retry_count", 0)) + 1
+                    max_retries = int(rollout.get("max_retries", 3))
+                    exhausted = retry_count >= max_retries
+                    status = "exhausted" if exhausted else "retry_pending"
+                    qb.update(
+                        "rollouts",
+                        {
+                            "retry_count": retry_count,
+                            "status": status,
+                            "active_worker_id": None,
+                            "last_worker_id": self.worker_id,
+                            "completed_at": now,
+                            "updated_at": now
+                        },
+                        where={"id": rollout_id}
+                    )
+
+                # Add events
+                worker_data = json.dumps({"rollout_id": rollout_id, "status": failed_status, "error_type": error_type})
+                rollout_data = json.dumps({"worker_id": self.worker_id, "status": failed_status, "error_type": error_type})
+                qb.insert("events", {
+                    "entity_type": "worker",
+                    "entity_id": self.worker_id,
+                    "event_type": "worker_failed",
+                    "data_json": worker_data,
+                    "created_at": now
+                })
+                qb.insert("events", {
+                    "entity_type": "rollout",
+                    "entity_id": rollout_id,
+                    "event_type": "rollout_failed",
+                    "data_json": rollout_data,
+                    "created_at": now
+                })
+                
                 conn.commit()
             except Exception:
                 conn.rollback()
                 raise
 
-    def _finalize_rollout_on_success(self, rollout_id: str, worker_id: str) -> None:
+    def _finalize_worker_success(self, rollout_id: str, reservation_id: str | None) -> None:
+        now = now_utc_iso()
         with connect_db(self.home_dir) as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
-                now = now_utc_iso()
-                conn.execute(
-                    """
-                    UPDATE rollouts
-                    SET status = 'passed', active_worker_id = NULL, last_worker_id = ?, completed_at = ?, updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (worker_id, now, now, rollout_id),
+                qb = QueryBuilder(conn)
+                
+                # Update worker
+                qb.update(
+                    "workers",
+                    {"status": "passed", "completed_at": now, "updated_at": now},
+                    where={"id": self.worker_id}
                 )
+
+                # Release reservation
+                if reservation_id is not None:
+                    qb.update(
+                        "reservations",
+                        {"status": "released", "updated_at": now},
+                        where={"id": reservation_id}
+                    )
+
+                # Update rollout
+                qb.update(
+                    "rollouts",
+                    {
+                        "status": "passed",
+                        "active_worker_id": None,
+                        "last_worker_id": self.worker_id,
+                        "completed_at": now,
+                        "updated_at": now
+                    },
+                    where={"id": rollout_id}
+                )
+
                 conn.commit()
             except Exception:
                 conn.rollback()
                 raise
 
-    def _release_reservation(self, reservation_id: str) -> None:
-        with connect_db(self.home_dir) as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            try:
-                conn.execute(
-                    "UPDATE reservations SET status = 'released', updated_at = ? WHERE id = ?",
-                    (now_utc_iso(), reservation_id),
-                )
+        try:
+            with connect_db(self.home_dir) as conn:
+                qb = QueryBuilder(conn)
+                worker_data = json.dumps({"rollout_id": rollout_id})
+                rollout_data = json.dumps({"worker_id": self.worker_id})
+                qb.insert("events", {
+                    "entity_type": "worker",
+                    "entity_id": self.worker_id,
+                    "event_type": "worker_passed",
+                    "data_json": worker_data,
+                    "created_at": now
+                })
+                qb.insert("events", {
+                    "entity_type": "rollout",
+                    "entity_id": rollout_id,
+                    "event_type": "rollout_passed",
+                    "data_json": rollout_data,
+                    "created_at": now
+                })
                 conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
+        except Exception:
+            pass
 
     def run(self) -> int:
         worker = self.workers.load_worker(self.worker_id)
@@ -149,6 +222,7 @@ class WorkerRunner:
             disk=str(worker.get("disk", "4G")),
             timeout=float(worker.get("timeout", 60.0)),
             network=bool(worker.get("network", True)),
+            secure=bool(worker.get("secure", True)),
             env=dict(worker.get("env", {})),
         )
 
@@ -170,12 +244,7 @@ class WorkerRunner:
             }
             self._write_json(self._worker_dir() / "result.json", result_payload)
             if result.passed:
-                self.worker_repo.mark_passed(self.worker_id, result_payload)
-                if reservation_id is not None:
-                    self._release_reservation(reservation_id)
-                self._finalize_rollout_on_success(rollout_id, self.worker_id)
-                self.events.add("worker", self.worker_id, "worker_passed", data={"rollout_id": rollout_id})
-                self.events.add("rollout", rollout_id, "rollout_passed", data={"worker_id": self.worker_id})
+                self._finalize_worker_success(rollout_id, reservation_id)
                 return 0
 
             failed_status = "timeout" if str(result.status) == "timeout" else "failed"
@@ -190,58 +259,21 @@ class WorkerRunner:
                 "created_at": now_utc_iso(),
             }
             self._write_json(self._worker_dir() / "failure.json", failure_payload)
-            if failed_status == "timeout":
-                self.worker_repo.mark_timeout(self.worker_id, failure_payload)
-            else:
-                self.worker_repo.mark_failed(self.worker_id, failure_payload)
-
-            if reservation_id is not None:
-                self._release_reservation(reservation_id)
-            self._finalize_rollout_on_failure(rollout_id, self.worker_id)
-            self.events.add(
-                "worker",
-                self.worker_id,
-                "worker_failed",
-                data={"rollout_id": rollout_id, "status": failed_status, "error_type": "VMRunFailed"},
-            )
-            self.events.add(
-                "rollout",
-                rollout_id,
-                "rollout_failed",
-                data={"worker_id": self.worker_id, "status": failed_status, "error_type": "VMRunFailed"},
-            )
+            self._finalize_worker_failure(rollout_id, reservation_id, failed_status, failure_payload, "VMRunFailed")
             return 1
         except Exception as exc:
             failed_status = "timeout" if isinstance(exc, JobTimeoutError) else "failed"
+            error_type = type(exc).__name__
             failure_payload = {
                 "worker_id": self.worker_id,
                 "rollout_id": rollout_id,
                 "status": failed_status,
-                "error_type": type(exc).__name__,
+                "error_type": error_type,
                 "error_message": str(exc),
                 "created_at": now_utc_iso(),
             }
             self._write_json(self._worker_dir() / "failure.json", failure_payload)
-            if failed_status == "timeout":
-                self.worker_repo.mark_timeout(self.worker_id, failure_payload)
-            else:
-                self.worker_repo.mark_failed(self.worker_id, failure_payload)
-
-            if reservation_id is not None:
-                self._release_reservation(reservation_id)
-            self._finalize_rollout_on_failure(rollout_id, self.worker_id)
-            self.events.add(
-                "worker",
-                self.worker_id,
-                "worker_failed",
-                data={"rollout_id": rollout_id, "status": failed_status, "error_type": type(exc).__name__},
-            )
-            self.events.add(
-                "rollout",
-                rollout_id,
-                "rollout_failed",
-                data={"worker_id": self.worker_id, "status": failed_status, "error_type": type(exc).__name__},
-            )
+            self._finalize_worker_failure(rollout_id, reservation_id, failed_status, failure_payload, error_type)
             return 1
 
 

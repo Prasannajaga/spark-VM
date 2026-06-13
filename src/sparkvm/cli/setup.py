@@ -26,6 +26,11 @@ from sparkvm.storage.runtime_store import RuntimeRecord, list_runtime_records
 from sparkvm.core.utils import has_network_privileges as network_privileges_ok
 
 from sparkvm.core.constants import (
+    REQUIRED_CNI_BINARIES, CNI_NAME_RE, PINNED_CNI_VERSION, CNI_ARCH_MAP,
+    DEFAULT_CNI_PLUGINS_VERSION, DEFAULT_CNITOOL_VERSION, DEFAULT_TC_REDIRECT_TAP_VERSION,
+    DEFAULT_CNITOOL_GO_VERSION, MANAGED_CNI_PLUGIN_BINARIES
+)
+from sparkvm.core.constants import (
     ARCH_ALIASES as _ARCH_ALIASES,
     DEFAULT_CNI_NETWORK_NAME,
     DEFAULT_CNI_IPV6_ROUTE,
@@ -200,25 +205,11 @@ def host_tool_status() -> dict[str, bool]:
     return {tool: shutil.which(tool) is not None for tool in sorted(tools)}
 
 
-REQUIRED_CNI_BINARIES = ("cnitool", "ptp", "host-local", "firewall", "tc-redirect-tap")
-_CNI_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
-_PINNED_CNI_VERSION = "0.4.0"
-_CNI_ARCH_MAP = {
-    "x86_64": "amd64",
-    "aarch64": "arm64",
-}
-_DEFAULT_CNI_PLUGINS_VERSION = os.getenv("SPARKVM_CNI_PLUGINS_VERSION", "v1.9.1").strip() or "v1.9.1"
-_DEFAULT_CNITOOL_VERSION = os.getenv("SPARKVM_CNITOOL_VERSION", "v1.3.0").strip() or "v1.3.0"
-_DEFAULT_TC_REDIRECT_TAP_VERSION = (
-    os.getenv("SPARKVM_TC_REDIRECT_TAP_VERSION", "v0.0.0-20250516183331-34bf829e9a5c").strip()
-    or "v0.0.0-20250516183331-34bf829e9a5c"
-)
-_DEFAULT_CNITOOL_GO_VERSION = os.getenv("SPARKVM_CNITOOL_GO_VERSION", "v1.3.0").strip() or "v1.3.0"
-_MANAGED_CNI_PLUGIN_BINARIES = ("ptp", "host-local", "firewall")
+
 
 
 def _cni_arch() -> str:
-    return _CNI_ARCH_MAP[normalize_arch()]
+    return CNI_ARCH_MAP[normalize_arch()]
 
 
 def _is_executable(path: Path) -> bool:
@@ -252,11 +243,11 @@ def _install_cni_plugins_bundle(
     force: bool = False,
     progress: Callable[[str], None] | None = None,
 ) -> bool:
-    should_install = force or any(not _is_executable(paths.cni_bin_dir / name) for name in _MANAGED_CNI_PLUGIN_BINARIES)
+    should_install = force or any(not _is_executable(paths.cni_bin_dir / name) for name in MANAGED_CNI_PLUGIN_BINARIES)
     if not should_install:
         return False
 
-    version = _DEFAULT_CNI_PLUGINS_VERSION
+    version = DEFAULT_CNI_PLUGINS_VERSION
     arch = _cni_arch()
     url = (
         "https://github.com/containernetworking/plugins/releases/download/"
@@ -267,7 +258,7 @@ def _install_cni_plugins_bundle(
         tmp_dir = Path(tmp_dir_str)
         _download_and_extract_archive(url, tmp_dir, progress=progress)
         missing_after_extract: list[str] = []
-        for binary in _MANAGED_CNI_PLUGIN_BINARIES:
+        for binary in MANAGED_CNI_PLUGIN_BINARIES:
             target = paths.cni_bin_dir / binary
             copied = _copy_binary_from_tree(tmp_dir, binary, target)
             if not copied:
@@ -289,7 +280,7 @@ def _install_cnitool_archive(
     if _is_executable(target) and not force:
         return False
 
-    version = _DEFAULT_CNITOOL_VERSION
+    version = DEFAULT_CNITOOL_VERSION
     arch = _cni_arch()
     url = (
         "https://github.com/containernetworking/cni/releases/download/"
@@ -351,7 +342,7 @@ def _install_cnitool_via_go(
     target = paths.cni_bin_dir / "cnitool"
     if _is_executable(target) and not force:
         return False
-    package = f"github.com/containernetworking/cni/cnitool@{_DEFAULT_CNITOOL_GO_VERSION}"
+    package = f"github.com/containernetworking/cni/cnitool@{DEFAULT_CNITOOL_GO_VERSION}"
     _install_go_binary(package, paths.cni_bin_dir, "cnitool", progress=progress)
     return True
 
@@ -365,7 +356,7 @@ def _install_tc_redirect_tap(
     target = paths.cni_bin_dir / "tc-redirect-tap"
     if _is_executable(target) and not force:
         return False
-    package = f"github.com/awslabs/tc-redirect-tap/cmd/tc-redirect-tap@{_DEFAULT_TC_REDIRECT_TAP_VERSION}"
+    package = f"github.com/awslabs/tc-redirect-tap/cmd/tc-redirect-tap@{DEFAULT_TC_REDIRECT_TAP_VERSION}"
     _install_go_binary(package, paths.cni_bin_dir, "tc-redirect-tap", progress=progress)
     return True
 
@@ -408,7 +399,7 @@ def ensure_cni_binaries(
 
 def resolve_cni_settings() -> dict[str, str]:
     network_name = os.getenv("SPARKVM_CNI_NETWORK_NAME", DEFAULT_CNI_NETWORK_NAME).strip() or DEFAULT_CNI_NETWORK_NAME
-    if _CNI_NAME_RE.fullmatch(network_name) is None:
+    if CNI_NAME_RE.fullmatch(network_name) is None:
         raise SparkVMSetupError(
             "Invalid SPARKVM_CNI_NETWORK_NAME. Use 1-64 chars from [A-Za-z0-9_.-], "
             "starting with alphanumeric."
@@ -424,7 +415,7 @@ def resolve_cni_settings() -> dict[str, str]:
 
     return {
         "network_name": network_name,
-        "cni_version": _PINNED_CNI_VERSION,
+        "cni_version": PINNED_CNI_VERSION,
         "subnet": subnet,
         "default_route": default_route,
         "ipv6_subnet": ipv6_subnet,

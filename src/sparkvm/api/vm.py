@@ -57,7 +57,7 @@ from ..core.constants import BOOT_ARGS, ENV_KEY_RE
 
 
 LOGGER = logging.getLogger("sparkvm.vm")
-FIRECRACKER_SHUTDOWN_GRACE_SEC: float = 5.0
+from ..core.constants import FIRECRACKER_SHUTDOWN_GRACE_SEC, RESULT_FS_PATHS, PARTIAL_RESULT_FILES
 
 
 def render_env_file(env: Mapping[str, str]) -> str:
@@ -145,32 +145,7 @@ def scrub_sensitive_execution_files(worker_dir: Path) -> None:
     )
 
 
-RESULT_FS_PATHS = (
-    "/results/network.stdout.log",
-    "/results/network.stderr.log",
-    "/results/setup.stdout.log",
-    "/results/setup.stderr.log",
-    "/results/setup.exit_code",
-    "/results/run.stdout.log",
-    "/results/run.stderr.log",
-    "/results/run.exit_code",
-    "/results/final_exit_code",
-    "/output.log",
-    "/error.log",
-    "/exit_code",
-)
 
-PARTIAL_RESULT_FILES = (
-    "setup.stdout.log",
-    "setup.stderr.log",
-    "setup.exit_code",
-    "run.stdout.log",
-    "run.stderr.log",
-    "run.exit_code",
-    "final_exit_code",
-    "network.stdout.log",
-    "network.stderr.log",
-)
 
 
 def parse_disk_to_mib(disk: int | str) -> int:
@@ -512,7 +487,7 @@ class SparkVM:
                         vm_engine=vm_engine,
                         execution_disk=execution_disk,
                     )
-                    if rollout_obj.delete_on_success:
+                    if rollout_obj.delete_on_success and self._worker_id_override is None:
                         try:
                             self._rollouts.delete(rollout_obj.id)
                             log_event(

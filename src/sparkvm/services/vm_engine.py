@@ -6,7 +6,11 @@ from pathlib import Path
 import shutil
 from typing import Protocol
 
-from crackersdk import Jailer, JailerConfig, crackerVM
+from .._submodules import ensure_crackersdk_importable
+
+ensure_crackersdk_importable()
+
+from crackersdk import Jailer, JailerConfig as SDKJailerConfig, crackerVM
 from crackersdk.errors import (
     FirecrackerAPIError as SDKAPIError,
     FirecrackerError as SDKFirecrackerError,
@@ -25,23 +29,14 @@ from ..core.errors import (
 from ..core.fsops import read_text
 
 
-JAILED_EXECUTION_DISK_PATH = "/drives/job.ext4"
+from ..core.constants import JAILED_EXECUTION_DISK_PATH, DEFAULT_JAILER_ROOT
+
+JailerConfig = SDKJailerConfig
 
 
 class _Launcher(Protocol):
     def build_command(self) -> list[str]:
         ...
-
-
-@dataclass(frozen=True)
-class JailerConfig:
-    jailer_binary: Path
-    jail_id: str
-    uid: int
-    gid: int
-    chroot_base_dir: Path
-    extra_args: tuple[str, ...] = ()
-    cleanup_on_exit: bool = True
 
 
 @dataclass(frozen=True)
@@ -87,9 +82,17 @@ class VMEngine:
             rootfs_path=str(config.rootfs_path),
             boot_args=config.boot_args,
             namespace_name=config.namespace_name,
+            workdir=str(config.socket_path.parent),
         )
-        self._jailer_config = self._resolve_jailer_config(config) if config.secure else None
-        self._jailer = self._create_jailer(self._jailer_config)
+        try:
+            self._jailer_config = self._resolve_jailer_config(config) if config.secure else None
+            self._jailer = self._create_jailer(self._jailer_config)
+        except (FileNotFoundError, ValueError) as exc:
+            raise FirecrackerProcessError(
+                "Secure SparkVM requires a valid Firecracker jailer binary. "
+                "Install jailer next to the managed firecracker binary, put it on PATH, "
+                "or pass secure=False."
+            ) from exc
         self._secure_host_execution_disk_path: Path | None = None
         self._secure_artifacts_synced = False
 
@@ -205,14 +208,7 @@ class VMEngine:
     def _create_jailer(self, config: JailerConfig | None) -> Jailer | None:
         if config is None:
             return None
-        try:
-            return Jailer(self._vm, config=config)
-        except (FileNotFoundError, ValueError) as exc:
-            raise FirecrackerProcessError(
-                "Secure SparkVM requires a valid Firecracker jailer binary. "
-                "Install jailer next to the managed firecracker binary, put it on PATH, "
-                "or pass secure=False."
-            ) from exc
+        return Jailer(self._vm, config=config)
 
     def _prepare_secure_runtime(self) -> None:
         if self._jailer is None or self._jailer_config is None:
@@ -228,7 +224,10 @@ class VMEngine:
         root_dir = Path(self._jailer.host_log_path).parent.parent
         target = root_dir / JAILED_EXECUTION_DISK_PATH.removeprefix("/")
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(self._config.execution_disk_path, target)
+        try:
+            os.link(self._config.execution_disk_path, target)
+        except OSError:
+            shutil.copy2(self._config.execution_disk_path, target)
         os.chown(target.parent, jailer_config.uid, jailer_config.gid)
         os.chown(target, jailer_config.uid, jailer_config.gid)
         self._secure_host_execution_disk_path = target
@@ -276,7 +275,8 @@ class VMEngine:
         try:
             host_disk_path = self._secure_host_execution_disk_path
             if host_disk_path is not None and host_disk_path.exists():
-                shutil.copy2(host_disk_path, self._config.execution_disk_path)
+                if host_disk_path.stat().st_ino != self._config.execution_disk_path.stat().st_ino:
+                    shutil.copy2(host_disk_path, self._config.execution_disk_path)
         except Exception:
             pass
         self._secure_artifacts_synced = True
@@ -297,13 +297,22 @@ class VMEngine:
             return config.jailer_config
 
         uid, gid = cls._default_jailer_identity()
+        chroot_base_dir = cls._default_jailer_root()
         return JailerConfig(
-            jailer_binary=cls._default_jailer_binary(config.firecracker_bin),
+            jailer_binary=str(cls._default_jailer_binary(config.firecracker_bin)),
             jail_id=cls._default_jail_id(config.socket_path),
             uid=uid,
             gid=gid,
-            chroot_base_dir=config.socket_path.parent / "jailer",
+            chroot_base_dir=str(chroot_base_dir),
+            cleanup_on_exit=True,
         )
+
+    @staticmethod
+    def _default_jailer_root() -> Path:
+        env_root = os.getenv("JAILER_ROOT")
+        if env_root is not None and env_root.strip():
+            return Path(env_root).expanduser()
+        return Path(DEFAULT_JAILER_ROOT)
 
     @staticmethod
     def _default_jailer_binary(firecracker_bin: Path) -> Path:

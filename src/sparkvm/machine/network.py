@@ -19,28 +19,16 @@ from ..core.fsops import write_json_atomic, write_text
 from ..core.utils import has_network_privileges
 from ..storage.db import state_db_path
 
-from ..core.constants import NET_SETUP_PRIVILEGE_MESSAGE
-
-
-DEFAULT_NETWORK_NAME = "sparkvm"
-DEFAULT_IFNAME = "veth0"
-DEFAULT_TAP_NAME = "tap0"
-DEFAULT_DNS = "1.1.1.1"
-HOST_RESOLV_CONF_CANDIDATES = (
-    "/run/systemd/resolve/resolv.conf",
-    "/etc/resolv.conf",
+from ..core.constants import (
+    NET_SETUP_PRIVILEGE_MESSAGE,
+    DEFAULT_NETWORK_NAME,
+    DEFAULT_IFNAME,
+    DEFAULT_TAP_NAME,
+    DEFAULT_DNS,
+    HOST_RESOLV_CONF_CANDIDATES,
+    CNI_BINARIES,
+    NETWORK_DIAG_FILENAMES,
 )
-CNI_BINARIES = ("cnitool", "ptp", "host-local", "firewall", "tc-redirect-tap")
-
-NETWORK_DIAG_FILENAMES = {
-    "add_stdout_json": "network-add.stdout.json",
-    "add_stderr_log": "network-add.stderr.log",
-    "netns_addr_json": "network-netns-addr.json",
-    "netns_route_json": "network-netns-route.json",
-    "host_forwarding_log": "network-host-forwarding.log",
-    "del_stdout_log": "network-del.stdout.log",
-    "del_stderr_log": "network-del.stderr.log",
-}
 
 
 @dataclass

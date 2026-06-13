@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 from typing import Any, Sequence
 
 from ..core.config import resolve_home_dir
 from ..core.constants import DEFAULT_MACHINE_POLICY
-from ..storage.db import connect_db
+from ..storage.db import connect_db, connect_db_readonly
 from ..storage.query_builder import QueryBuilder
 from ..core.utils import now_utc_iso
 
@@ -59,9 +60,20 @@ class RolloutRepository(BaseRepository):
             return qb.from_table("rollouts").where(name=name).order_by("created_at", "ASC").fetch_one()
 
     def list_all(self) -> list[dict[str, Any]]:
-        with connect_db(self.home_dir) as conn:
-            qb = QueryBuilder(conn)
-            return qb.from_table("rollouts").order_by("created_at", "ASC").fetch_all()
+        try:
+            with connect_db(self.home_dir) as conn:
+                qb = QueryBuilder(conn)
+                return qb.from_table("rollouts").order_by("created_at", "ASC").fetch_all()
+        except sqlite3.OperationalError:
+            pass
+        try:
+            with connect_db_readonly(self.home_dir) as conn:
+                qb = QueryBuilder(conn)
+                return qb.from_table("rollouts").order_by("created_at", "ASC").fetch_all()
+        except sqlite3.OperationalError:
+            with connect_db_readonly(self.home_dir, immutable=True) as conn:
+                qb = QueryBuilder(conn)
+                return qb.from_table("rollouts").order_by("created_at", "ASC").fetch_all()
 
     def list_by_status(self, statuses: Sequence[str]) -> list[dict[str, Any]]:
         with connect_db(self.home_dir) as conn:

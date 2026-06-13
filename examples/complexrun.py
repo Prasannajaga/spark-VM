@@ -1,33 +1,24 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-"""Complex nested SparkVM run using a fixed Dockerfile example."""
+"""Run a Dockerfile-backed SparkVM rollout that includes tests and package code."""
 
-from pathlib import Path
-
-from sparkvm import SparkVM
-from sparkvm.rollouts import Rollouts
+from sparkvm import Rollouts, SparkVM, VMConfig
 
 
-TEMPLATE_DOCKERFILE = (Path(__file__).resolve().parent / "complexrun.Dockerfile").resolve()
+VM_CONFIG = VMConfig(vcpu=2, memory="1G", disk="3G", timeout=120.0, network=False, env={})
 
 
 def main() -> int:
     rollout = Rollouts().create(
-        name="complexrun-example-sjhv",
+        name="complexrun-example",
         runtime="Dockerfile",
-        dockerfile=str(TEMPLATE_DOCKERFILE),
+        dockerfile="examples/complex_app/Dockerfile",
         deleteOnSuccess=False,
+        vm_config=VM_CONFIG,
     )
 
-    vm = SparkVM(
-        vcpu=2,
-        memory="1G",
-        disk="3G",
-        timeout=120.0,
-        network=False,
-        env={},
-    )
+    vm = SparkVM(**VM_CONFIG.to_dict())
     result = vm.run(rollout.id)
 
     print("Created rollout:", rollout.id)

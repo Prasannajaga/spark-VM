@@ -11,14 +11,7 @@ from typing import Any
 
 from ..core.errors import InvalidResourceError
 
-DEFAULT_RESOURCE_POLICY = {
-    "max_vm_cpu_percent": 80,
-    "max_vm_memory_percent": 80,
-    "max_vm_disk_percent": 80,
-    "min_host_cpu_percent": 20,
-    "min_host_memory_percent": 20,
-    "min_host_disk_percent": 20,
-}
+from ..core.constants import DEFAULT_RESOURCE_POLICY
 
 
 @dataclass(frozen=True)

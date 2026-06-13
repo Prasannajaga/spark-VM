@@ -6,6 +6,7 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Sequence
+from urllib.parse import quote
 
 from ..core.config import resolve_home_dir
 
@@ -25,6 +26,12 @@ def _apply_pragmas(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA synchronous = NORMAL;")
 
 
+def _apply_readonly_pragmas(conn: sqlite3.Connection) -> None:
+    conn.execute("PRAGMA foreign_keys = ON;")
+    conn.execute("PRAGMA busy_timeout = 5000;")
+    conn.execute("PRAGMA query_only = ON;")
+
+
 def _ensure_rollouts_columns(conn: sqlite3.Connection) -> None:
     cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(rollouts)").fetchall()}
     if "vm_config_json" not in cols:
@@ -42,6 +49,8 @@ def _ensure_workers_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE workers ADD COLUMN failure_json TEXT DEFAULT '{}'")
     if "failure_phase" not in cols:
         conn.execute("ALTER TABLE workers ADD COLUMN failure_phase TEXT")
+    if "secure" not in cols:
+        conn.execute("ALTER TABLE workers ADD COLUMN secure INTEGER NOT NULL DEFAULT 1")
 
 
 def init_db(home_dir: str | Path | None = None) -> Path:
@@ -64,6 +73,27 @@ def connect_db(home_dir: str | Path | None = None) -> Iterator[sqlite3.Connectio
     conn.row_factory = sqlite3.Row
     try:
         _apply_pragmas(conn)
+        yield conn
+    finally:
+        conn.close()
+
+
+@contextmanager
+def connect_db_readonly(
+    home_dir: str | Path | None = None,
+    *,
+    immutable: bool = False,
+) -> Iterator[sqlite3.Connection]:
+    db_path = state_db_path(home_dir)
+    if not db_path.exists():
+        raise FileNotFoundError(f"SparkVM state database not found: {db_path}")
+    uri = f"file:{quote(str(db_path), safe='/')}?mode=ro"
+    if immutable:
+        uri += "&immutable=1"
+    conn = sqlite3.connect(uri, uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        _apply_readonly_pragmas(conn)
         yield conn
     finally:
         conn.close()
@@ -100,6 +130,7 @@ __all__ = [
     "state_db_path",
     "init_db",
     "connect_db",
+    "connect_db_readonly",
     "transaction",
     "execute",
     "fetch_one",

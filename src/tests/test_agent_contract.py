@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import inspect
 import os
+import sqlite3
 from types import SimpleNamespace
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from sparkvm.rollouts import Rollouts
+from sparkvm.rollouts import Rollouts, VMConfig
 from sparkvm.core.constants import BOOT_ARGS, SPARKVM_INIT_TEMPLATE
 from sparkvm.core.errors import ExecutionDiskError
 from sparkvm.core.utils import ResolvedCommand
@@ -16,8 +17,14 @@ from sparkvm.vm import SparkVM
 from sparkvm.machine.image_builder import BuiltImage
 from sparkvm.api.rollouts import Rollout
 from sparkvm.api.vm import SparkVM as SparkVMImpl
+from sparkvm.api.workers import Workers
 from sparkvm.cli.main import run_rollout_execute
+from sparkvm.api.result import VMResult
+from sparkvm.storage.repositories import RolloutRepository
+from sparkvm.storage.state_store import save_rollout
+from sparkvm.orchestration.worker_runner import WorkerRunner
 from sparkvm.services.vm_engine import VMEngine, VMEngineConfig
+from crackersdk import JailerConfig as SDKJailerConfig
 
 
 class _FakeVMControl:
@@ -155,6 +162,39 @@ class TestAgentContract(unittest.TestCase):
         self.assertEqual(first.path, second.path)
         self.assertEqual(1, mocked_build.call_count)
 
+    def test_rollout_list_falls_back_to_readonly_state_db(self) -> None:
+        repo = RolloutRepository(self.home)
+        repo.upsert(
+            {
+                "id": "rollout-readonly",
+                "name": "readonly",
+                "runtime": "Dockerfile",
+                "dockerfile_path": "Dockerfile",
+                "rollout_dir": str(self.home / "rollouts" / "rollout-readonly"),
+                "image_path": str(self.home / "images" / "image.ext4"),
+                "delete_on_success": 0,
+                "resolved_run_command_json": "{}",
+                "runtime_image_json": "{}",
+                "vm_config_json": "{}",
+                "status": "scheduled",
+                "priority": 100,
+                "retry_count": 0,
+                "max_retries": 3,
+                "scheduled_at": "2026-01-01T00:00:00Z",
+                "started_at": None,
+                "completed_at": None,
+                "active_worker_id": None,
+                "last_worker_id": None,
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+            }
+        )
+
+        with patch("sparkvm.storage.repositories.connect_db", side_effect=sqlite3.OperationalError):
+            rows = repo.list_all()
+
+        self.assertEqual(["rollout-readonly"], [str(row["id"]) for row in rows])
+
     def test_vm_run_accepts_only_rollout_id(self) -> None:
         sig = inspect.signature(SparkVM.run)
         self.assertEqual(["self", "rollout_id"], list(sig.parameters.keys()))
@@ -210,6 +250,124 @@ class TestAgentContract(unittest.TestCase):
         paths = [path for path, _ in control.calls]
         self.assertIn("/entropy", paths)
         self.assertLess(paths.index("/entropy"), paths.index("/drives/rootfs"))
+
+    def test_vm_engine_uses_crackersdk_jailer_workdir_contract(self) -> None:
+        bin_dir = self.home / "bin"
+        bin_dir.mkdir(parents=True)
+        firecracker = bin_dir / "firecracker"
+        jailer = bin_dir / "jailer"
+        firecracker.write_text("#!/bin/sh\n", encoding="utf-8")
+        jailer.write_text("#!/bin/sh\n", encoding="utf-8")
+        firecracker.chmod(0o755)
+        jailer.chmod(0o755)
+
+        worker_dir = self.home / "workers" / "worker-test"
+        config = VMEngineConfig(
+            firecracker_bin=firecracker,
+            socket_path=worker_dir / "firecracker.sock",
+            log_path=worker_dir / "firecracker.log",
+            kernel_path=self.home / "images" / "vmlinux",
+            rootfs_path=worker_dir / "rootfs.ext4",
+            execution_disk_path=worker_dir / "execution.ext4",
+            vcpu=1,
+            memory_mib=512,
+            boot_args="console=ttyS0",
+            namespace_name=None,
+            secure=True,
+        )
+
+        with (
+            patch("sparkvm.services.vm_engine.crackerVM") as cracker_vm,
+            patch("sparkvm.services.vm_engine.Jailer") as jailer_cls,
+        ):
+            VMEngine(config)
+
+        self.assertEqual(str(worker_dir), cracker_vm.call_args.kwargs["workdir"])
+        jailer_config = jailer_cls.call_args.kwargs["config"]
+        self.assertIsInstance(jailer_config, SDKJailerConfig)
+        self.assertEqual(str(jailer), jailer_config.jailer_binary)
+        self.assertEqual("/tmp/sparkvm-jailer", jailer_config.chroot_base_dir)
+        self.assertTrue(jailer_config.cleanup_on_exit)
+
+    def test_vm_engine_prefers_jailer_root_env(self) -> None:
+        bin_dir = self.home / "bin"
+        bin_dir.mkdir(parents=True)
+        firecracker = bin_dir / "firecracker"
+        jailer = bin_dir / "jailer"
+        firecracker.write_text("#!/bin/sh\n", encoding="utf-8")
+        jailer.write_text("#!/bin/sh\n", encoding="utf-8")
+        firecracker.chmod(0o755)
+        jailer.chmod(0o755)
+
+        worker_dir = self.home / "workers" / "worker-test"
+        config = VMEngineConfig(
+            firecracker_bin=firecracker,
+            socket_path=worker_dir / "firecracker.sock",
+            log_path=worker_dir / "firecracker.log",
+            kernel_path=self.home / "images" / "vmlinux",
+            rootfs_path=worker_dir / "rootfs.ext4",
+            execution_disk_path=worker_dir / "execution.ext4",
+            vcpu=1,
+            memory_mib=512,
+            boot_args="console=ttyS0",
+            namespace_name=None,
+            secure=True,
+        )
+
+        with (
+            patch.dict(os.environ, {"JAILER_ROOT": str(self.home / "custom-jailer")}),
+            patch("sparkvm.services.vm_engine.crackerVM"),
+            patch("sparkvm.services.vm_engine.Jailer") as jailer_cls,
+        ):
+            VMEngine(config)
+
+        jailer_config = jailer_cls.call_args.kwargs["config"]
+        self.assertEqual(str(self.home / "custom-jailer"), jailer_config.chroot_base_dir)
+
+    def test_rollouts_create_accepts_vm_config_type(self) -> None:
+        os.environ["SPARKVM_HOME"] = str(self.home)
+        built = BuiltImage(
+            id="image-rollout-vmconfig",
+            rollout_id="rollout-vmconfig",
+            path=self.home / "images" / "image-rollout-vmconfig.ext4",
+            metadata_path=self.home / "images" / "image-rollout-vmconfig.json",
+            docker_image_tag="sparkvm-rollout:rollout-vmconfig",
+            resolved_run_command=ResolvedCommand(
+                source="docker_config",
+                working_dir="/workspace",
+                command="echo hi",
+                entrypoint=None,
+                cmd=["echo", "hi"],
+            ),
+            size_mb=4096,
+            created_at="2026-01-01T00:00:00Z",
+        )
+        config = VMConfig(
+            vcpu=4,
+            memory="4G",
+            disk="8G",
+            timeout=120.0,
+            network=False,
+            secure=False,
+            env={"FROM_TYPE": "1"},
+        )
+
+        with patch("pathlib.Path.cwd", return_value=self.workspace.resolve()):
+            with patch("sparkvm.rollouts.RolloutImageBuilder.build_from_dockerfile", return_value=built):
+                rollout = Rollouts().create(name="typed-config", runtime="Dockerfile", vm_config=config)
+
+        self.assertEqual(
+            {
+                "vcpu": 4,
+                "memory": "4G",
+                "disk": "8G",
+                "timeout": 120.0,
+                "network": False,
+                "secure": False,
+                "env": {"FROM_TYPE": "1"},
+            },
+            rollout.vm_config,
+        )
 
     def test_default_boot_args_trust_cpu_entropy(self) -> None:
         self.assertIn("random.trust_cpu=on", BOOT_ARGS)
@@ -359,6 +517,7 @@ class TestAgentContract(unittest.TestCase):
                 "disk": "5G",
                 "timeout": 300.0,
                 "network": False,
+                "secure": False,
                 "env": {"FROM_ROLLOUT": "1"},
             },
         )
@@ -400,6 +559,108 @@ class TestAgentContract(unittest.TestCase):
         self.assertEqual(300.0, constructed["timeout"])
         self.assertEqual(3, constructed["vcpu"])
         self.assertEqual(False, constructed["network"])
+        self.assertEqual(False, constructed["secure"])
+
+    def test_worker_metadata_preserves_secure_flag(self) -> None:
+        RolloutRepository(self.home).upsert(
+            {
+                "id": "rollout-secureflag",
+                "name": "secureflag",
+                "runtime": "Dockerfile",
+                "dockerfile_path": "Dockerfile",
+                "rollout_dir": str(self.home / "rollouts" / "rollout-secureflag"),
+                "image_path": str(self.home / "images" / "image.ext4"),
+                "delete_on_success": 0,
+                "resolved_run_command_json": "{}",
+                "runtime_image_json": "{}",
+                "vm_config_json": "{}",
+                "status": "scheduled",
+                "priority": 100,
+                "retry_count": 0,
+                "max_retries": 3,
+                "scheduled_at": "2026-01-01T00:00:00Z",
+                "started_at": None,
+                "completed_at": None,
+                "active_worker_id": None,
+                "last_worker_id": None,
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+            }
+        )
+        workers = Workers(home_dir=self.home)
+
+        workers.create_worker(
+            worker_id="worker-secureflag",
+            rollout_id="rollout-secureflag",
+            reservation_id="res-secureflag",
+            attempt=1,
+            retry_of=None,
+            vm_config=VMConfig(secure=False).to_dict(),
+        )
+
+        loaded = workers.load_worker("worker-secureflag")
+        self.assertEqual(False, loaded["secure"])
+
+    def test_worker_runner_success_marks_rollout_passed(self) -> None:
+        rollout_id = "rollout-runner-success"
+        worker_id = "worker-runnersuccess"
+        created_at = "2026-01-01T00:00:00Z"
+        save_rollout(
+            {
+                "id": rollout_id,
+                "name": "runner-success",
+                "runtime": "Dockerfile",
+                "path": str(self.home / "rollouts" / rollout_id),
+                "image_path": str(self.home / "images" / "image.ext4"),
+                "deleteOnSuccess": True,
+                "created_at": created_at,
+                "dockerfile": "Dockerfile",
+                "runtime_image": {},
+                "resolved_run_command": {},
+                "vm_config": VMConfig(secure=False).to_dict(),
+                "status": "running",
+                "active_worker_id": worker_id,
+                "last_worker_id": worker_id,
+            },
+            self.home,
+        )
+        workers = Workers(home_dir=self.home)
+        workers.create_worker(
+            worker_id=worker_id,
+            rollout_id=rollout_id,
+            reservation_id="res-runnersuccess",
+            attempt=1,
+            retry_of=None,
+            vm_config=VMConfig(secure=False).to_dict(),
+            status="running",
+        )
+
+        class FakeSparkVM:
+            def __init__(self, **kwargs):  # type: ignore[no-untyped-def]
+                del kwargs
+
+            def run_as_worker(self, rollout_id_arg: str, worker_id_arg: str):  # type: ignore[no-untyped-def]
+                return VMResult(
+                    rollout_id=rollout_id_arg,
+                    rollout_name="runner-success",
+                    rollout_mode="dockerfile",
+                    runtime="Dockerfile",
+                    vm_id=worker_id_arg,
+                    status="passed",
+                    exit_code=0,
+                    duration_ms=1,
+                )
+
+        with patch("sparkvm.orchestration.worker_runner.SparkVM", FakeSparkVM):
+            exit_code = WorkerRunner(worker_id, home_dir=self.home).run()
+
+        row = RolloutRepository(self.home).get(rollout_id)
+        self.assertEqual(0, exit_code)
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertEqual("passed", row["status"])
+        self.assertIsNone(row["active_worker_id"])
+        self.assertEqual(worker_id, row["last_worker_id"])
 
 
 if __name__ == "__main__":
